@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { describe, it, expect } from "vitest";
 import { dragMatrix, applyOptimistic, reconcile } from "./transform";
+import { rotateAbout } from "../render/affine";
+import type { Affine6 } from "../render/hittest";
 
 describe("optimistic transform", () => {
   it("dragMatrix builds a translation from start→current", () => {
@@ -29,5 +31,14 @@ describe("optimistic transform", () => {
     const out = applyOptimistic(scene, [1], [1, 0, 0, 1, 7, 3]);
     expect(out.nodes[0].world).toEqual([1, 0, 0, 1, 7, 3]);
     expect(out.nodes[0].bounds.x).toBe(7);
+  });
+  it("applyOptimistic previews a rotation through world and bounds", () => {
+    const scene = {
+      nodes: [{ id: 1, bounds: { x: 0, y: 0, w: 10, h: 10 }, local: { x: 0, y: 0, w: 10, h: 10 },
+                world: [1, 0, 0, 1, 0, 0] as Affine6 }],
+    };
+    const out = applyOptimistic(scene, [1], rotateAbout(Math.PI / 4, { x: 5, y: 5 }));
+    expect(out.nodes[0].bounds.w).toBeCloseTo(10 * Math.SQRT2, 9);
+    expect(out.nodes[0].world![1]).toBeCloseTo(Math.SQRT1_2, 9);
   });
 });

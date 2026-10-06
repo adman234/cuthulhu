@@ -5,6 +5,7 @@ import * as ipc from "./ipc";
 import { Canvas2DRenderer } from "./render/Canvas2DRenderer";
 import { hitTest, type Affine6, type Scene, type ShapeGeom } from "./render/hittest";
 import { pathBounds } from "./render/pathdata";
+import { IDENTITY, compose, transformBounds } from "./render/affine";
 import { applyOptimistic, dragMatrix, type Matrix, type Pt } from "./interaction/transform";
 import { TopBar } from "./panels/TopBar";
 import { ToolRail } from "./panels/ToolRail";
@@ -80,63 +81,23 @@ function shapeGeom(kind: ShapeKindJson): ShapeGeom | undefined {
   return undefined;
 }
 
-const IDENTITY_AFFINE6: Affine6 = [1, 0, 0, 1, 0, 0];
-
-// Mirrors crates/geometry/src/affine.rs's Affine::then: "self.then(other) = apply self,
-// then other". Used to accumulate each node's local transform into its ancestors' world
-// transform on the way down the tree (self=node.transform, other=parentWorld).
-function composeThen(self: Affine6, other: Affine6): Affine6 {
-  const [a1, b1, c1, d1, e1, f1] = self;
-  const [a2, b2, c2, d2, e2, f2] = other;
-  return [
-    a2 * a1 + c2 * b1,
-    b2 * a1 + d2 * b1,
-    a2 * c1 + c2 * d1,
-    b2 * c1 + d2 * d1,
-    a2 * e1 + c2 * f1 + e2,
-    b2 * e1 + d2 * f1 + f2,
-  ];
-}
-
-function applyAffine(m: Affine6, x: number, y: number): Pt {
-  const [a, b, c, d, e, f] = m;
-  return { x: a * x + c * y + e, y: b * x + d * y + f };
-}
-
 function buildScene(doc: DocSnapshot): Scene {
   const nodes: Scene["nodes"] = [];
   const walk = (id: number, parentWorld: Affine6) => {
     const n = doc.nodes[id];
     if (!n) return;
-    const world = composeThen(n.transform, parentWorld);
+    const world = compose(n.transform, parentWorld);
     if (typeof n.kind === "object" && "Shape" in n.kind) {
-      // Full affine bounds: transform each corner of the shape's local box by the
-      // accumulated world transform and take the axis-aligned box, so committed scale
-      // (from the PropertiesPanel's W/H fields) shows up and repeated edits don't compound
-      // against stale untransformed dims. Handles rotation too, once nodes can have any
-      // (corner-transform doesn't care whether a/b/c/d came from scale or rotation).
-      const b = shapeBounds(n.kind.Shape);
-      const corners = [
-        applyAffine(world, b.x, b.y),
-        applyAffine(world, b.x + b.w, b.y),
-        applyAffine(world, b.x, b.y + b.h),
-        applyAffine(world, b.x + b.w, b.y + b.h),
-      ];
-      const xs = corners.map((c) => c.x);
-      const ys = corners.map((c) => c.y);
-      const x = Math.min(...xs);
-      const y = Math.min(...ys);
-      nodes.push({
-        id: n.id,
-        bounds: { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y },
-        shape: shapeGeom(n.kind.Shape),
-        world,
-      });
+      // `local` travels with the node so hit-testing and handles work in its own frame;
+      // `bounds` is its axis-aligned world box (all four corners, so committed scale and
+      // rotation both show up), for the marquee and the properties panel.
+      const local = shapeBounds(n.kind.Shape);
+      nodes.push({ id: n.id, bounds: transformBounds(world, local), local, shape: shapeGeom(n.kind.Shape), world });
     } else {
       for (const child of n.children) walk(child, world);
     }
   };
-  walk(doc.root, IDENTITY_AFFINE6);
+  walk(doc.root, IDENTITY);
   return { nodes };
 }
 

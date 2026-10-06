@@ -1,23 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import type { Scene } from "../render/hittest";
-export type Pt = { x: number; y: number };
-export type Matrix = [number, number, number, number, number, number]; // a b c d e f
+import type { Affine6, Scene, SceneNode } from "../render/hittest";
+import { compose, transformBounds, type Pt } from "../render/affine";
+
+export type { Pt };
+export type Matrix = Affine6; // a b c d e f
 
 export function dragMatrix(start: Pt, cur: Pt): Matrix {
   return [1, 0, 0, 1, cur.x - start.x, cur.y - start.y];
 }
+
+/** Previews `m` on the selected nodes with no round trip. Any affine, not only a translation:
+ *  handles scale and rotate through here, and the preview has to be the matrix the commit sends. */
 export function applyOptimistic(scene: Scene, ids: number[], m: Matrix): Scene {
-  return { nodes: scene.nodes.map(n =>
-    ids.includes(n.id)
-      ? {
-          ...n,
-          bounds: { ...n.bounds, x: n.bounds.x + m[4], y: n.bounds.y + m[5] },
-          world: n.world
-            ? ([n.world[0], n.world[1], n.world[2], n.world[3],
-                n.world[4] + m[4], n.world[5] + m[5]] as typeof n.world)
-            : n.world,
-        }
-      : n) };
+  return { nodes: scene.nodes.map((n) => (ids.includes(n.id) ? transformNode(n, m) : n)) };
+}
+
+function transformNode(n: SceneNode, m: Matrix): SceneNode {
+  if (n.world && n.local) {
+    const world = compose(n.world, m);
+    return { ...n, world, bounds: transformBounds(world, n.local) };
+  }
+  return { ...n, world: n.world ? compose(n.world, m) : n.world, bounds: transformBounds(m, n.bounds) };
 }
 export type DeltaOp = { op: "add" | "update" | "remove"; nodeId: number; patch?: any };
 export function reconcile(scene: Scene, delta: DeltaOp[]): Scene {

@@ -5,7 +5,10 @@ export type ShapeGeom =
   | { t: "rect"; w: number; h: number }
   | { t: "ellipse"; rx: number; ry: number }
   | { t: "path"; d: string };
-export type SceneNode = { id: number; bounds: Bounds; shape?: ShapeGeom; world?: Affine6 };
+/** `bounds` is the world-space axis-aligned box — what a marquee tests, and all a node without
+ *  geometry has. `local` is the shape's own box before `world`: what a click is tested against,
+ *  so a rotated shape is hit where it is drawn rather than across its whole bounding box. */
+export type SceneNode = { id: number; bounds: Bounds; local?: Bounds; shape?: ShapeGeom; world?: Affine6 };
 export type Scene = { nodes: SceneNode[] };
 
 export function hitTest(scene: Scene, x: number, y: number): number | null {
