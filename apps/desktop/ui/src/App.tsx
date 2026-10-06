@@ -283,27 +283,33 @@ export function App() {
   }, [selected, run, deleteSelected]);
 
   const root = doc?.root ?? 0;
-  const selectedBounds = selected.length === 1 ? (scene.nodes.find((n) => n.id === selected[0])?.bounds ?? null) : null;
+  // Bounds of a single selection in a given scene. The fields read the effective scene, which holds
+  // an unread or in-flight commit's preview, so they show (and compute from) where the shape is now.
+  const boundsIn = (s: Scene) =>
+    selected.length === 1 ? (s.nodes.find((n) => n.id === selected[0])?.bounds ?? null) : null;
+  const selectedBounds = boundsIn(interaction.effectiveScene);
 
-  const commitAxis = (axis: "x" | "y", v: number) => {
-    if (!selectedBounds) return;
-    const m: Matrix = [1, 0, 0, 1, axis === "x" ? v - selectedBounds.x : 0, axis === "y" ? v - selectedBounds.y : 0];
-    if (m[4] === 0 && m[5] === 0) return;
-    run(() => ipc.commitTransform({ ids: selected, m }));
-  };
+  // Through the hook rather than straight to commitTransform: a field edit then waits behind a
+  // commit on the wire and builds its matrix from the geometry as it stands when it is sent, not
+  // from a position the shape has already left (Copilot on #298).
+  const commitAxis = (axis: "x" | "y", v: number) =>
+    interaction.transformWith(selected, (s): Matrix | null => {
+      const b = boundsIn(s);
+      return b ? [1, 0, 0, 1, axis === "x" ? v - b.x : 0, axis === "y" ? v - b.y : 0] : null;
+    });
 
   // Scale about the bounds origin (x for width, y for height) so the opposite edge stays
   // put: translate(origin) · scale(s) · translate(-origin), i.e. [s,0,0,1, x-s*x, 0] for
   // width and [1,0,0,s, 0, y-s*y] for height.
-  const commitScale = (axis: "w" | "h", v: number) => {
-    if (!selectedBounds) return;
-    const { x, y, w, h } = selectedBounds;
-    const size = axis === "w" ? w : h;
-    if (size <= 0 || v <= 0) return;
-    const s = v / size;
-    const m: Matrix = axis === "w" ? [s, 0, 0, 1, x - s * x, 0] : [1, 0, 0, s, 0, y - s * y];
-    run(() => ipc.commitTransform({ ids: selected, m }));
-  };
+  const commitScale = (axis: "w" | "h", v: number) =>
+    interaction.transformWith(selected, (s): Matrix | null => {
+      const b = boundsIn(s);
+      if (!b) return null;
+      const size = axis === "w" ? b.w : b.h;
+      if (size <= 0 || v <= 0) return null;
+      const k = v / size;
+      return axis === "w" ? [k, 0, 0, 1, b.x - k * b.x, 0] : [1, 0, 0, k, 0, b.y - k * b.y];
+    });
 
   const cutLineType = doc ? selectionCutLineType(doc.nodes, selected) : null;
 

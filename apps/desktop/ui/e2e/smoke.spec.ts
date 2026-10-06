@@ -3181,3 +3181,40 @@ test("a Group selected in the layers panel gets a box around its shapes and comm
   const [a, b, c, d, e, f] = m;
   expect([a, b, c, d, e, f]).toEqual([2, 0, 0, 1.5, -30, 0].map((x) => expect.closeTo(x, 1)));
 });
+
+// The X/Y/W/H fields are a transform producer too: they must compute from the geometry the canvas
+// shows (an unread commit's preview included) and wait their turn behind a commit on the wire, or
+// they send a matrix built on the position the shape has already left (Copilot on #298).
+test("a property edit after an applied-but-unread commit starts from where the shape now is", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __failNextSnapshot: () => void }).__failNextSnapshot());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 20 * v.scale, 0); // lands at x = 20; refresh fails
+  await expect(page.getByText(/Edit applied, but the canvas could not be refreshed/)).toBeVisible();
+
+  await page.getByLabel("X", { exact: true }).fill("5");
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  expect((await commitLog(page))[1].m[4]).toBeCloseTo(-15, 1);
+  expect((await nodeTransform(page, 2))[4]).toBeCloseTo(5, 1);
+});
+
+test("a property edit made while a commit is in flight waits for it, then lands where it says", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 20 * v.scale, 0); // parked on the wire
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+
+  await page.getByLabel("X", { exact: true }).fill("5");
+  expect((await commitLog(page)).length).toBe(1); // queued, not sent alongside
+
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(5, 1);
+});

@@ -68,6 +68,13 @@ export type CanvasInteraction = {
   /** Draws the scene, selection and any live gesture. App calls it whenever the view, size, scene
    *  or selection changes, so those redraws cannot paint the committed scene over a gesture. */
   repaint: () => void;
+  /** The geometry the canvas shows: an unread or in-flight commit's preview, else the committed
+   *  scene. Anything that computes a transform from current positions must read this one. */
+  effectiveScene: Scene;
+  /** The one way to commit a transform from outside a canvas gesture (the X/Y/W/H fields). The
+   *  matrix is built from the effective scene when it is sent; while a commit is on the wire the
+   *  latest request waits for it, so it never starts from a position the shape has left. */
+  transformWith: (ids: number[], make: (scene: Scene) => Matrix | null) => void;
   handlers: Handlers;
 };
 
@@ -99,13 +106,16 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // Native listeners are registered once and pointer handlers run between renders; both read
   // these rather than a render's closure, so they see the selection the user just made.
   const viewRef = useRef(view);
-  const latest = useRef({ scene, selected, expand });
-  latest.current = { scene, selected, expand };
+  const latest = useRef({ scene, selected, expand, commit });
+  latest.current = { scene, selected, expand, commit };
   const pending = useRef<PendingPreview | null>(null);
   // One transform on the wire at a time. A gesture pressed while a commit is unanswered would build
   // its matrix on that commit's preview, and if the commit were refused it would land about the
   // wrong anchor. The window is one IPC round trip, so a press in it selects but does not drag.
   const inFlight = useRef(false);
+  // A property edit made while a commit is on the wire. Only the latest is kept: each one states
+  // where the shape should end up, so an older one is superseded rather than owed.
+  const queued = useRef<{ ids: number[]; make: (s: Scene) => Matrix | null } | null>(null);
   // What gestures start from and what the renderer is put back to: the in-flight preview until a
   // snapshot replaces the scene it was built on, then the committed scene. CodeRabbit on #298.
   const current = () => ({ scene: gestureScene(pending.current, latest.current.scene), selected: latest.current.selected });
@@ -265,6 +275,33 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     };
   }, [centre, requestFit, zoomBy]);
 
+  // Every transform reaches the backend through here, so all producers share the one-in-flight
+  // rule and the pending preview that stands in for an unread commit.
+  function send(ids: number[], m: Matrix) {
+    pending.current = { base: latest.current.scene, preview: applyOptimistic(current().scene, latest.current.expand(ids), m) };
+    inFlight.current = true;
+    repaint();
+    void latest.current.commit(ids, m).then((outcome) => {
+      inFlight.current = false;
+      // Applied but perhaps not re-read (its snapshot can fail): the preview is what the backend now
+      // holds, so it stays until a snapshot replaces the scene it was built on.
+      if (outcome === "refused") pending.current = null;
+      repaint();
+      const next = queued.current;
+      queued.current = null;
+      if (next) transformWith(next.ids, next.make);
+    });
+  }
+
+  function transformWith(ids: number[], make: (s: Scene) => Matrix | null) {
+    if (inFlight.current) {
+      queued.current = { ids, make };
+      return;
+    }
+    const m = make(current().scene);
+    if (m && !isIdentity(m)) send(ids, m);
+  }
+
   const onPointerDown = (e: PointerEvent<HTMLCanvasElement>) => {
     const screen = toCanvas(e.currentTarget, e.clientX, e.clientY);
     lastScreen.current = screen;
@@ -357,16 +394,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
       repaint();
       return;
     }
-    pending.current = { base: latest.current.scene, preview: applyOptimistic(current().scene, g.shapes, g.m) };
-    inFlight.current = true;
-    void commit(g.ids, g.m).then((outcome) => {
-      inFlight.current = false;
-      // Applied but perhaps not re-read (its snapshot can fail): the preview is what the backend now
-      // holds, so it stays until a snapshot replaces the scene it was built on.
-      if (outcome === "applied") return;
-      pending.current = null;
-      repaint();
-    });
+    send(g.ids, g.m);
   };
 
   const onPointerCancel = () => {
@@ -389,6 +417,8 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     cursor: cursorScreen ? screenToWorld(view, cursorScreen) : null,
     requestFit,
     repaint,
+    effectiveScene: gestureScene(pending.current, scene),
+    transformWith,
     handlers: { onPointerEnter, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onPointerLeave },
   };
 }
