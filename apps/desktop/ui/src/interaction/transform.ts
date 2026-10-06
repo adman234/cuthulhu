@@ -12,7 +12,9 @@ export function dragMatrix(start: Pt, cur: Pt): Matrix {
 /** Previews `m` on the selected nodes with no round trip. Any affine, not only a translation:
  *  handles scale and rotate through here, and the preview has to be the matrix the commit sends. */
 export function applyOptimistic(scene: Scene, ids: number[], m: Matrix): Scene {
-  return { nodes: scene.nodes.map((n) => (ids.includes(n.id) ? transformNode(n, m) : n)) };
+  // A Set, because this runs every drag frame and a marquee can select thousands.
+  const moving = new Set(ids);
+  return { nodes: scene.nodes.map((n) => (moving.has(n.id) ? transformNode(n, m) : n)) };
 }
 
 function transformNode(n: SceneNode, m: Matrix): SceneNode {

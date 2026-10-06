@@ -70,7 +70,9 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   const [size, setSize] = useState<Size>({ w: 0, h: 0 });
   // ponytail: the readout re-renders App on every pointer move. Fine at today's App size; if a
   // profile ever shows it, feed a small readout component from a ref instead of state.
-  const [cursor, setCursor] = useState<Pt | null>(null);
+  // Held in screen px and converted on render: a pan or zoom moves the world under a still
+  // pointer, and a world position stored at the last move would go stale (Copilot on #298).
+  const [cursorScreen, setCursorScreen] = useState<Pt | null>(null);
   const [fitEpoch, setFitEpoch] = useState(0);
   // Native listeners are registered once and pointer handlers run between renders; both read
   // these rather than a render's closure, so they see the selection the user just made.
@@ -143,8 +145,10 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
       // webview scrolls or page-zooms instead of the canvas.
       e.preventDefault();
       const unit = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? LINE_PX : 1;
+      const screen = toCanvas(canvas, e.clientX, e.clientY);
+      setCursorScreen(screen);
       // WebKit reports a trackpad pinch as a wheel with ctrlKey set, so one branch serves both.
-      if (e.ctrlKey || e.metaKey) zoomBy(toCanvas(canvas, e.clientX, e.clientY), wheelFactor(e.deltaY * unit));
+      if (e.ctrlKey || e.metaKey) zoomBy(screen, wheelFactor(e.deltaY * unit));
       else setView(panBy(viewRef.current, -e.deltaX * unit, -e.deltaY * unit));
     };
     canvas.addEventListener("wheel", onWheel, { passive: false });
@@ -227,7 +231,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     const screen = toCanvas(canvas, e.clientX, e.clientY);
     const v = viewRef.current;
     const p = screenToWorld(v, screen);
-    setCursor(p);
+    setCursorScreen(screen);
     const g = gesture.current;
     const r = rendererRef.current;
     if (!g) {
@@ -288,12 +292,12 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     restore();
   };
 
-  const onPointerLeave = () => setCursor(null);
+  const onPointerLeave = () => setCursorScreen(null);
 
   return {
     view,
     size,
-    cursor,
+    cursor: cursorScreen ? screenToWorld(view, cursorScreen) : null,
     requestFit,
     handlers: { onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onPointerLeave },
   };

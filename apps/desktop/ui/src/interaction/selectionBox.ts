@@ -21,7 +21,9 @@ const INSIDE_EPS = 1e-9;
 /** One node: its oriented box, so a rotated rect keeps handles on its edges. Several: the
  *  axis-aligned union of their world bounds — there is no shared orientation to keep. */
 export function selectionBox(scene: Scene, ids: number[]): Box | null {
-  const nodes = scene.nodes.filter((n) => ids.includes(n.id));
+  // A Set, because this runs on every idle pointer move and a marquee can select thousands.
+  const wanted = new Set(ids);
+  const nodes = scene.nodes.filter((n) => wanted.has(n.id));
   if (nodes.length === 0) return null;
   const only = nodes.length === 1 ? nodes[0] : null;
   if (only?.local && only.world) {

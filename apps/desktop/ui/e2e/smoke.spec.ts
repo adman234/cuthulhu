@@ -2877,3 +2877,20 @@ test("a marquee over both shapes selects both", async ({ page }) => {
 
   await expect(page.locator('[data-testid="layer-row"][data-selected="true"]')).toHaveCount(2);
 });
+
+test("the cursor readout follows a wheel pan under a still pointer", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const v0 = await fittedView(page);
+  const box = (await page.getByTestId("design-canvas").boundingBox())!;
+  const pointer = { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
+  await page.mouse.move(pointer.x, pointer.y);
+  const readY = async () => Number(/y (-?[\d.]+) mm/.exec((await page.getByTestId("status-cursor").textContent()) ?? "")?.[1]);
+  const before = await readY();
+
+  await page.mouse.wheel(0, 100); // scroll down: the view pans up, the pointer is over a lower point
+  await expect.poll(async () => (await readView(page)).ty).toBeLessThan(v0.ty);
+
+  // A readout stored at the last pointer move would still say `before`; the world moved under it.
+  await expect.poll(readY).toBeCloseTo(before + 100 / v0.scale, 0);
+});

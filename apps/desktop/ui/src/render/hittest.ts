@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import { apply, axisLengths, invert } from "./affine";
+import { apply, invert } from "./affine";
 
 export type Bounds = { x: number; y: number; w: number; h: number };
 export type Affine6 = [number, number, number, number, number, number];
@@ -31,9 +31,11 @@ function contains(n: SceneNode, x: number, y: number, tol: number): boolean {
     const inv = invert(n.world);
     if (!inv) return false;
     const q = apply(inv, { x, y });
-    const [lx, ly] = axisLengths(n.world);
-    const tx = lx > 0 ? tol / lx : 0;
-    const ty = ly > 0 ? tol / ly : 0;
+    // How far local x (and y) can move when the world point moves `tol` in any direction: the
+    // inverse's rows, not 1 / the forward axis lengths, which only agree when the axes stay
+    // perpendicular — a rotated node under a non-uniformly scaled Group is sheared.
+    const tx = tol * Math.hypot(inv[0], inv[2]);
+    const ty = tol * Math.hypot(inv[1], inv[3]);
     const b = n.local;
     return q.x >= b.x - tx && q.x <= b.x + b.w + tx && q.y >= b.y - ty && q.y <= b.y + b.h + ty;
   }

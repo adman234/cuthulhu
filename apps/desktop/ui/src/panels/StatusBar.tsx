@@ -44,7 +44,7 @@ export function StatusBar({ machine, artboard, error, status, zoomPercent, curso
       ) : null}
       <div style={{ flex: 1 }} />
       {cursor ? (
-        <span style={{ fontVariantNumeric: "tabular-nums" }}>
+        <span data-testid="status-cursor" style={{ fontVariantNumeric: "tabular-nums" }}>
           x {cursor.x.toFixed(1)}  y {cursor.y.toFixed(1)} mm
         </span>
       ) : null}
