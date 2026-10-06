@@ -29,6 +29,12 @@
 >    anchor if the commit is refused. Between the answer and the re-render, gestures start from
 >    the preview (`gestureScene` in `interaction/transform.ts`) rather than the committed scene,
 >    which still holds the old geometry until the snapshot lands (CodeRabbit, two rounds).
+> 4. **`commit` reports `"applied"` or `"refused"`, not a boolean through `run`,** and the hook owns
+>    all scene drawing through `repaint()`, which App's effect calls. A commit that landed but
+>    whose refresh failed used to revert the preview onto geometry the backend no longer had, and
+>    App's effect repainted the committed scene over a live drag on a mid-gesture pinch. Space and
+>    the zoom chords are no longer ignored on a focused button, which every toolbar click leaves
+>    behind (stage-2 review agents).
 >
 > The rename of `then` to `compose` *was* applied to the task bodies, because it was found before
 > any reviewer saw them and the original name breaks the module outright.
