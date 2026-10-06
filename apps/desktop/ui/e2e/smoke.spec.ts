@@ -113,13 +113,24 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       return {};
     },
     commit_transform: (a) => {
+      // Composed in full, as `transform_nodes` does: handles send scale and rotation, and a fake
+      // that kept only the translation passes a frontend whose preview and commit disagree. The
+      // seeded nodes sit directly under an identity Layer, so the world-space `m` composes onto
+      // the local transform with no parent conversion. Recorded so a test can read the matrix.
       const m = a.m as number[];
+      const hooks = window as unknown as { __commitTransforms?: { ids: number[]; m: number[] }[] };
+      hooks.__commitTransforms ??= [];
+      hooks.__commitTransforms.push({ ids: a.ids as number[], m });
       for (const id of a.ids as number[]) {
-        const t = doc.nodes[id]?.transform;
-        if (t) {
-          t[4] += m[4];
-          t[5] += m[5];
-        }
+        const node = doc.nodes[id];
+        if (!node) continue;
+        const [a1, b1, c1, d1, e1, f1] = node.transform;
+        const [a2, b2, c2, d2, e2, f2] = m;
+        node.transform = [
+          a2 * a1 + c2 * b1, b2 * a1 + d2 * b1,
+          a2 * c1 + c2 * d1, b2 * c1 + d2 * d1,
+          a2 * e1 + c2 * f1 + e2, b2 * e1 + d2 * f1 + f2,
+        ];
       }
       return {};
     },
@@ -2767,4 +2778,102 @@ test("trace dialog: a failed source thumbnail surfaces instead of blanking", asy
   // The trace itself still succeeded, so the dialog stays usable.
   await expect(page.getByText("1 path")).toBeVisible();
   await expect(page.getByRole("button", { name: "Insert" })).toBeEnabled();
+});
+
+// The canvas's pixels are unreadable from a test, so these turn document mm into page px with the
+// view the canvas publishes as `data-view="scale tx ty"`.
+type CanvasView = { scale: number; tx: number; ty: number };
+
+async function readView(page: Page): Promise<CanvasView> {
+  const attr = (await page.getByTestId("design-canvas").getAttribute("data-view")) ?? "";
+  const [scale, tx, ty] = attr.split(" ").map(Number);
+  return { scale, tx, ty };
+}
+
+async function fittedView(page: Page): Promise<CanvasView> {
+  await expect(page.getByTestId("design-canvas")).not.toHaveAttribute("data-view", "1 0 0");
+  return readView(page);
+}
+
+async function toPage(page: Page, v: CanvasView, mm: { x: number; y: number }) {
+  const box = await page.getByTestId("design-canvas").boundingBox();
+  if (!box) throw new Error("design canvas has no layout box");
+  return { x: box.x + mm.x * v.scale + v.tx, y: box.y + mm.y * v.scale + v.ty };
+}
+
+/** Ctrl-wheel at (the whole pixel nearest) a document point; returns the view once the zoom has
+ *  landed. Whole pixels because Chromium reports a wheel's position as integers: a fractional
+ *  target puts the pinned point up to a pixel away, and a 20× zoom turns that into twenty. */
+async function zoomInAt(page: Page, mm: { x: number; y: number }, deltaY: number): Promise<CanvasView> {
+  const before = await fittedView(page);
+  const at = await toPage(page, before, mm);
+  await page.mouse.move(Math.round(at.x), Math.round(at.y));
+  await page.keyboard.down("Control");
+  await page.mouse.wheel(0, deltaY);
+  await page.keyboard.up("Control");
+  await expect.poll(async () => (await readView(page)).scale).toBeGreaterThan(before.scale);
+  return readView(page);
+}
+
+test("Ctrl-wheel zooms about the cursor and the status bar reports it", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const v0 = await fittedView(page);
+  const zoom = page.getByTestId("status-zoom");
+  const before = parseInt((await zoom.textContent()) ?? "", 10);
+  const target = await toPage(page, v0, { x: 5, y: 5 });
+  const cursor = { x: Math.round(target.x), y: Math.round(target.y) }; // where zoomInAt puts it
+  const box = (await page.getByTestId("design-canvas").boundingBox())!;
+  const under = { x: (cursor.x - box.x - v0.tx) / v0.scale, y: (cursor.y - box.y - v0.ty) / v0.scale };
+
+  const v1 = await zoomInAt(page, { x: 5, y: 5 }, -300);
+
+  await expect.poll(async () => parseInt((await zoom.textContent()) ?? "", 10)).toBeGreaterThan(before);
+  // About the cursor: the document point that was under it is still under it.
+  const after = await toPage(page, v1, under);
+  expect(after.x).toBeCloseTo(cursor.x, 0);
+  expect(after.y).toBeCloseTo(cursor.y, 0);
+});
+
+test("dragging a corner handle commits one scale about the opposite corner", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click(); // the red 10 × 10 mm rect at the origin
+  // Far enough in that the handles are tens of px apart.
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  const se = await toPage(page, v, { x: 10, y: 10 });
+  await page.mouse.move(se.x, se.y);
+  await page.mouse.down();
+  await page.mouse.move(se.x + 10 * v.scale, se.y + 5 * v.scale, { steps: 4 });
+  await page.mouse.up();
+
+  const commits = await page.evaluate(
+    () => (window as unknown as { __commitTransforms?: { ids: number[]; m: number[] }[] }).__commitTransforms ?? [],
+  );
+  expect(commits).toHaveLength(1); // one gesture, one commit, one undo entry
+  expect(commits[0].ids).toEqual([2]);
+  // 10 → 20 mm wide, 10 → 15 mm tall, with the nw corner at the origin held still.
+  const [a, b, c, d, e, f] = commits[0].m;
+  expect(a).toBeCloseTo(2, 1);
+  expect(d).toBeCloseTo(1.5, 1);
+  for (const zero of [b, c, e, f]) expect(zero).toBeCloseTo(0, 1);
+});
+
+test("a marquee over both shapes selects both", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  // Zoomed in so the band's start point is clear of the shapes' hit tolerance. The band runs from
+  // empty space below-right up to a point inside both shapes: the shapes sit at the artboard's top
+  // edge, so after zooming there is almost no canvas above them, and a band only has to touch.
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  const from = await toPage(page, v, { x: 20, y: 20 });
+  const to = await toPage(page, v, { x: 4, y: 4 });
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(to.x, to.y, { steps: 5 });
+  await page.mouse.up();
+
+  await expect(page.locator('[data-testid="layer-row"][data-selected="true"]')).toHaveCount(2);
 });
