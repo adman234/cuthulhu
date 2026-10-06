@@ -91,6 +91,7 @@ ui/src/
     marquee.ts      NEW  rect-vs-bounds selection
     transform.ts         applyOptimistic generalised from translate to full affine
   render/
+    affine.ts       NEW  then/apply/invert/scaleAbout/rotateAbout — App.tsx's private copies, shared
     hittest.ts           local-frame test with a world-space tolerance
     Canvas2DRenderer.ts  setView(), DPR backing store, Path2D cache, handles + marquee overlay
   App.tsx                ResizeObserver on the canvas cell; pointer events -> the modules above
@@ -121,8 +122,8 @@ rebuilt and committed with the change.
   a marquee over two shapes selects both. Canvas pixels stay unread, as they are today.
 - **Manual** (`MANUAL-CHECKLIST.md`): pinch and two-finger pan on a Mac trackpad; crisp strokes on
   Retina; rotate a rect 30° then cut it on the Cameo and measure; pan/zoom stays smooth on a large
-  imported SVG (target: 60 fps on a 5 000-path file — a fixture is committed so the number can be
-  re-measured).
+  imported SVG (target: 60 fps on a 5 000-path file — a generator script is committed rather than
+  the file itself, so the number can be re-measured without a megabyte of SVG in history).
 
 ## Definition of done
 
