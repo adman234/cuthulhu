@@ -30,7 +30,7 @@
 | File | Responsibility after this change |
 |---|---|
 | `crates/cutplan/src/passes.rs` | Gains one test pinning that a rotation committed through `transform_nodes` plans as the rotated outline. |
-| `apps/desktop/ui/src/render/affine.ts` | **New.** `then`, `apply`, `invert`, `translate`, `scaleAbout`, `rotateAbout`, `axisLengths`, `isIdentity`, `transformBounds`. Replaces `App.tsx`'s private `composeThen`/`applyAffine`. |
+| `apps/desktop/ui/src/render/affine.ts` | **New.** `compose`, `apply`, `invert`, `translate`, `scaleAbout`, `rotateAbout`, `axisLengths`, `isIdentity`, `transformBounds`. Replaces `App.tsx`'s private `composeThen`/`applyAffine`. |
 | `apps/desktop/ui/src/render/hittest.ts` | `SceneNode.local`; hit-testing in the node's own frame with a world-mm tolerance. |
 | `apps/desktop/ui/src/render/Renderer.ts` | Interface gains `resize`, `setView`, `setOverlay`; owns the `Overlay` type. |
 | `apps/desktop/ui/src/render/Canvas2DRenderer.ts` | DPR backing store, view transform, screen-space strokes, `Path2D` cache, box/handles/marquee overlay. |
@@ -112,7 +112,7 @@ Behaviour-preserving for the app as it stands (the canvas still only translates)
 - Modify: `apps/desktop/ui/src/render/hittest.ts` (type only: add `local`), `apps/desktop/ui/src/interaction/transform.ts`, `apps/desktop/ui/src/interaction/transform.test.ts`, `apps/desktop/ui/src/App.tsx`
 
 **Interfaces:**
-- Produces: `then`, `apply`, `invert`, `translate`, `scaleAbout`, `rotateAbout`, `axisLengths`, `isIdentity`, `transformBounds`, `IDENTITY`, `Pt` from `render/affine.ts`; `SceneNode.local?: Bounds`; `applyOptimistic` for any affine.
+- Produces: `compose`, `apply`, `invert`, `translate`, `scaleAbout`, `rotateAbout`, `axisLengths`, `isIdentity`, `transformBounds`, `IDENTITY`, `Pt` from `render/affine.ts`; `SceneNode.local?: Bounds`; `applyOptimistic` for any affine.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -121,7 +121,7 @@ Behaviour-preserving for the app as it stands (the canvas still only translates)
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { describe, it, expect } from "vitest";
-import { apply, IDENTITY, invert, isIdentity, rotateAbout, scaleAbout, then, transformBounds, translate, type Pt } from "./affine";
+import { apply, IDENTITY, invert, isIdentity, rotateAbout, scaleAbout, compose, transformBounds, translate, type Pt } from "./affine";
 
 const close = (a: Pt, b: Pt) => {
   expect(a.x).toBeCloseTo(b.x, 9);
@@ -131,12 +131,12 @@ const close = (a: Pt, b: Pt) => {
 describe("affine", () => {
   it("then applies the left matrix first, as the Rust Affine::then does", () => {
     // Scale-then-translate and translate-then-scale differ; this pins which one `then` means.
-    const m = then(scaleAbout(2, 2, { x: 0, y: 0 }), translate(10, 0));
+    const m = compose(scaleAbout(2, 2, { x: 0, y: 0 }), translate(10, 0));
     close(apply(m, { x: 1, y: 1 }), { x: 12, y: 2 });
   });
 
   it("invert undoes a rotate, a non-uniform scale and a translate", () => {
-    const m = then(then(rotateAbout(0.7, { x: 3, y: 4 }), scaleAbout(2, 0.5, { x: 0, y: 0 })), translate(5, -2));
+    const m = compose(compose(rotateAbout(0.7, { x: 3, y: 4 }), scaleAbout(2, 0.5, { x: 0, y: 0 })), translate(5, -2));
     const inv = invert(m);
     expect(inv).not.toBeNull();
     close(apply(inv!, apply(m, { x: 7, y: 11 })), { x: 7, y: 11 });
@@ -202,7 +202,7 @@ export const IDENTITY: Affine6 = [1, 0, 0, 1, 0, 0];
 /** Mirrors crates/geometry/src/affine.rs's `Affine::then`: apply `self`, then `other`. The Rust
  *  order on purpose — a matrix built here crosses IPC as `commit_transform`'s `m` and is composed
  *  there by the same rule, so the two sides cannot disagree about what a gesture meant. */
-export function then(self: Affine6, other: Affine6): Affine6 {
+export function compose(self: Affine6, other: Affine6): Affine6 {
   const [a1, b1, c1, d1, e1, f1] = self;
   const [a2, b2, c2, d2, e2, f2] = other;
   return [
@@ -286,7 +286,7 @@ export type SceneNode = { id: number; bounds: Bounds; local?: Bounds; shape?: Sh
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
 import type { Affine6, Scene, SceneNode } from "../render/hittest";
-import { then, transformBounds, type Pt } from "../render/affine";
+import { compose, transformBounds, type Pt } from "../render/affine";
 
 export type { Pt };
 export type Matrix = Affine6; // a b c d e f
@@ -303,10 +303,10 @@ export function applyOptimistic(scene: Scene, ids: number[], m: Matrix): Scene {
 
 function transformNode(n: SceneNode, m: Matrix): SceneNode {
   if (n.world && n.local) {
-    const world = then(n.world, m);
+    const world = compose(n.world, m);
     return { ...n, world, bounds: transformBounds(world, n.local) };
   }
-  return { ...n, world: n.world ? then(n.world, m) : n.world, bounds: transformBounds(m, n.bounds) };
+  return { ...n, world: n.world ? compose(n.world, m) : n.world, bounds: transformBounds(m, n.bounds) };
 }
 ```
 
@@ -314,7 +314,7 @@ function transformNode(n: SceneNode, m: Matrix): SceneNode {
 
 - [ ] **Step 6: Point `App.tsx` at the shared module**
 
-Delete `composeThen`, `applyAffine` and `IDENTITY_AFFINE6` (`App.tsx:83-104`). Import `{ IDENTITY, then, transformBounds } from "./render/affine"`. Replace `buildScene` (`App.tsx:106-141`) with:
+Delete `composeThen`, `applyAffine` and `IDENTITY_AFFINE6` (`App.tsx:83-104`). Import `{ IDENTITY, compose, transformBounds } from "./render/affine"`. Replace `buildScene` (`App.tsx:106-141`) with:
 
 ```ts
 function buildScene(doc: DocSnapshot): Scene {
@@ -322,7 +322,7 @@ function buildScene(doc: DocSnapshot): Scene {
   const walk = (id: number, parentWorld: Affine6) => {
     const n = doc.nodes[id];
     if (!n) return;
-    const world = then(n.transform, parentWorld);
+    const world = compose(n.transform, parentWorld);
     if (typeof n.kind === "object" && "Shape" in n.kind) {
       // `local` travels with the node so hit-testing and handles work in its own frame;
       // `bounds` is its axis-aligned world box, for the marquee and the properties panel.
@@ -695,7 +695,7 @@ describe("handleAt", () => {
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
 import type { Affine6, Scene } from "../render/hittest";
-import { apply, invert, then, translate, type Pt } from "../render/affine";
+import { apply, invert, compose, translate, type Pt } from "../render/affine";
 
 /** The local rectangle [0, w] × [0, h], placed in world by `frame`. Gestures work in this frame,
  *  which is what lets one scale rule serve a rotated single node and an axis-aligned group alike. */
@@ -720,7 +720,7 @@ export function selectionBox(scene: Scene, ids: number[]): Box | null {
   if (nodes.length === 0) return null;
   const only = nodes.length === 1 ? nodes[0] : null;
   if (only?.local && only.world) {
-    return { frame: then(translate(only.local.x, only.local.y), only.world), w: only.local.w, h: only.local.h };
+    return { frame: compose(translate(only.local.x, only.local.y), only.world), w: only.local.w, h: only.local.h };
   }
   const x = Math.min(...nodes.map((n) => n.bounds.x));
   const y = Math.min(...nodes.map((n) => n.bounds.y));
@@ -880,7 +880,7 @@ describe("rotate", () => {
 
 ```ts
 // SPDX-License-Identifier: GPL-3.0-or-later
-import { apply, axisLengths, IDENTITY, invert, rotateAbout, scaleAbout, then, translate, type Pt } from "../render/affine";
+import { apply, axisLengths, IDENTITY, invert, rotateAbout, scaleAbout, compose, translate, type Pt } from "../render/affine";
 import type { Matrix } from "./transform";
 import { boxCenter, HANDLE_UNIT, handleLocal, type Box, type HandleKind, type ScaleHandle } from "./selectionBox";
 
@@ -936,7 +936,7 @@ function scaleMatrix(h: ScaleHandle, box: Box, start: Pt, cur: Pt, mods: Modifie
     sx = Math.max(s, floor);
     sy = sx;
   }
-  return then(then(inv, scaleAbout(sx, sy, anchor)), box.frame);
+  return compose(compose(inv, scaleAbout(sx, sy, anchor)), box.frame);
 }
 
 /** Factor that moves the handle at `grab` by `delta` while `anchor` stays put. Measured from the
@@ -1087,7 +1087,7 @@ export interface Renderer {
 // SPDX-License-Identifier: GPL-3.0-or-later
 import type { Renderer, NodeId, Overlay } from "./Renderer";
 import type { Affine6, Bounds, Scene, ShapeGeom } from "./hittest";
-import { apply, IDENTITY, then, transformBounds } from "./affine";
+import { apply, IDENTITY, compose, transformBounds } from "./affine";
 import { boxCorners, handleWorld, SCALE_HANDLES } from "../interaction/selectionBox";
 
 const FALLBACK_ACCENT = "#22D3EE";
@@ -1186,7 +1186,7 @@ export class Canvas2DRenderer implements Renderer {
         // Geometry is carried to screen space before stroking, so the line is in CSS px whatever
         // the zoom or the node's own scale. Stroking under the node's transform scaled it too.
         const onScreen = new Path2D();
-        onScreen.addPath(this.localPath(node.id, node.shape), toDOMMatrix(then(node.world, view)));
+        onScreen.addPath(this.localPath(node.id, node.shape), toDOMMatrix(compose(node.world, view)));
         ctx.stroke(onScreen);
       } else {
         // Nodes without geometry (tests, mocks) keep the SP3 bounds outline.
@@ -1292,7 +1292,7 @@ git commit -m "Draw through a view with screen-constant strokes and cached paths
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent, type RefObject } from "react";
 import { hitTest, type Bounds, type Scene } from "../render/hittest";
-import { IDENTITY, isIdentity, then, type Pt } from "../render/affine";
+import { IDENTITY, isIdentity, compose, type Pt } from "../render/affine";
 import type { Canvas2DRenderer } from "../render/Canvas2DRenderer";
 import { applyOptimistic, type Matrix } from "./transform";
 import {
@@ -1545,7 +1545,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     gesture.current = { ...g, m };
     r.setScene(applyOptimistic(latest.current.scene, g.ids, m));
     r.setSelection(g.ids);
-    r.setOverlay({ box: { ...g.box, frame: then(g.box.frame, m) }, marquee: null });
+    r.setOverlay({ box: { ...g.box, frame: compose(g.box.frame, m) }, marquee: null });
     r.draw();
   };
 
