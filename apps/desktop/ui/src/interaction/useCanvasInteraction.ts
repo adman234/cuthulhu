@@ -51,6 +51,9 @@ export type CanvasInteractionArgs = {
 
 export type CommitOutcome = "applied" | "refused";
 
+/** Which property field a queued edit came from: edits to one field supersede each other. */
+export type PropertyField = "x" | "y" | "w" | "h";
+
 type Handlers = {
   onPointerEnter: () => void;
   onPointerDown: (e: PointerEvent<HTMLCanvasElement>) => void;
@@ -73,8 +76,9 @@ export type CanvasInteraction = {
   effectiveScene: Scene;
   /** The one way to commit a transform from outside a canvas gesture (the X/Y/W/H fields). The
    *  matrix is built from the effective scene when it is sent; while a commit is on the wire the
-   *  latest request waits for it, so it never starts from a position the shape has left. */
-  transformWith: (ids: number[], make: (scene: Scene) => Matrix | null) => void;
+   *  edit waits behind it (the latest per field), so it never starts from a position the shape has
+   *  left. */
+  transformWith: (field: PropertyField, ids: number[], make: (scene: Scene) => Matrix | null) => void;
   handlers: Handlers;
 };
 
@@ -113,9 +117,8 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // its matrix on that commit's preview, and if the commit were refused it would land about the
   // wrong anchor. The window is one IPC round trip, so a press in it selects but does not drag.
   const inFlight = useRef(false);
-  // A property edit made while a commit is on the wire. Only the latest is kept: each one states
-  // where the shape should end up, so an older one is superseded rather than owed.
-  const queued = useRef<{ ids: number[]; make: (s: Scene) => Matrix | null } | null>(null);
+  // Property edits made while a commit is on the wire, in the order they were made.
+  const queued = useRef(new Map<string, { ids: number[]; make: (s: Scene) => Matrix | null }>());
   // What gestures start from and what the renderer is put back to: the in-flight preview until a
   // snapshot replaces the scene it was built on, then the committed scene. CodeRabbit on #298.
   const current = () => ({ scene: gestureScene(pending.current, latest.current.scene), selected: latest.current.selected });
@@ -287,19 +290,34 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
       // holds, so it stays until a snapshot replaces the scene it was built on.
       if (outcome === "refused") pending.current = null;
       repaint();
-      const next = queued.current;
-      queued.current = null;
-      if (next) transformWith(next.ids, next.make);
+      drain();
     });
   }
 
-  function transformWith(ids: number[], make: (s: Scene) => Matrix | null) {
+  function transformWith(field: PropertyField, ids: number[], make: (s: Scene) => Matrix | null) {
     if (inFlight.current) {
-      queued.current = { ids, make };
+      // Keyed by field and selection: a newer X edit replaces an older one, but an edit to Y does
+      // not replace X, since each changes only its own axis (CodeRabbit and Copilot on #298).
+      const key = `${field}:${ids.join(",")}`;
+      queued.current.delete(key);
+      queued.current.set(key, { ids, make });
       return;
     }
     const m = make(current().scene);
     if (m && !isIdentity(m)) send(ids, m);
+  }
+
+  // Sends queued edits in the order they were made, one per settled commit. An edit that comes out
+  // as no change (its field already says that) is dropped so it cannot stall the rest.
+  function drain() {
+    for (const [key, q] of queued.current) {
+      queued.current.delete(key);
+      const m = q.make(current().scene);
+      if (m && !isIdentity(m)) {
+        send(q.ids, m);
+        return;
+      }
+    }
   }
 
   const onPointerDown = (e: PointerEvent<HTMLCanvasElement>) => {

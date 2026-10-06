@@ -12,7 +12,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-06-viewport-and-handles-design.md` — read it first. It records why the view is not document state, the gesture conventions, why there is no flip-by-drag, and what is deliberately out of scope.
 
-> **Review on #298 overturned three details after this plan was written. The task bodies below
+> **Review on #298 overturned four details after this plan was written. The task bodies below
 > still state the originals and are deliberately left as they were** — this file is a record of
 > the instructions the implementation was given, not a description of what shipped. The shipped
 > behaviour is:

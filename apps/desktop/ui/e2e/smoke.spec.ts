@@ -131,10 +131,9 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       return {};
     },
     commit_transform: (a) => {
-      // Composed in full, as `transform_nodes` does: handles send scale and rotation, and a fake
-      // that kept only the translation passes a frontend whose preview and commit disagree. The
-      // seeded nodes sit directly under an identity Layer, so the world-space `m` composes onto
-      // the local transform with no parent conversion. Recorded so a test can read the matrix.
+      // Composed in full: handles send scale and rotation, and a fake that kept only the
+      // translation passes a frontend whose preview and commit disagree. Recorded so a test can
+      // read the matrix.
       if (failNextCommit) {
         failNextCommit = false;
         throw new Error("transform refused");
@@ -143,17 +142,35 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       const hooks = window as unknown as { __commitTransforms?: { ids: number[]; m: number[] }[] };
       hooks.__commitTransforms ??= [];
       hooks.__commitTransforms.push({ ids: a.ids as number[], m });
+      // Mirrors crates/document/src/commands.rs transform_nodes (L53-77): `m` is world-space, so
+      // each node's local transform becomes local · parentWorld · m · parentWorld⁻¹, and a node
+      // whose ancestor is also selected is skipped, since the ancestor already carries it.
+      // Composing `m` straight onto a nested node's local transform lands it where the real
+      // backend never would (Copilot on #298).
+      const cmp = (p: number[], q: number[]) => [
+        q[0] * p[0] + q[2] * p[1], q[1] * p[0] + q[3] * p[1],
+        q[0] * p[2] + q[2] * p[3], q[1] * p[2] + q[3] * p[3],
+        q[0] * p[4] + q[2] * p[5] + q[4], q[1] * p[4] + q[3] * p[5] + q[5],
+      ];
+      const inv = (p: number[]) => {
+        const det = p[0] * p[3] - p[1] * p[2];
+        const [ia, ib, ic, id] = [p[3] / det, -p[1] / det, -p[2] / det, p[0] / det];
+        return [ia, ib, ic, id, -(ia * p[4] + ic * p[5]), -(ib * p[4] + id * p[5])];
+      };
+      const parentOf = (id: number) => Object.values(doc.nodes).find((n) => n.children.includes(id))?.id;
+      const worldOf = (id: number | undefined): number[] =>
+        id === undefined ? [1, 0, 0, 1, 0, 0] : cmp(doc.nodes[id].transform, worldOf(parentOf(id)));
+      const selectedIds = new Set(a.ids as number[]);
+      const hasSelectedAncestor = (id: number) => {
+        for (let p = parentOf(id); p !== undefined; p = parentOf(p)) if (selectedIds.has(p)) return true;
+        return false;
+      };
       const applyIt = () => {
-        for (const id of a.ids as number[]) {
+        for (const id of selectedIds) {
           const node = doc.nodes[id];
-          if (!node) continue;
-          const [a1, b1, c1, d1, e1, f1] = node.transform;
-          const [a2, b2, c2, d2, e2, f2] = m;
-          node.transform = [
-            a2 * a1 + c2 * b1, b2 * a1 + d2 * b1,
-            a2 * c1 + c2 * d1, b2 * c1 + d2 * d1,
-            a2 * e1 + c2 * f1 + e2, b2 * e1 + d2 * f1 + f2,
-          ];
+          if (!node || hasSelectedAncestor(id)) continue;
+          const pw = worldOf(parentOf(id));
+          node.transform = cmp(cmp(cmp(node.transform, pw), m), inv(pw));
         }
         return {};
       };
@@ -3217,4 +3234,38 @@ test("a property edit made while a commit is in flight waits for it, then lands 
   await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
   await expect.poll(async () => (await commitLog(page)).length).toBe(2);
   await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(5, 1);
+});
+
+test("edits to two different fields made during an in-flight commit both land", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 20 * v.scale, 0);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+
+  // Different fields do not supersede each other: a single queue slot dropped X when Y arrived
+  // (CodeRabbit and Copilot on #298).
+  await page.getByLabel("X", { exact: true }).fill("5");
+  await page.getByLabel("Y", { exact: true }).fill("7");
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  await expect.poll(async () => (await nodeTransform(page, 2)).slice(4)).toEqual([expect.closeTo(5, 1), expect.closeTo(7, 1)]);
+});
+
+// The fake has to mirror transform_nodes for nested nodes (Copilot on #298): a scale committed on
+// a Group's child lands in the parent's space, not as if the child sat at the root.
+test("scaling a shape inside a moved Group keeps it where the real backend would", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedGroup: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").filter({ hasText: "Rectangle" }).click(); // the Group's rect
+  const v = await zoomInAt(page, { x: 35, y: 5 }, -350);
+
+  await dragBy(page, await toPage(page, v, { x: 40, y: 10 }), 10 * v.scale, 5 * v.scale);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  // World: ×2, ×1.5 about (30, 0). In the Group's space, which is translated by 30, that is a pure
+  // scale about its origin.
+  await expect.poll(async () => nodeTransform(page, 3)).toEqual([2, 0, 0, 1.5, 0, 0].map((x) => expect.closeTo(x, 1)));
 });

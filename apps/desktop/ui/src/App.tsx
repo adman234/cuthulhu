@@ -293,7 +293,7 @@ export function App() {
   // commit on the wire and builds its matrix from the geometry as it stands when it is sent, not
   // from a position the shape has already left (Copilot on #298).
   const commitAxis = (axis: "x" | "y", v: number) =>
-    interaction.transformWith(selected, (s): Matrix | null => {
+    interaction.transformWith(axis, selected, (s): Matrix | null => {
       const b = boundsIn(s);
       return b ? [1, 0, 0, 1, axis === "x" ? v - b.x : 0, axis === "y" ? v - b.y : 0] : null;
     });
@@ -302,7 +302,7 @@ export function App() {
   // put: translate(origin) · scale(s) · translate(-origin), i.e. [s,0,0,1, x-s*x, 0] for
   // width and [1,0,0,s, 0, y-s*y] for height.
   const commitScale = (axis: "w" | "h", v: number) =>
-    interaction.transformWith(selected, (s): Matrix | null => {
+    interaction.transformWith(axis, selected, (s): Matrix | null => {
       const b = boundsIn(s);
       if (!b) return null;
       const size = axis === "w" ? b.w : b.h;
