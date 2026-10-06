@@ -60,4 +60,13 @@ describe("handleAt", () => {
     const line = { frame: translate(0, 0), w: 10, h: 0 };
     expect(handleAt(line, { x: 3, y: 0 }, 0.5, 1)).toBe("move");
   });
+
+  it("offers no handle that could only scale a zero-length axis", () => {
+    // On a straight horizontal path the n and s handles sit on its midpoint and only scale its
+    // height, which is zero: claiming the press there advertised a resize that does nothing and
+    // made the midpoint undraggable (Copilot on #298). The ends still scale its length.
+    const line = { frame: translate(0, 0), w: 10, h: 0 };
+    expect(handleAt(line, { x: 5, y: 0 }, 0.5, 1)).toBe("move");
+    expect(handleAt(line, { x: 10, y: 0 }, 0.5, 1)).not.toBe("move");
+  });
 });

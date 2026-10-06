@@ -16,7 +16,10 @@ export function marqueeHits(scene: Scene, band: Bounds): number[] {
 }
 
 export function marqueeSelection(prev: number[], hits: number[], additive: boolean): number[] {
-  return additive ? [...prev, ...hits.filter((id) => !prev.includes(id))] : hits;
+  if (!additive) return hits;
+  // A Set, because a Shift-band over thousands of already-selected shapes is the fixture's case.
+  const had = new Set(prev);
+  return [...prev, ...hits.filter((id) => !had.has(id))];
 }
 
 export function toggleId(ids: number[], id: number): number[] {

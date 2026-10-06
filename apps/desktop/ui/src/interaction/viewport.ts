@@ -7,7 +7,11 @@ import type { Pt } from "../render/affine";
 export type View = { scale: number; tx: number; ty: number };
 export type Size = { w: number; h: number };
 
-/** "100%" is actual size. CSS fixes 96 px to the inch; the document is in millimetres. */
+/** "100%" is CSS reference size: 96 CSS px to the CSS inch. That is physical size only when the
+ *  display's density and the OS's scaling match the reference pixel; on most screens it is close,
+ *  not exact (Copilot on #298). The document is in millimetres.
+ *  ponytail: no per-monitor calibration. Ceiling: ⌘1 is "about real size", not ruler-exact.
+ *  Upgrade: a one-time "hold a card to the screen" calibration stored per display. */
 export const CSS_PX_PER_MM = 96 / 25.4;
 export const MAX_SCALE = 64 * CSS_PX_PER_MM; // 6400%
 export const FIT_MARGIN_PX = 24;

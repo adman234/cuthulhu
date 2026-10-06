@@ -46,8 +46,9 @@ already reach the blade correctly; this spec is UI work plus one Rust test that 
   - pinch, or ⌘/Ctrl + wheel → zoom about the cursor (WebKit reports pinch as `ctrlKey` wheel)
   - Space-drag and middle-button drag → pan
   - ⌘0 fit artboard, ⌘1 actual size, ⌘= / ⌘- step zoom
-- **"100%" means actual size**: 1 mm on screen ≈ 1 mm on the mat, at 96 CSS px per inch
-  (`25.4 / 96` mm per px). Fit is the default on launch, project open and machine switch.
+- **"100%" means CSS reference size**: 96 CSS px per CSS inch (`25.4 / 96` mm per px), which
+  is close to 1 mm on screen per 1 mm on the mat but exact only at the display's reference
+  density and OS scaling (Copilot on #298; per-monitor calibration is a follow-up). Fit is the default on launch, project open and machine switch.
   Zoom is clamped to [fit / 4, 6400%].
 - **Strokes and handles are screen-constant.** Line width, handle size and hit tolerance are
   stated in CSS px and divided by the view scale, resolving the existing ponytail.

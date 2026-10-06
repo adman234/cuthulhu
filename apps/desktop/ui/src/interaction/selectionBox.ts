@@ -58,11 +58,19 @@ export function boxCenter(box: Box): Pt {
  *  the rotate zone is only outside, where a press would otherwise do nothing. */
 export function handleAt(box: Box, p: Pt, handleTol: number, rotateTol: number): HandleKind | null {
   for (const h of SCALE_HANDLES) {
-    if (dist(handleWorld(box, h), p) <= handleTol) return h;
+    if (canScale(box, h) && dist(handleWorld(box, h), p) <= handleTol) return h;
   }
   if (inside(box, p)) return "move";
   if (boxCorners(box).some((c) => dist(c, p) <= rotateTol)) return "rotate";
   return null;
+}
+
+/** Whether `h` moves an axis the box has any length along. On a straight path the handles that
+ *  only scale its zero dimension sit on top of its body, and claiming the press there advertised a
+ *  resize that does nothing while making the path undraggable (Copilot on #298). */
+function canScale(box: Box, h: ScaleHandle): boolean {
+  const unit = HANDLE_UNIT[h];
+  return (unit.x !== 0.5 && box.w > 0) || (unit.y !== 0.5 && box.h > 0);
 }
 
 function inside(box: Box, p: Pt): boolean {
