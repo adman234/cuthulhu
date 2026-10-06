@@ -121,18 +121,22 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       const hooks = window as unknown as { __commitTransforms?: { ids: number[]; m: number[] }[] };
       hooks.__commitTransforms ??= [];
       hooks.__commitTransforms.push({ ids: a.ids as number[], m });
-      for (const id of a.ids as number[]) {
-        const node = doc.nodes[id];
-        if (!node) continue;
-        const [a1, b1, c1, d1, e1, f1] = node.transform;
-        const [a2, b2, c2, d2, e2, f2] = m;
-        node.transform = [
-          a2 * a1 + c2 * b1, b2 * a1 + d2 * b1,
-          a2 * c1 + c2 * d1, b2 * c1 + d2 * d1,
-          a2 * e1 + c2 * f1 + e2, b2 * e1 + d2 * f1 + f2,
-        ];
-      }
-      return {};
+      const applyIt = () => {
+        for (const id of a.ids as number[]) {
+          const node = doc.nodes[id];
+          if (!node) continue;
+          const [a1, b1, c1, d1, e1, f1] = node.transform;
+          const [a2, b2, c2, d2, e2, f2] = m;
+          node.transform = [
+            a2 * a1 + c2 * b1, b2 * a1 + d2 * b1,
+            a2 * c1 + c2 * d1, b2 * c1 + d2 * d1,
+            a2 * e1 + c2 * f1 + e2, b2 * e1 + d2 * f1 + f2,
+          ];
+        }
+        return {};
+      };
+      if (!holdingCommits) return applyIt();
+      return new Promise((resolve) => heldCommits.push(() => resolve(applyIt())));
     },
     delete: (a) => {
       for (const id of a.ids as number[]) {
@@ -382,7 +386,13 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
   // without rows for the whole test.
   let holdingPresets = false;
   const heldPresets: (() => void)[] = [];
+  // Transforms hold on their own switch too: the race they exist for is a second gesture pressed
+  // while the first one's commit is still on the wire.
+  let holdingCommits = false;
+  const heldCommits: (() => void)[] = [];
   Object.assign(window, {
+    __holdCommits: () => { holdingCommits = true; },
+    __releaseCommits: () => { holdingCommits = false; return release(heldCommits); },
     __armHold: () => { holding = true; },
     __releasePlans: () => release(heldPlans),
     __releaseTravel: () => release(heldTravel),
@@ -2893,4 +2903,34 @@ test("the cursor readout follows a wheel pan under a still pointer", async ({ pa
 
   // A readout stored at the last pointer move would still say `before`; the world moved under it.
   await expect.poll(readY).toBeCloseTo(before + 100 / v0.scale, 0);
+});
+
+// One transform on the wire at a time. A second gesture pressed while the first commit is
+// unanswered would compute its matrix from the first one's preview; if the first were then
+// refused, the second would land about the wrong anchor (CodeRabbit on #298).
+test("a drag pressed while the previous commit is in flight does not commit", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+  const commits = () =>
+    page.evaluate(() => ((window as unknown as { __commitTransforms?: unknown[] }).__commitTransforms ?? []).length);
+  const drag = async (from: { x: number; y: number }, dx: number) => {
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    await page.mouse.move(from.x + dx, from.y, { steps: 3 });
+    await page.mouse.up();
+  };
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  const centre = await toPage(page, v, { x: 5, y: 5 });
+  await drag(centre, 5 * v.scale); // move right 5 mm; its commit is now parked
+  await expect.poll(commits).toBe(1);
+
+  await drag({ x: centre.x + 5 * v.scale, y: centre.y }, 5 * v.scale); // press on the preview
+  expect(await commits()).toBe(1);
+
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+  await drag({ x: centre.x + 5 * v.scale, y: centre.y }, 5 * v.scale); // settled: drags commit again
+  await expect.poll(commits).toBe(2);
 });

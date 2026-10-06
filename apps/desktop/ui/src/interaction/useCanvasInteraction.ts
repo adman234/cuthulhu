@@ -80,6 +80,10 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   const latest = useRef({ scene, selected });
   latest.current = { scene, selected };
   const pending = useRef<PendingPreview | null>(null);
+  // One transform on the wire at a time. A gesture pressed while a commit is unanswered would build
+  // its matrix on that commit's preview, and if the commit were refused it would land about the
+  // wrong anchor. The window is one IPC round trip, so a press in it selects but does not drag.
+  const inFlight = useRef(false);
   // What gestures start from and what the renderer is put back to: the in-flight preview until a
   // snapshot replaces the scene it was built on, then the committed scene. CodeRabbit on #298.
   const current = () => ({ scene: gestureScene(pending.current, latest.current.scene), selected: latest.current.selected });
@@ -214,6 +218,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     const kind = box ? handleAt(box, p, HANDLE_HIT_PX / v.scale, ROTATE_ZONE_PX / v.scale) : null;
     // Shift-click inside the box toggles the node under the pointer rather than dragging.
     if (box && kind && !(kind === "move" && e.shiftKey)) {
+      if (inFlight.current) return;
       gesture.current = { t: "transform", kind, box, ids: sel, start: p, m: IDENTITY };
       return;
     }
@@ -224,6 +229,10 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     }
     const next = e.shiftKey ? toggleId(sel, hit) : [hit];
     setSelected(next);
+    if (inFlight.current) {
+      gesture.current = null;
+      return;
+    }
     // Only drag when the hit node is in the new selection — a Shift-click that toggles a node
     // out must not start dragging the rest.
     const nextBox = next.includes(hit) ? selectionBox(s, next) : null;
@@ -287,7 +296,9 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
       return;
     }
     pending.current = { base: latest.current.scene, preview: applyOptimistic(current().scene, g.ids, g.m) };
+    inFlight.current = true;
     void commit(g.ids, g.m).then((ok) => {
+      inFlight.current = false;
       if (ok) return;
       pending.current = null;
       restore();

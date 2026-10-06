@@ -24,9 +24,11 @@
 > 2. **The cursor readout is held in screen px and converted per render**, not stored in world mm
 >    at each pointer move as Task 9 says, so a pan or zoom under a still pointer updates it
 >    (Copilot).
-> 3. **A gesture started while the previous commit is in flight starts from that commit's
->    preview** (`gestureScene` in `interaction/transform.ts`), not from the committed scene, which
->    still holds the old geometry until the snapshot lands (CodeRabbit).
+> 3. **One transform commit is on the wire at a time.** A press while a commit is unanswered
+>    selects but does not drag, since a matrix built on that commit's preview lands about the wrong
+>    anchor if the commit is refused. Between the answer and the re-render, gestures start from
+>    the preview (`gestureScene` in `interaction/transform.ts`) rather than the committed scene,
+>    which still holds the old geometry until the snapshot lands (CodeRabbit, two rounds).
 >
 > The rename of `then` to `compose` *was* applied to the task bodies, because it was found before
 > any reviewer saw them and the original name breaks the module outright.
