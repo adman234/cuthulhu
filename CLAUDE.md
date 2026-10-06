@@ -264,11 +264,14 @@ The rest applies to both gates:
 
   Review a moved base by **syncing, not by re-running**. Re-run against a new base and the
   three-dot diff still resolves from the old merge base: base-only commits are absent from it,
-  and the checkout is still the old tree. Run `gh pr update-branch` first, which produces a head
-  whose tree holds the base's changes, and review that.
+  and the checkout is still the old tree. Sync first so the head's tree holds the base's
+  changes, then review that head. Once the PR exists, `gh pr update-branch` does it. During gate 1
+  there is no PR yet, so merge the updated base into the branch locally (`git fetch` and
+  `git merge origin/main`), then run gate 1 again on the merged head.
 
   The one way out is when **both** of these hold: the reviewed patch is unchanged and the
-  resulting tree is unchanged. Either alone waives a real review. A conflict resolved in the
-  child's favour keeps the tree while the patch reverts something on the base. A base that changes
-  an API the child calls leaves the patch byte-equal while the merged result breaks. When both do
-  hold, say so on the PR. Otherwise a reader cannot tell a safe sync from an unreviewed merge.
+  resulting tree is unchanged. Relying on either one alone skips a review that was owed. A
+  conflict resolved in the child's favour keeps the tree while the patch reverts something on the
+  base. A base that changes an API the child calls leaves the patch byte-equal while the merged
+  result breaks. When both do hold, say so on the PR. Otherwise a reader cannot tell a safe sync
+  from an unreviewed merge.
