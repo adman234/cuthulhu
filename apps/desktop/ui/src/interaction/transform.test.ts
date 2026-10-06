@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { describe, it, expect } from "vitest";
-import { dragMatrix, applyOptimistic, reconcile } from "./transform";
+import { dragMatrix, applyOptimistic, reconcile, gestureScene } from "./transform";
 import { rotateAbout } from "../render/affine";
 import type { Affine6 } from "../render/hittest";
 
@@ -40,5 +40,25 @@ describe("optimistic transform", () => {
     const out = applyOptimistic(scene, [1], rotateAbout(Math.PI / 4, { x: 5, y: 5 }));
     expect(out.nodes[0].bounds.w).toBeCloseTo(10 * Math.SQRT2, 9);
     expect(out.nodes[0].world![1]).toBeCloseTo(Math.SQRT1_2, 9);
+  });
+});
+
+describe("gestureScene", () => {
+  const committed = { nodes: [{ id: 1, bounds: { x: 0, y: 0, w: 4, h: 4 } }] };
+  const preview = applyOptimistic(committed, [1], [1, 0, 0, 1, 10, 0]);
+
+  it("starts the next gesture from the preview while its commit is still in flight", () => {
+    // Without this a second press before the snapshot lands finds the handles where the shape
+    // used to be, and its preview jumps back. CodeRabbit on #298.
+    expect(gestureScene({ base: committed, preview }, committed)).toBe(preview);
+  });
+
+  it("drops the preview once a snapshot has replaced the scene it was built on", () => {
+    const refreshed = { nodes: [{ id: 1, bounds: { x: 10, y: 0, w: 4, h: 4 } }] };
+    expect(gestureScene({ base: committed, preview }, refreshed)).toBe(refreshed);
+  });
+
+  it("uses the committed scene when nothing is pending", () => {
+    expect(gestureScene(null, committed)).toBe(committed);
   });
 });

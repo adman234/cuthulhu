@@ -12,6 +12,25 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-06-viewport-and-handles-design.md` — read it first. It records why the view is not document state, the gesture conventions, why there is no flip-by-drag, and what is deliberately out of scope.
 
+> **Review on #298 overturned three details after this plan was written. The task bodies below
+> still state the originals and are deliberately left as they were** — this file is a record of
+> the instructions the implementation was given, not a description of what shipped. The shipped
+> behaviour is:
+>
+> 1. **Hit-test margins come from the inverse's rows** (`tol * hypot(inv[0], inv[2])`,
+>    `tol * hypot(inv[1], inv[3])`), not `tol / axisLengths(world)` as Task 3 says. The two agree
+>    only when a node's axes stay perpendicular in world; a rotated node under a non-uniformly
+>    scaled Group is sheared (Copilot). See `apps/desktop/ui/src/render/hittest.ts`.
+> 2. **The cursor readout is held in screen px and converted per render**, not stored in world mm
+>    at each pointer move as Task 9 says, so a pan or zoom under a still pointer updates it
+>    (Copilot).
+> 3. **A gesture started while the previous commit is in flight starts from that commit's
+>    preview** (`gestureScene` in `interaction/transform.ts`), not from the committed scene, which
+>    still holds the old geometry until the snapshot lands (CodeRabbit).
+>
+> The rename of `then` to `compose` *was* applied to the task bodies, because it was found before
+> any reviewer saw them and the original name breaks the module outright.
+
 ## Global Constraints
 
 **Reading the code blocks in this plan:** a block is the complete text of what it introduces unless the surrounding step says it replaces or adds to part of an existing file, in which case the step names the file and the lines it replaces.

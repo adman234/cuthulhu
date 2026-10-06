@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent, t
 import { hitTest, type Bounds, type Scene } from "../render/hittest";
 import { compose, IDENTITY, isIdentity, type Pt } from "../render/affine";
 import type { Canvas2DRenderer } from "../render/Canvas2DRenderer";
-import { applyOptimistic, type Matrix } from "./transform";
+import { applyOptimistic, gestureScene, type Matrix, type PendingPreview } from "./transform";
 import {
   CSS_PX_PER_MM, IDENTITY_VIEW, ZOOM_STEP, fitView, minScaleFor, panBy, screenToWorld,
   wheelFactor, zoomAt, type Size, type View,
@@ -79,6 +79,10 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   const viewRef = useRef(view);
   const latest = useRef({ scene, selected });
   latest.current = { scene, selected };
+  const pending = useRef<PendingPreview | null>(null);
+  // What gestures start from and what the renderer is put back to: the in-flight preview until a
+  // snapshot replaces the scene it was built on, then the committed scene. CodeRabbit on #298.
+  const current = () => ({ scene: gestureScene(pending.current, latest.current.scene), selected: latest.current.selected });
   const gesture = useRef<Gesture | null>(null);
   const spaceHeld = useRef(false);
 
@@ -102,7 +106,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   const restore = useCallback(() => {
     const r = rendererRef.current;
     if (!r) return;
-    const { scene: s, selected: sel } = latest.current;
+    const { scene: s, selected: sel } = current();
     r.setScene(s);
     r.setSelection(sel);
     r.setOverlay({ box: selectionBox(s, sel), marquee: null });
@@ -205,7 +209,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     // Capture replaces SP3's window-level mouseup listener: a drag released outside the canvas
     // still ends here, so its preview is committed instead of stranded.
     e.currentTarget.setPointerCapture(e.pointerId);
-    const { scene: s, selected: sel } = latest.current;
+    const { scene: s, selected: sel } = current();
     const box = selectionBox(s, sel);
     const kind = box ? handleAt(box, p, HANDLE_HIT_PX / v.scale, ROTATE_ZONE_PX / v.scale) : null;
     // Shift-click inside the box toggles the node under the pointer rather than dragging.
@@ -235,7 +239,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     const g = gesture.current;
     const r = rendererRef.current;
     if (!g) {
-      const box = selectionBox(latest.current.scene, latest.current.selected);
+      const box = selectionBox(current().scene, current().selected);
       const kind = spaceHeld.current ? "pan" : box ? handleAt(box, p, HANDLE_HIT_PX / v.scale, ROTATE_ZONE_PX / v.scale) : null;
       // ponytail: resize cursors are screen-aligned, so on a rotated box they point along the
       // screen rather than the edge. Upgrade: choose by the handle's on-screen angle.
@@ -256,7 +260,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     }
     const m = gestureMatrix(g.kind, g.box, g.start, p, { shift: e.shiftKey, alt: e.altKey });
     gesture.current = { ...g, m };
-    r.setScene(applyOptimistic(latest.current.scene, g.ids, m));
+    r.setScene(applyOptimistic(current().scene, g.ids, m));
     r.setSelection(g.ids);
     r.setOverlay({ box: { ...g.box, frame: compose(g.box.frame, m) }, marquee: null });
     r.draw();
@@ -268,7 +272,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     if (!g || g.t === "pan") return;
     if (g.t === "marquee") {
       const travel = Math.hypot(g.cur.x - g.start.x, g.cur.y - g.start.y) * viewRef.current.scale;
-      const { scene: s, selected: sel } = latest.current;
+      const { scene: s, selected: sel } = current();
       if (travel < CLICK_SLOP_PX) {
         if (!g.additive) setSelected([]);
       } else {
@@ -282,8 +286,11 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
       restore();
       return;
     }
+    pending.current = { base: latest.current.scene, preview: applyOptimistic(current().scene, g.ids, g.m) };
     void commit(g.ids, g.m).then((ok) => {
-      if (!ok) restore();
+      if (ok) return;
+      pending.current = null;
+      restore();
     });
   };
 

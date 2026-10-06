@@ -17,6 +17,18 @@ export function applyOptimistic(scene: Scene, ids: number[], m: Matrix): Scene {
   return { nodes: scene.nodes.map((n) => (moving.has(n.id) ? transformNode(n, m) : n)) };
 }
 
+/** A released gesture whose commit has not come back yet: the preview it showed, and the scene
+ *  that preview was built on. */
+export type PendingPreview = { base: Scene; preview: Scene };
+
+/** The scene the next gesture starts from. Between a release and the snapshot that follows its
+ *  commit, the screen shows the preview while the committed scene still holds the old geometry;
+ *  starting from the latter puts the handles where the shape used to be. Identity, not equality,
+ *  decides staleness: every snapshot builds a new Scene, so any refresh retires the preview. */
+export function gestureScene(pending: PendingPreview | null, committed: Scene): Scene {
+  return pending && pending.base === committed ? pending.preview : committed;
+}
+
 function transformNode(n: SceneNode, m: Matrix): SceneNode {
   if (n.world && n.local) {
     const world = compose(n.world, m);
