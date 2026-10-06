@@ -3132,3 +3132,25 @@ test("Alt-dragging a corner scales about the centre", async ({ page }) => {
   const [a, b, c, d, e, f] = (await commitLog(page))[0].m;
   expect([a, b, c, d, e, f]).toEqual([3, 0, 0, 2, -10, -5].map((x) => expect.closeTo(x, 1)));
 });
+
+// The gesture follows the document point under the pointer, not the pointer's last world position:
+// a pan under a held, still pointer must move the shape with it (CodeRabbit on #298).
+test("a wheel pan during a drag carries the shape with the pointer and commits that", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+  const centre = await toPage(page, v, { x: 5, y: 5 });
+
+  await page.mouse.move(centre.x, centre.y);
+  await page.mouse.down();
+  await page.mouse.move(centre.x + 5 * v.scale, centre.y, { steps: 3 });
+  await page.mouse.wheel(0, 100); // the view pans up 100 px; the pointer now sits 100 px lower in mm
+  await expect.poll(async () => (await readView(page)).ty).toBeLessThan(v.ty);
+  await page.mouse.up();
+
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  const [, , , , e, f] = (await commitLog(page))[0].m;
+  expect(e).toBeCloseTo(5, 0);
+  expect(f).toBeCloseTo(100 / v.scale, 0);
+});

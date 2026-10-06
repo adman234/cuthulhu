@@ -9,7 +9,7 @@ import {
   wheelFactor, zoomAt, type Size, type View,
 } from "./viewport";
 import { handleAt, selectionBox, type Box, type HandleKind } from "./selectionBox";
-import { gestureMatrix } from "./gesture";
+import { gestureMatrix, type Modifiers } from "./gesture";
 import { marqueeHits, marqueeSelection, normalizeRect, toggleId } from "./marquee";
 
 // CSS px, divided by the view scale at use so they feel the same at every zoom.
@@ -107,6 +107,11 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   const gesture = useRef<Gesture | null>(null);
   const spaceHeld = useRef(false);
   const overCanvas = useRef(false);
+  // Where the pointer last was on screen and which modifiers it held. A gesture follows the
+  // document point under the pointer, so a pan or zoom under a still, held pointer must re-derive
+  // it from these rather than keep the matrix of the last move (CodeRabbit on #298).
+  const lastScreen = useRef<Pt | null>(null);
+  const lastMods = useRef<Modifiers>({ shift: false, alt: false });
 
   const setView = useCallback((v: View) => {
     viewRef.current = v;
@@ -148,6 +153,22 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     r.draw();
   }, [rendererRef]);
 
+  // Re-derives a live transform or marquee from the pointer under the current view.
+  const follow = useCallback(() => {
+    const g = gesture.current;
+    const screen = lastScreen.current;
+    if (!g || g.t === "pan" || !screen) return;
+    const p = screenToWorld(viewRef.current, screen);
+    gesture.current =
+      g.t === "marquee" ? { ...g, cur: p } : { ...g, m: gestureMatrix(g.kind, g.box, g.start, p, lastMods.current) };
+  }, []);
+
+  // Declared before App's draw effect runs, so the repaint that follows a view change already
+  // draws the re-derived gesture.
+  useEffect(() => {
+    follow();
+  }, [view, follow]);
+
   // ponytail: devicePixelRatio is read on resize only, so dragging the window from a Retina panel
   // to a 1x one keeps the old backing store until the next resize. Upgrade: a
   // matchMedia(`(resolution: ${dpr}dppx)`) listener that re-runs resize().
@@ -186,6 +207,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
       const unit = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? LINE_PX : 1;
       const screen = toCanvas(canvas, e.clientX, e.clientY);
       setCursorScreen(screen);
+      lastScreen.current = screen;
       // WebKit reports a trackpad pinch as a wheel with ctrlKey set, so one branch serves both.
       if (e.ctrlKey || e.metaKey) zoomBy(screen, wheelFactor(e.deltaY * unit));
       else setView(panBy(viewRef.current, -e.deltaX * unit, -e.deltaY * unit));
@@ -239,6 +261,8 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
 
   const onPointerDown = (e: PointerEvent<HTMLCanvasElement>) => {
     const screen = toCanvas(e.currentTarget, e.clientX, e.clientY);
+    lastScreen.current = screen;
+    lastMods.current = { shift: e.shiftKey, alt: e.altKey };
     const v = viewRef.current;
     const p = screenToWorld(v, screen);
     if (e.button === 1 || (e.button === 0 && spaceHeld.current)) {
@@ -282,6 +306,8 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     const v = viewRef.current;
     const p = screenToWorld(v, screen);
     setCursorScreen(screen);
+    lastScreen.current = screen;
+    lastMods.current = { shift: e.shiftKey, alt: e.altKey };
     const g = gesture.current;
     if (!g) {
       const { scene: s, selected: sel } = current();
@@ -297,10 +323,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
       gesture.current = { ...g, last: screen };
       return;
     }
-    gesture.current =
-      g.t === "marquee"
-        ? { ...g, cur: p }
-        : { ...g, m: gestureMatrix(g.kind, g.box, g.start, p, { shift: e.shiftKey, alt: e.altKey }) };
+    follow();
     repaint();
   };
 
