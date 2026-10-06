@@ -10,7 +10,6 @@ import { toggleId } from "./interaction/marquee";
 import type { Matrix } from "./interaction/transform";
 import { useCanvasInteraction } from "./interaction/useCanvasInteraction";
 import { viewMatrix, zoomPercent } from "./interaction/viewport";
-import { selectionBox } from "./interaction/selectionBox";
 import { TopBar } from "./panels/TopBar";
 import { ToolRail } from "./panels/ToolRail";
 import { LayersPanel } from "./panels/LayersPanel";
@@ -130,9 +129,9 @@ export function App() {
   }, []);
 
   // ponytail: every command re-fetches the full snapshot instead of applying its returned
-  // Delta locally with reconcile() — correct and simple while scenes stay tiny. The canvas
-  // drag gesture below uses applyOptimistic for live feedback then also just re-fetches on
-  // mouseup; reconcile() stays unused until per-frame delta application is worth the wiring.
+  // Delta locally with reconcile() — correct and simple while scenes stay tiny. Canvas gestures
+  // (useCanvasInteraction) use applyOptimistic for live feedback, then also just re-fetch once
+  // their commit lands; reconcile() stays unused until per-frame delta application is worth it.
   const run = useCallback(
     async (fn: () => Promise<unknown>) => {
       try {
@@ -222,20 +221,37 @@ export function App() {
     selected,
     setSelected,
     artboard: doc?.artboard ?? null,
-    commit: (ids, m) => run(() => ipc.commitTransform({ ids, m })),
+    // Not `run`: it reports one `false` for two failures that need opposite repairs. A refused
+    // transform must put the shape back; one that landed but could not be re-read must keep it,
+    // because the backend already holds the new geometry (silent-failure-hunter on #298).
+    commit: async (ids, m) => {
+      setError(null);
+      try {
+        await ipc.commitTransform({ ids, m });
+      } catch (e) {
+        setError(ipc.ipcErrorMessage(e));
+        return "refused";
+      }
+      try {
+        await refresh();
+      } catch (e) {
+        setError(`Edit applied, but the canvas could not be refreshed: ${ipc.ipcErrorMessage(e)}`);
+      }
+      return "applied";
+    },
   });
 
+  const { repaint } = interaction;
   useEffect(() => {
     const r = rendererRef.current;
     if (!r) return;
-    r.setScene(scene);
-    r.setSelection(selected);
     r.setArtboard(doc?.artboard ?? null);
     r.setView(viewMatrix(interaction.view));
-    r.setOverlay({ box: selectionBox(scene, selected), marquee: null });
-    r.draw();
-    // `size` because a resize clears the backing store, and nothing else would repaint it.
-  }, [scene, selected, doc, interaction.view, interaction.size]);
+    // The hook draws the scene, so a redraw here cannot paint the committed scene over a live
+    // gesture. `scene` and `selected` are listed because they are what it draws; `size` because a
+    // resize clears the backing store and nothing else would repaint it.
+    repaint();
+  }, [scene, selected, doc, interaction.view, interaction.size, repaint]);
 
   // Clears selection only once the delete actually lands, so a failed delete leaves the
   // (still valid) selection in place, and a successful one can't leave stale ids around to

@@ -90,7 +90,15 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       doc = freshDoc();
       return JSON.stringify(doc);
     },
-    snapshot: () => JSON.stringify(doc),
+    snapshot: () => {
+      // One-shot, armed by a test: a refresh that fails after a commit already landed is the case
+      // whose repair is the opposite of a refusal (silent-failure-hunter on #298).
+      if (failNextSnapshot) {
+        failNextSnapshot = false;
+        throw new Error("snapshot unavailable");
+      }
+      return JSON.stringify(doc);
+    },
     add_primitive: (a) => {
       const id = nextId++;
       const style = a.stroke !== undefined ? { stroke: a.stroke as number | null, fill: null } : DEFAULT_STYLE;
@@ -117,6 +125,10 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       // that kept only the translation passes a frontend whose preview and commit disagree. The
       // seeded nodes sit directly under an identity Layer, so the world-space `m` composes onto
       // the local transform with no parent conversion. Recorded so a test can read the matrix.
+      if (failNextCommit) {
+        failNextCommit = false;
+        throw new Error("transform refused");
+      }
       const m = a.m as number[];
       const hooks = window as unknown as { __commitTransforms?: { ids: number[]; m: number[] }[] };
       hooks.__commitTransforms ??= [];
@@ -390,7 +402,11 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
   // while the first one's commit is still on the wire.
   let holdingCommits = false;
   const heldCommits: (() => void)[] = [];
+  let failNextCommit = false;
+  let failNextSnapshot = false;
   Object.assign(window, {
+    __failNextCommit: () => { failNextCommit = true; },
+    __failNextSnapshot: () => { failNextSnapshot = true; },
     __holdCommits: () => { holdingCommits = true; },
     __releaseCommits: () => { holdingCommits = false; return release(heldCommits); },
     __armHold: () => { holding = true; },
@@ -2933,4 +2949,186 @@ test("a drag pressed while the previous commit is in flight does not commit", as
   await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
   await drag({ x: centre.x + 5 * v.scale, y: centre.y }, 5 * v.scale); // settled: drags commit again
   await expect.poll(commits).toBe(2);
+});
+
+type CommitRecord = { ids: number[]; m: number[] };
+
+async function commitLog(page: Page): Promise<CommitRecord[]> {
+  return page.evaluate(() => (window as unknown as { __commitTransforms?: CommitRecord[] }).__commitTransforms ?? []);
+}
+
+async function dragBy(page: Page, from: { x: number; y: number }, dx: number, dy: number) {
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(from.x + dx, from.y + dy, { steps: 4 });
+  await page.mouse.up();
+}
+
+/** The fake's own transform for a node, read through the same command the app uses. */
+async function nodeTransform(page: Page, id: number): Promise<number[]> {
+  const json = await page.evaluate(() =>
+    (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> } })
+      .__TAURI_INTERNALS__.invoke("snapshot", {}),
+  );
+  return (JSON.parse(json as string) as { nodes: Record<string, { transform: number[] }> }).nodes[id].transform;
+}
+
+test("a refused transform puts the shape back and the next drag starts from where it was", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+  const centre = await toPage(page, v, { x: 5, y: 5 });
+
+  await page.evaluate(() => (window as unknown as { __failNextCommit: () => void }).__failNextCommit());
+  await dragBy(page, centre, 5 * v.scale, 0);
+  await expect(page.getByText("transform refused")).toBeVisible();
+
+  // Pressed where the shape was: a preview left stranded would put the box 5 mm to the right.
+  await dragBy(page, centre, 5 * v.scale, 0);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  expect((await nodeTransform(page, 2))[4]).toBeCloseTo(5, 0);
+});
+
+test("a transform that lands but cannot be re-read keeps the shape where the backend has it", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+  const centre = await toPage(page, v, { x: 5, y: 5 });
+
+  await page.evaluate(() => (window as unknown as { __failNextSnapshot: () => void }).__failNextSnapshot());
+  await dragBy(page, centre, 20 * v.scale, 0); // the commit lands; its refresh fails
+  await expect(page.getByText(/Edit applied, but the canvas could not be refreshed/)).toBeVisible();
+
+  // The box is where the backend put it (20 mm right), clear of where the shape used to be: a
+  // revert to the stale scene would make this press miss and start a marquee instead.
+  await dragBy(page, { x: centre.x + 20 * v.scale, y: centre.y }, 5 * v.scale, 0);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  expect((await nodeTransform(page, 2))[4]).toBeCloseTo(25, 0);
+});
+
+test("an edit keeps the operator's zoom; Ctrl+0 and a machine switch refit", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const fitted = await fittedView(page);
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  // The snapshot after the commit rebuilds the artboard object; the view must not refit for it.
+  expect(await readView(page)).toEqual(v);
+
+  await page.getByTestId("design-canvas").hover();
+  await page.keyboard.press("Control+0");
+  await expect.poll(() => readView(page)).toEqual(fitted);
+
+  await page.getByLabel("Machine").selectOption("puma");
+  const box = (await page.getByTestId("design-canvas").boundingBox())!;
+  // The Puma's 600 × 5000 mm bed, height-bound in this window like the Cameo's.
+  await expect.poll(async () => (await readView(page)).scale).toBeCloseTo((box.height - 48) / 5000, 3);
+});
+
+test("keyboard zoom works after a toolbar click and leaves a focused field alone", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const fitted = await fittedView(page);
+  await page.getByRole("button", { name: "Select" }).click(); // focus stays on the button
+
+  await page.keyboard.press("Control+=");
+  await expect.poll(async () => (await readView(page)).scale).toBeCloseTo(fitted.scale * 1.25, 6);
+  await page.keyboard.press("Control+1");
+  await expect(page.getByTestId("status-zoom")).toHaveText("100%");
+  await page.keyboard.press("Control+0");
+  await expect.poll(() => readView(page)).toEqual(fitted);
+
+  await page.getByTestId("layer-row").first().click();
+  await page.getByLabel("X", { exact: true }).focus();
+  await page.keyboard.press("Control+=");
+  expect(await readView(page)).toEqual(fitted);
+});
+
+test("Shift-click inside the selection toggles a shape out without dragging the rest", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+  await dragBy(page, await toPage(page, v, { x: 20, y: 20 }), -16 * v.scale, -16 * v.scale); // marquee both
+  const selectedRows = page.locator('[data-testid="layer-row"][data-selected="true"]');
+  await expect(selectedRows).toHaveCount(2);
+
+  // Both seeded rects share the origin, so this lands on the topmost of the two.
+  await page.keyboard.down("Shift");
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0);
+  await page.keyboard.up("Shift");
+
+  await expect(selectedRows).toHaveCount(1);
+  expect(await commitLog(page)).toEqual([]);
+});
+
+test("Space-drag pans after a toolbar click without pressing the button, and so does a middle drag", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const v0 = await fittedView(page);
+  await page.getByRole("button", { name: "Rectangle" }).click(); // adds one; focus stays on it
+  const rows = page.getByTestId("layer-row");
+  await expect(rows).toHaveCount(3);
+  const box = (await page.getByTestId("design-canvas").boundingBox())!;
+  const start = { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
+
+  await page.mouse.move(start.x, start.y);
+  await page.keyboard.down("Space");
+  await dragBy(page, start, 50, 30);
+  await page.keyboard.up("Space");
+  await expect.poll(async () => (await readView(page)).tx).toBeCloseTo(v0.tx + 50, 0);
+  expect((await readView(page)).ty).toBeCloseTo(v0.ty + 30, 0);
+  await expect(rows).toHaveCount(3); // Space never reached the Rectangle button
+  expect(await commitLog(page)).toEqual([]);
+
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(start.x - 20, start.y, { steps: 3 });
+  await page.mouse.up({ button: "middle" });
+  await expect.poll(async () => (await readView(page)).tx).toBeCloseTo(v0.tx + 30, 0);
+});
+
+test("dragging just outside a corner rotates about the centre; Alt scales about it", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+  const c = await toPage(page, v, { x: 5, y: 5 });
+  const se = await toPage(page, v, { x: 10, y: 10 });
+
+  // Inside the rotate zone (18 px) and outside the handle (6 px), a quarter turn clockwise.
+  const from = { x: se.x + 8, y: se.y + 8 };
+  const r = Math.hypot(from.x - c.x, from.y - c.y);
+  const to = { x: c.x + r * Math.cos((3 * Math.PI) / 4), y: c.y + r * Math.sin((3 * Math.PI) / 4) };
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(to.x, to.y, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  const [a, b, cc, d, e, f] = (await commitLog(page))[0].m;
+  expect([a, b, cc, d]).toEqual([expect.closeTo(0, 1), expect.closeTo(1, 1), expect.closeTo(-1, 1), expect.closeTo(0, 1)]);
+  // About the centre (5, 5): it maps to itself.
+  expect(a * 5 + cc * 5 + e).toBeCloseTo(5, 0);
+  expect(b * 5 + d * 5 + f).toBeCloseTo(5, 0);
+});
+
+test("Alt-dragging a corner scales about the centre", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+  const se = await toPage(page, v, { x: 10, y: 10 });
+
+  await page.keyboard.down("Alt");
+  await dragBy(page, se, 10 * v.scale, 5 * v.scale);
+  await page.keyboard.up("Alt");
+
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  // Half-widths 5 → 15 and 5 → 10 about (5, 5): ×3 and ×2 with the centre fixed.
+  const [a, b, c, d, e, f] = (await commitLog(page))[0].m;
+  expect([a, b, c, d, e, f]).toEqual([3, 0, 0, 2, -10, -5].map((x) => expect.closeTo(x, 1)));
 });

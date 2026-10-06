@@ -39,11 +39,15 @@ export type CanvasInteractionArgs = {
   selected: number[];
   setSelected: (ids: number[]) => void;
   artboard: Bounds | null;
-  /** Resolves false when the backend refused, so the preview can be put back. */
-  commit: (ids: number[], m: Matrix) => Promise<boolean>;
+  /** "refused" puts the preview back. "applied" keeps it even if the snapshot that should follow
+   *  failed, because the backend then holds the new geometry and the old scene is the wrong one. */
+  commit: (ids: number[], m: Matrix) => Promise<CommitOutcome>;
 };
 
+export type CommitOutcome = "applied" | "refused";
+
 type Handlers = {
+  onPointerEnter: () => void;
   onPointerDown: (e: PointerEvent<HTMLCanvasElement>) => void;
   onPointerMove: (e: PointerEvent<HTMLCanvasElement>) => void;
   onPointerUp: () => void;
@@ -56,12 +60,25 @@ export type CanvasInteraction = {
   size: Size;
   cursor: Pt | null;
   requestFit: () => void;
+  /** Draws the scene, selection and any live gesture. App calls it whenever the view, size, scene
+   *  or selection changes, so those redraws cannot paint the committed scene over a gesture. */
+  repaint: () => void;
   handlers: Handlers;
 };
 
 function toCanvas(canvas: HTMLCanvasElement, clientX: number, clientY: number): Pt {
   const r = canvas.getBoundingClientRect();
   return { x: clientX - r.left, y: clientY - r.top };
+}
+
+/** The part of `box` under `p` at view scale `scale`, with the CSS-px sizes converted to mm in
+ *  one place so the hover cursor and the press cannot disagree about what is under the pointer. */
+function handleUnder(box: Box, p: Pt, scale: number): HandleKind | null {
+  return handleAt(box, p, HANDLE_HIT_PX / scale, ROTATE_ZONE_PX / scale);
+}
+
+function isTyping(t: EventTarget | null): boolean {
+  return t instanceof HTMLElement && (["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || t.isContentEditable);
 }
 
 export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInteraction {
@@ -89,6 +106,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   const current = () => ({ scene: gestureScene(pending.current, latest.current.scene), selected: latest.current.selected });
   const gesture = useRef<Gesture | null>(null);
   const spaceHeld = useRef(false);
+  const overCanvas = useRef(false);
 
   const setView = useCallback((v: View) => {
     viewRef.current = v;
@@ -105,15 +123,28 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   );
   const centre = useCallback((): Pt => ({ x: size.w / 2, y: size.h / 2 }), [size]);
 
-  // Puts the renderer back on the committed scene: after a click that moved nothing, a refused
-  // commit, or a cancelled pointer. Without it the optimistic preview is stranded on screen.
-  const restore = useCallback(() => {
+  // The one place the renderer is told what to show. Pointer moves call it, and so does App's
+  // effect on any view, size, scene or selection change: a separate redraw from the committed scene
+  // painted over a live drag on a mid-gesture pinch, and over the in-flight preview on a selection
+  // change (code-reviewer on #298). With no gesture it also puts back a stranded preview.
+  const repaint = useCallback(() => {
     const r = rendererRef.current;
     if (!r) return;
     const { scene: s, selected: sel } = current();
-    r.setScene(s);
-    r.setSelection(sel);
-    r.setOverlay({ box: selectionBox(s, sel), marquee: null });
+    const g = gesture.current;
+    if (g?.t === "transform") {
+      r.setScene(applyOptimistic(s, g.ids, g.m));
+      r.setSelection(g.ids);
+      r.setOverlay({ box: { ...g.box, frame: compose(g.box.frame, g.m) }, marquee: null });
+    } else {
+      r.setScene(s);
+      r.setSelection(sel);
+      r.setOverlay(
+        g?.t === "marquee"
+          ? { box: null, marquee: normalizeRect(g.start, g.cur) }
+          : { box: selectionBox(s, sel), marquee: null },
+      );
+    }
     r.draw();
   }, [rendererRef]);
 
@@ -164,12 +195,15 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   }, [canvasRef, setView, zoomBy]);
 
   useEffect(() => {
-    // Space on a focused button presses it, and ⌘= in a field belongs to the field.
-    const ignores = (t: EventTarget | null) =>
-      t instanceof HTMLElement && (["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(t.tagName) || t.isContentEditable);
+    // Keys typed into a field belong to the field. A focused button is different: clicking a tool
+    // leaves focus on it, so ignoring buttons outright killed Space-pan after any toolbar click
+    // (pr-test-analyzer on #298). Space over the canvas pans, and its keyup is swallowed so the
+    // button it would have pressed stays unpressed.
     const onDown = (e: KeyboardEvent) => {
-      if (ignores(e.target)) return;
+      if (isTyping(e.target)) return;
       if (e.code === "Space") {
+        const onButton = e.target instanceof HTMLElement && e.target.tagName === "BUTTON";
+        if (onButton && !overCanvas.current) return;
         spaceHeld.current = true;
         e.preventDefault();
         return;
@@ -184,7 +218,10 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
       e.preventDefault();
     };
     const onUp = (e: KeyboardEvent) => {
-      if (e.code === "Space") spaceHeld.current = false;
+      if (e.code !== "Space") return;
+      // A button activates on Space's keyup, not its keydown.
+      if (spaceHeld.current) e.preventDefault();
+      spaceHeld.current = false;
     };
     // A Space released while another window had focus never arrives here.
     const onBlur = () => {
@@ -215,7 +252,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     e.currentTarget.setPointerCapture(e.pointerId);
     const { scene: s, selected: sel } = current();
     const box = selectionBox(s, sel);
-    const kind = box ? handleAt(box, p, HANDLE_HIT_PX / v.scale, ROTATE_ZONE_PX / v.scale) : null;
+    const kind = box ? handleUnder(box, p, v.scale) : null;
     // Shift-click inside the box toggles the node under the pointer rather than dragging.
     if (box && kind && !(kind === "move" && e.shiftKey)) {
       if (inFlight.current) return;
@@ -246,10 +283,10 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     const p = screenToWorld(v, screen);
     setCursorScreen(screen);
     const g = gesture.current;
-    const r = rendererRef.current;
     if (!g) {
-      const box = selectionBox(current().scene, current().selected);
-      const kind = spaceHeld.current ? "pan" : box ? handleAt(box, p, HANDLE_HIT_PX / v.scale, ROTATE_ZONE_PX / v.scale) : null;
+      const { scene: s, selected: sel } = current();
+      const box = selectionBox(s, sel);
+      const kind = spaceHeld.current ? "pan" : box ? handleUnder(box, p, v.scale) : null;
       // ponytail: resize cursors are screen-aligned, so on a rotated box they point along the
       // screen rather than the edge. Upgrade: choose by the handle's on-screen angle.
       canvas.style.cursor = kind ? CURSORS[kind] : "default";
@@ -260,19 +297,11 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
       gesture.current = { ...g, last: screen };
       return;
     }
-    if (!r) return;
-    if (g.t === "marquee") {
-      gesture.current = { ...g, cur: p };
-      r.setOverlay({ box: null, marquee: normalizeRect(g.start, p) });
-      r.draw();
-      return;
-    }
-    const m = gestureMatrix(g.kind, g.box, g.start, p, { shift: e.shiftKey, alt: e.altKey });
-    gesture.current = { ...g, m };
-    r.setScene(applyOptimistic(current().scene, g.ids, m));
-    r.setSelection(g.ids);
-    r.setOverlay({ box: { ...g.box, frame: compose(g.box.frame, m) }, marquee: null });
-    r.draw();
+    gesture.current =
+      g.t === "marquee"
+        ? { ...g, cur: p }
+        : { ...g, m: gestureMatrix(g.kind, g.box, g.start, p, { shift: e.shiftKey, alt: e.altKey }) };
+    repaint();
   };
 
   const onPointerUp = () => {
@@ -288,35 +317,45 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
         setSelected(marqueeSelection(sel, marqueeHits(s, normalizeRect(g.start, g.cur)), g.additive));
       }
       // The band is drawn imperatively, and a selection that did not change re-renders nothing.
-      restore();
+      repaint();
       return;
     }
     if (isIdentity(g.m)) {
-      restore();
+      repaint();
       return;
     }
     pending.current = { base: latest.current.scene, preview: applyOptimistic(current().scene, g.ids, g.m) };
     inFlight.current = true;
-    void commit(g.ids, g.m).then((ok) => {
+    void commit(g.ids, g.m).then((outcome) => {
       inFlight.current = false;
-      if (ok) return;
+      // Applied but perhaps not re-read (its snapshot can fail): the preview is what the backend now
+      // holds, so it stays until a snapshot replaces the scene it was built on.
+      if (outcome === "applied") return;
       pending.current = null;
-      restore();
+      repaint();
     });
   };
 
   const onPointerCancel = () => {
     gesture.current = null;
-    restore();
+    repaint();
   };
 
-  const onPointerLeave = () => setCursorScreen(null);
+  const onPointerEnter = () => {
+    overCanvas.current = true;
+  };
+
+  const onPointerLeave = () => {
+    overCanvas.current = false;
+    setCursorScreen(null);
+  };
 
   return {
     view,
     size,
     cursor: cursorScreen ? screenToWorld(view, cursorScreen) : null,
     requestFit,
-    handlers: { onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onPointerLeave },
+    repaint,
+    handlers: { onPointerEnter, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onPointerLeave },
   };
 }

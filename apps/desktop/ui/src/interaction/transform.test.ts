@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { describe, it, expect } from "vitest";
-import { dragMatrix, applyOptimistic, reconcile, gestureScene } from "./transform";
+import { applyOptimistic, reconcile, gestureScene } from "./transform";
 import { rotateAbout } from "../render/affine";
 import type { Affine6 } from "../render/hittest";
 
 describe("optimistic transform", () => {
-  it("dragMatrix builds a translation from start→current", () => {
-    expect(dragMatrix({ x: 2, y: 3 }, { x: 5, y: 3 })).toEqual([1, 0, 0, 1, 3, 0]);
-  });
   it("applyOptimistic offsets only selected node bounds", () => {
     const scene = { nodes: [
       { id: 1, bounds: { x: 0, y: 0, w: 4, h: 4 } },

@@ -1,13 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import type { Affine6, Scene, SceneNode } from "../render/hittest";
-import { compose, transformBounds, type Pt } from "../render/affine";
+import { compose, transformBounds } from "../render/affine";
 
-export type { Pt };
 export type Matrix = Affine6; // a b c d e f
-
-export function dragMatrix(start: Pt, cur: Pt): Matrix {
-  return [1, 0, 0, 1, cur.x - start.x, cur.y - start.y];
-}
 
 /** Previews `m` on the selected nodes with no round trip. Any affine, not only a translation:
  *  handles scale and rotate through here, and the preview has to be the matrix the commit sends. */

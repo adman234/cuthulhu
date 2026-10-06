@@ -121,6 +121,9 @@ real network can confirm the swap end to end.
       does not refit.
 - [ ] Marquee a word of imported text; Shift-drag a corner — it scales proportionally; Alt-drag
       scales from the centre; one undo reverts each gesture.
+- [ ] Pinch-zoom or scroll-pan while dragging a handle — the shape keeps following the pointer
+      instead of snapping back, and the release saves what is on screen. (Canvas pixels are
+      unreadable from e2e, so this one is only checkable by eye.)
 - [ ] Rotate a rect 30° with Shift held (snaps in 15° steps), cut it on the Cameo 5, and measure —
       the cut matches the screen.
 - [ ] `node apps/desktop/ui/scripts/perf-svg.mjs > /tmp/perf.svg`, Import it, pan and zoom with the
