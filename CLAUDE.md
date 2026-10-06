@@ -266,8 +266,9 @@ The rest applies to both gates:
   three-dot diff still resolves from the old merge base: base-only commits are absent from it,
   and the checkout is still the old tree. Sync first so the head's tree holds the base's
   changes, then review that head. Once the PR exists, `gh pr update-branch` does it. During gate 1
-  there is no PR yet, so merge the updated base into the branch locally (`git fetch` and
-  `git merge origin/main`), then run gate 1 again on the merged head.
+  there is no PR yet, so fetch and merge the updated base into the branch locally: the ref used
+  as `<base>` in the pinned range, which is `origin/main` unless the branch is stacked on another.
+  Then run gate 1 again on the merged head.
 
   The one way out is when **both** of these hold: the reviewed patch is unchanged and the
   resulting tree is unchanged. Relying on either one alone skips a review that was owed. A
