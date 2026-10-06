@@ -242,10 +242,10 @@ Two gates, in order:
    new head. Some review each push on their own; others only when asked, so request it from those.
    A review counts for a head only if it is attached to that head's sha (the commit the review
    was made on, or named in its text). A bot that says nothing when it finds nothing needs its
-   pass recorded on the PR once it has run on the current head, naming the base and head. The gate is passed
-   when every installed bot's review of the current head raises nothing new. If no review bot is
-   installed, the gate has nothing to wait on; say so in the PR description rather than leaving it
-   unaddressed.
+   pass recorded on the PR once it has run on the current head, naming the base and head. The
+   gate is passed when every installed bot's review of the current head raises nothing new. If no
+   review bot is installed, the gate has nothing to wait on; say so in the PR description rather
+   than leaving it unaddressed.
 
 The rest applies to both gates:
 
