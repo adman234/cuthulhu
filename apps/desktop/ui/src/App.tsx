@@ -6,6 +6,7 @@ import { Canvas2DRenderer } from "./render/Canvas2DRenderer";
 import { hitTest, type Affine6, type Scene, type ShapeGeom } from "./render/hittest";
 import { pathBounds } from "./render/pathdata";
 import { IDENTITY, compose, transformBounds } from "./render/affine";
+import { toggleId } from "./interaction/marquee";
 import { applyOptimistic, dragMatrix, type Matrix, type Pt } from "./interaction/transform";
 import { TopBar } from "./panels/TopBar";
 import { ToolRail } from "./panels/ToolRail";
@@ -56,10 +57,6 @@ export type DocSnapshot = {
   artboard: { x: number; y: number; w: number; h: number };
   machine: MachineProfile | null;
 };
-
-function toggleId(ids: number[], id: number): number[] {
-  return ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id];
-}
 
 function shapeBounds(kind: ShapeKindJson) {
   if ("Rect" in kind) return { x: 0, y: 0, w: kind.Rect.w, h: kind.Rect.h };
