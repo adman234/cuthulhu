@@ -6,7 +6,7 @@ import { Canvas2DRenderer } from "./render/Canvas2DRenderer";
 import type { Affine6, Scene, ShapeGeom } from "./render/hittest";
 import { pathBounds } from "./render/pathdata";
 import { IDENTITY, compose, transformBounds } from "./render/affine";
-import { toggleId } from "./interaction/marquee";
+import { shapesUnder, toggleId } from "./interaction/marquee";
 import type { Matrix } from "./interaction/transform";
 import { useCanvasInteraction } from "./interaction/useCanvasInteraction";
 import { viewMatrix, zoomPercent } from "./interaction/viewport";
@@ -213,6 +213,8 @@ export function App() {
     if (ctx) rendererRef.current = new Canvas2DRenderer(ctx);
   }, []);
 
+  const expand = useCallback((ids: number[]) => (doc ? shapesUnder(doc.nodes, ids) : ids), [doc]);
+
   // After the renderer is constructed, so it exists before the hook's observer first fires.
   const interaction = useCanvasInteraction({
     canvasRef,
@@ -220,6 +222,7 @@ export function App() {
     scene,
     selected,
     setSelected,
+    expand,
     artboard: doc?.artboard ?? null,
     // Not `run`: it reports one `false` for two failures that need opposite repairs. A refused
     // transform must put the shape back; one that landed but could not be re-read must keep it,

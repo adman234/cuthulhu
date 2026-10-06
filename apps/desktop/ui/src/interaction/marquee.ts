@@ -25,3 +25,21 @@ export function marqueeSelection(prev: number[], hits: number[], additive: boole
 export function toggleId(ids: number[], id: number): number[] {
   return ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id];
 }
+
+type TreeNode = { kind: unknown; children: number[] };
+
+/** Every shape at or beneath `ids`, each once, in the order first met. A selected Group or Layer
+ *  commits as its whole subtree (`transform_nodes` moves a container with everything in it), so
+ *  the box and the preview have to cover the same shapes or the unpreviewed ones jump on release
+ *  (Copilot on #298). The scene holds shapes only, which is why this walks the document. */
+export function shapesUnder(nodes: Record<string, TreeNode>, ids: number[]): number[] {
+  const out = new Set<number>();
+  const walk = (id: number) => {
+    const n = nodes[id];
+    if (!n) return;
+    if (typeof n.kind === "object" && n.kind !== null && "Shape" in n.kind) out.add(id);
+    else n.children.forEach(walk);
+  };
+  ids.forEach(walk);
+  return [...out];
+}

@@ -11,7 +11,7 @@ import ipcInventory from "../../ipc-inventory.json" with { type: "json" };
 // can't close over anything outside itself) and mirrors the JSON shape produced by
 // crates/document's Document::snapshot_json() — see App.tsx's DocSnapshot/buildScene,
 // which is what actually parses this on the JS side.
-function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview?: boolean; dropTraceControl?: string; seedBusyHost?: boolean; seedRemoteConnected?: boolean; slowList?: boolean; failList?: boolean; noFonts?: boolean; seedMachine?: boolean; seedUserPreset?: boolean; seedEmptyPresetAssignment?: boolean }) {
+function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview?: boolean; dropTraceControl?: string; seedBusyHost?: boolean; seedRemoteConnected?: boolean; slowList?: boolean; failList?: boolean; noFonts?: boolean; seedMachine?: boolean; seedUserPreset?: boolean; seedEmptyPresetAssignment?: boolean; seedGroup?: boolean }) {
   type Style = { stroke: number | null; fill: number | null };
   type PresetAssignment = { state: "inherit" } | { state: "unassigned" } | { state: "preset"; id: string };
   type Node = { id: number; kind: unknown; transform: number[]; style: Style; children: number[]; cut_line_type: "Cut" | "NoCut"; material_preset: PresetAssignment };
@@ -55,6 +55,16 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
   // Seed two differently-stroked rects synchronously (bypassing invoke) so the doc is
   // already populated by the time App.tsx's mount effect calls snapshot() — avoids a
   // race between an async seed and React's first fetch.
+  // A Group 30 mm right of the origin holding one 10 × 10 mm rect: a selected container commits as
+  // its whole subtree, which the canvas has to preview and box the same way (Copilot on #298).
+  if (opts?.seedGroup) {
+    const groupId = nextId++;
+    const childId = nextId++;
+    doc.nodes[groupId] = { id: groupId, kind: "Group", transform: [1, 0, 0, 1, 30, 0], style: { stroke: null, fill: null }, children: [childId], cut_line_type: "Cut", material_preset: { state: "inherit" } };
+    doc.nodes[childId] = { id: childId, kind: { Shape: { Rect: { w: 10, h: 10 } } }, transform: [1, 0, 0, 1, 0, 0], style: { stroke: 0xff0000ff, fill: null }, children: [], cut_line_type: "Cut", material_preset: { state: "inherit" } };
+    doc.nodes[doc.root].children.push(groupId);
+  }
+
   if (opts?.seedTwoColorRects) {
     const redId = nextId++;
     doc.nodes[redId] = {
@@ -3153,4 +3163,21 @@ test("a wheel pan during a drag carries the shape with the pointer and commits t
   const [, , , , e, f] = (await commitLog(page))[0].m;
   expect(e).toBeCloseTo(5, 0);
   expect(f).toBeCloseTo(100 / v.scale, 0);
+});
+
+test("a Group selected in the layers panel gets a box around its shapes and commits as itself", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedGroup: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").filter({ hasText: "Group" }).click();
+  const v = await zoomInAt(page, { x: 35, y: 5 }, -350);
+
+  // The box spans the Group's rect, 30..40 mm; drag its se corner out by 10 × 5 mm.
+  await dragBy(page, await toPage(page, v, { x: 40, y: 10 }), 10 * v.scale, 5 * v.scale);
+
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  const [{ ids, m }] = await commitLog(page);
+  expect(ids).toEqual([1 + 1]); // the Group (id 2, after the root), not its rect
+  // Width 10 → 20 and height 10 → 15 about the nw corner (30, 0).
+  const [a, b, c, d, e, f] = m;
+  expect([a, b, c, d, e, f]).toEqual([2, 0, 0, 1.5, -30, 0].map((x) => expect.closeTo(x, 1)));
 });

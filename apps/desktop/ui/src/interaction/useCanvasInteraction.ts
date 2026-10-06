@@ -29,7 +29,9 @@ const CURSORS: Record<HandleKind | "pan", string> = {
 
 type Gesture =
   | { t: "pan"; last: Pt } // screen px
-  | { t: "transform"; kind: HandleKind; box: Box; ids: number[]; start: Pt; m: Matrix } // world mm
+  // `ids` is what commits (a container moves its whole subtree); `shapes` is what that moves on
+  // screen, so the preview can match the commit.
+  | { t: "transform"; kind: HandleKind; box: Box; ids: number[]; shapes: number[]; start: Pt; m: Matrix } // world mm
   | { t: "marquee"; start: Pt; cur: Pt; additive: boolean }; // world mm
 
 export type CanvasInteractionArgs = {
@@ -38,6 +40,9 @@ export type CanvasInteractionArgs = {
   scene: Scene;
   selected: number[];
   setSelected: (ids: number[]) => void;
+  /** Every shape at or beneath the given ids: what a selection that includes a Group or Layer
+   *  actually moves. The box, highlight and preview use it; the commit sends the ids themselves. */
+  expand: (ids: number[]) => number[];
   artboard: Bounds | null;
   /** "refused" puts the preview back. "applied" keeps it even if the snapshot that should follow
    *  failed, because the backend then holds the new geometry and the old scene is the wrong one. */
@@ -82,7 +87,7 @@ function isTyping(t: EventTarget | null): boolean {
 }
 
 export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInteraction {
-  const { canvasRef, rendererRef, scene, selected, setSelected, artboard, commit } = args;
+  const { canvasRef, rendererRef, scene, selected, setSelected, expand, artboard, commit } = args;
   const [view, setViewState] = useState<View>(IDENTITY_VIEW);
   const [size, setSize] = useState<Size>({ w: 0, h: 0 });
   // ponytail: the readout re-renders App on every pointer move. Fine at today's App size; if a
@@ -94,8 +99,8 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // Native listeners are registered once and pointer handlers run between renders; both read
   // these rather than a render's closure, so they see the selection the user just made.
   const viewRef = useRef(view);
-  const latest = useRef({ scene, selected });
-  latest.current = { scene, selected };
+  const latest = useRef({ scene, selected, expand });
+  latest.current = { scene, selected, expand };
   const pending = useRef<PendingPreview | null>(null);
   // One transform on the wire at a time. A gesture pressed while a commit is unanswered would build
   // its matrix on that commit's preview, and if the commit were refused it would land about the
@@ -138,16 +143,17 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     const { scene: s, selected: sel } = current();
     const g = gesture.current;
     if (g?.t === "transform") {
-      r.setScene(applyOptimistic(s, g.ids, g.m));
-      r.setSelection(g.ids);
+      r.setScene(applyOptimistic(s, g.shapes, g.m));
+      r.setSelection(g.shapes);
       r.setOverlay({ box: { ...g.box, frame: compose(g.box.frame, g.m) }, marquee: null });
     } else {
+      const shapes = latest.current.expand(sel);
       r.setScene(s);
-      r.setSelection(sel);
+      r.setSelection(shapes);
       r.setOverlay(
         g?.t === "marquee"
           ? { box: null, marquee: normalizeRect(g.start, g.cur) }
-          : { box: selectionBox(s, sel), marquee: null },
+          : { box: selectionBox(s, shapes), marquee: null },
       );
     }
     r.draw();
@@ -275,12 +281,13 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     // still ends here, so its preview is committed instead of stranded.
     e.currentTarget.setPointerCapture(e.pointerId);
     const { scene: s, selected: sel } = current();
-    const box = selectionBox(s, sel);
+    const shapes = latest.current.expand(sel);
+    const box = selectionBox(s, shapes);
     const kind = box ? handleUnder(box, p, v.scale) : null;
     // Shift-click inside the box toggles the node under the pointer rather than dragging.
     if (box && kind && !(kind === "move" && e.shiftKey)) {
       if (inFlight.current) return;
-      gesture.current = { t: "transform", kind, box, ids: sel, start: p, m: IDENTITY };
+      gesture.current = { t: "transform", kind, box, ids: sel, shapes, start: p, m: IDENTITY };
       return;
     }
     const hit = hitTest(s, p.x, p.y, HIT_TOL_PX / v.scale);
@@ -296,8 +303,11 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     }
     // Only drag when the hit node is in the new selection — a Shift-click that toggles a node
     // out must not start dragging the rest.
-    const nextBox = next.includes(hit) ? selectionBox(s, next) : null;
-    gesture.current = nextBox ? { t: "transform", kind: "move", box: nextBox, ids: next, start: p, m: IDENTITY } : null;
+    const nextShapes = latest.current.expand(next);
+    const nextBox = next.includes(hit) ? selectionBox(s, nextShapes) : null;
+    gesture.current = nextBox
+      ? { t: "transform", kind: "move", box: nextBox, ids: next, shapes: nextShapes, start: p, m: IDENTITY }
+      : null;
   };
 
   const onPointerMove = (e: PointerEvent<HTMLCanvasElement>) => {
@@ -311,7 +321,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     const g = gesture.current;
     if (!g) {
       const { scene: s, selected: sel } = current();
-      const box = selectionBox(s, sel);
+      const box = selectionBox(s, latest.current.expand(sel));
       const kind = spaceHeld.current ? "pan" : box ? handleUnder(box, p, v.scale) : null;
       // ponytail: resize cursors are screen-aligned, so on a rotated box they point along the
       // screen rather than the edge. Upgrade: choose by the handle's on-screen angle.
@@ -347,7 +357,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
       repaint();
       return;
     }
-    pending.current = { base: latest.current.scene, preview: applyOptimistic(current().scene, g.ids, g.m) };
+    pending.current = { base: latest.current.scene, preview: applyOptimistic(current().scene, g.shapes, g.m) };
     inFlight.current = true;
     void commit(g.ids, g.m).then((outcome) => {
       inFlight.current = false;
