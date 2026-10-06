@@ -236,9 +236,15 @@ Two gates, in order:
    naming that pass's base and head in its description.
 2. **Bot review comes back clean after the PR is opened.** Whichever review bots the repo has
    installed review the PR. Which ones they are does not matter, and nothing should wait on a bot
-   that is not installed. Triage every finding. Fix the valid ones, and reply on each thread with
-   the fixing commit or the reason the finding does not apply. Then wait for the bots to review
-   the new head. The gate is passed when a review of the current head raises nothing new.
+   that is not installed: PR #287 sat blocked on a required check nothing in the repo could still
+   produce. Triage every finding. Fix the valid ones, and reply on each thread with the fixing
+   commit or the reason the finding does not apply. Then get every installed bot to review the
+   new head. Some review each push on their own; others only when asked, so request it from those.
+   A review counts for a head only if it names that head's sha. A bot that says nothing when it
+   finds nothing needs its pass recorded on the PR, naming the base and head. The gate is passed
+   when every installed bot's review of the current head raises nothing new. If no review bot is
+   installed, the gate has nothing to wait on; say so in the PR description rather than leaving it
+   unaddressed.
 
 The rest applies to both gates:
 
