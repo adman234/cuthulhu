@@ -12,16 +12,18 @@ export function applyOptimistic(scene: Scene, ids: number[], m: Matrix): Scene {
   return { nodes: scene.nodes.map((n) => (moving.has(n.id) ? transformNode(n, m) : n)) };
 }
 
-/** A released gesture whose commit has not come back yet: the preview it showed, and the scene
- *  that preview was built on. */
-export type PendingPreview = { base: Scene; preview: Scene };
+/** A commit's preview, standing in for the committed scene until the snapshot that includes the
+ *  commit has rendered: `retireAt` is that snapshot's revision, `Infinity` while the commit is
+ *  still on the wire. */
+export type PendingPreview = { preview: Scene; retireAt: number };
 
-/** The scene the next gesture starts from. Between a release and the snapshot that follows its
- *  commit, the screen shows the preview while the committed scene still holds the old geometry;
- *  starting from the latter puts the handles where the shape used to be. Identity, not equality,
- *  decides staleness: every snapshot builds a new Scene, so any refresh retires the preview. */
-export function gestureScene(pending: PendingPreview | null, committed: Scene): Scene {
-  return pending && pending.base === committed ? pending.preview : committed;
+/** The scene the next gesture or field edit starts from. Between a commit and the snapshot that
+ *  includes it, the screen shows the preview while the committed scene still holds older geometry.
+ *  Retiring by revision rather than on any new scene matters when edits queue: the snapshot of an
+ *  earlier commit can render while a later one is on the wire, and retiring the later preview then
+ *  computed the next edit from geometry the backend had already left (Copilot on #298). */
+export function gestureScene(pending: PendingPreview | null, committed: Scene, committedRev: number): Scene {
+  return pending && committedRev < pending.retireAt ? pending.preview : committed;
 }
 
 function transformNode(n: SceneNode, m: Matrix): SceneNode {

@@ -8,7 +8,7 @@ import { pathBounds } from "./render/pathdata";
 import { IDENTITY, compose, transformBounds } from "./render/affine";
 import { shapesUnder, toggleId } from "./interaction/marquee";
 import type { Matrix } from "./interaction/transform";
-import { useCanvasInteraction } from "./interaction/useCanvasInteraction";
+import { useCanvasInteraction, type CommitOutcome } from "./interaction/useCanvasInteraction";
 import { viewMatrix, zoomPercent } from "./interaction/viewport";
 import { TopBar } from "./panels/TopBar";
 import { ToolRail } from "./panels/ToolRail";
@@ -123,9 +123,18 @@ export function App() {
 
   const scene = useMemo(() => (doc ? buildScene(doc) : { nodes: [] }), [doc]);
 
+  // Every successful snapshot gets the next revision, set in the same render as the document it
+  // came with. A pending canvas preview retires by revision, not on any new document, because
+  // queued commits can render an earlier one's snapshot while a later one is still on the wire.
+  const revCounter = useRef(0);
+  const [docRev, setDocRev] = useState(0);
   const refresh = useCallback(async () => {
     const json = (await ipc.snapshot()) as string;
-    setDoc(JSON.parse(json) as DocSnapshot);
+    const parsed = JSON.parse(json) as DocSnapshot;
+    const rev = ++revCounter.current;
+    setDoc(parsed);
+    setDocRev(rev);
+    return rev;
   }, []);
 
   // ponytail: every command re-fetches the full snapshot instead of applying its returned
@@ -227,21 +236,22 @@ export function App() {
     // Not `run`: it reports one `false` for two failures that need opposite repairs. A refused
     // transform must put the shape back; one that landed but could not be re-read must keep it,
     // because the backend already holds the new geometry (silent-failure-hunter on #298).
-    commit: async (ids, m) => {
+    commit: async (ids, m): Promise<CommitOutcome> => {
       setError(null);
       try {
         await ipc.commitTransform({ ids, m });
       } catch (e) {
         setError(ipc.ipcErrorMessage(e));
-        return "refused";
+        return { kind: "refused" };
       }
       try {
-        await refresh();
+        return { kind: "applied", snapshotRev: await refresh() };
       } catch (e) {
         setError(`Edit applied, but the canvas could not be refreshed: ${ipc.ipcErrorMessage(e)}`);
+        return { kind: "applied", snapshotRev: null };
       }
-      return "applied";
     },
+    sceneRev: docRev,
   });
 
   const { repaint } = interaction;

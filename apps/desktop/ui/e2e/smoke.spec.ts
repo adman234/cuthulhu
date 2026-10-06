@@ -174,7 +174,10 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
         }
         return {};
       };
-      if (!holdingCommits) return applyIt();
+      // Answered on a later task, as a real IPC round trip is: resolving in the same microtask burst
+      // let a whole chain of queued commits finish before React rendered between them, which hid
+      // the window where an intermediate snapshot renders while the next commit is on the wire.
+      if (!holdingCommits) return new Promise((resolve) => setTimeout(() => resolve(applyIt()), 0));
       return new Promise((resolve) => heldCommits.push(() => resolve(applyIt())));
     },
     delete: (a) => {
@@ -3014,7 +3017,7 @@ test("a refused transform puts the shape back and the next drag starts from wher
   // Pressed where the shape was: a preview left stranded would put the box 5 mm to the right.
   await dragBy(page, centre, 5 * v.scale, 0);
   await expect.poll(async () => (await commitLog(page)).length).toBe(1);
-  expect((await nodeTransform(page, 2))[4]).toBeCloseTo(5, 0);
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(5, 0);
 });
 
 test("a transform that lands but cannot be re-read keeps the shape where the backend has it", async ({ page }) => {
@@ -3032,7 +3035,7 @@ test("a transform that lands but cannot be re-read keeps the shape where the bac
   // revert to the stale scene would make this press miss and start a marquee instead.
   await dragBy(page, { x: centre.x + 20 * v.scale, y: centre.y }, 5 * v.scale, 0);
   await expect.poll(async () => (await commitLog(page)).length).toBe(2);
-  expect((await nodeTransform(page, 2))[4]).toBeCloseTo(25, 0);
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(25, 0);
 });
 
 test("an edit keeps the operator's zoom; Ctrl+0 and a machine switch refit", async ({ page }) => {
@@ -3215,7 +3218,7 @@ test("a property edit after an applied-but-unread commit starts from where the s
   await page.getByLabel("X", { exact: true }).fill("5");
   await expect.poll(async () => (await commitLog(page)).length).toBe(2);
   expect((await commitLog(page))[1].m[4]).toBeCloseTo(-15, 1);
-  expect((await nodeTransform(page, 2))[4]).toBeCloseTo(5, 1);
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(5, 1);
 });
 
 test("a property edit made while a commit is in flight waits for it, then lands where it says", async ({ page }) => {
@@ -3268,4 +3271,28 @@ test("scaling a shape inside a moved Group keeps it where the real backend would
   // World: ×2, ×1.5 about (30, 0). In the Group's space, which is translated by 30, that is a pure
   // scale about its origin.
   await expect.poll(async () => nodeTransform(page, 3)).toEqual([2, 0, 0, 1.5, 0, 0].map((x) => expect.closeTo(x, 1)));
+});
+
+// Queued edits drain one per settled commit, and the snapshot of one can render while the next is
+// on the wire. That intermediate snapshot must not retire the in-flight preview, or the edit after
+// it is computed from geometry the backend has already left (Copilot on #298).
+test("queued X then W behind a move scale about where X put the shape", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 20 * v.scale, 0); // to x = 20, parked
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  await page.getByLabel("X", { exact: true }).fill("5");
+  await page.getByLabel("W", { exact: true }).fill("20");
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // The 10 mm rect ends at x = 5, 20 mm wide: scale ×2 about x = 5, so e = 5 and a = 2.
+  await expect.poll(async () => (await commitLog(page)).length).toBe(3);
+  await expect.poll(async () => {
+    const [a, , , , e] = await nodeTransform(page, 2);
+    return [a, e];
+  }).toEqual([expect.closeTo(2, 1), expect.closeTo(5, 1)]);
 });

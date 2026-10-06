@@ -44,18 +44,18 @@ describe("gestureScene", () => {
   const committed = { nodes: [{ id: 1, bounds: { x: 0, y: 0, w: 4, h: 4 } }] };
   const preview = applyOptimistic(committed, [1], [1, 0, 0, 1, 10, 0]);
 
-  it("starts the next gesture from the preview while its commit is still in flight", () => {
-    // Without this a second press before the snapshot lands finds the handles where the shape
-    // used to be, and its preview jumps back. CodeRabbit on #298.
-    expect(gestureScene({ base: committed, preview }, committed)).toBe(preview);
+  it("keeps the preview through any snapshot while its commit is on the wire", () => {
+    // An earlier commit's snapshot can render mid-flight; it does not include this commit.
+    expect(gestureScene({ preview, retireAt: Infinity }, committed, 7)).toBe(preview);
   });
 
-  it("drops the preview once a snapshot has replaced the scene it was built on", () => {
+  it("retires the preview once the snapshot that includes its commit has rendered", () => {
     const refreshed = { nodes: [{ id: 1, bounds: { x: 10, y: 0, w: 4, h: 4 } }] };
-    expect(gestureScene({ base: committed, preview }, refreshed)).toBe(refreshed);
+    expect(gestureScene({ preview, retireAt: 4 }, committed, 3)).toBe(preview);
+    expect(gestureScene({ preview, retireAt: 4 }, refreshed, 4)).toBe(refreshed);
   });
 
   it("uses the committed scene when nothing is pending", () => {
-    expect(gestureScene(null, committed)).toBe(committed);
+    expect(gestureScene(null, committed, 0)).toBe(committed);
   });
 });

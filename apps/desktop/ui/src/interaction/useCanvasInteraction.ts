@@ -44,12 +44,16 @@ export type CanvasInteractionArgs = {
    *  actually moves. The box, highlight and preview use it; the commit sends the ids themselves. */
   expand: (ids: number[]) => number[];
   artboard: Bounds | null;
-  /** "refused" puts the preview back. "applied" keeps it even if the snapshot that should follow
-   *  failed, because the backend then holds the new geometry and the old scene is the wrong one. */
+  /** Revision of the snapshot `scene` was built from; it rises with every successful refresh. */
+  sceneRev: number;
+  /** A refusal puts the preview back. An applied commit keeps it until its own snapshot has
+   *  rendered, even if that refresh failed, because the backend then holds the new geometry. */
   commit: (ids: number[], m: Matrix) => Promise<CommitOutcome>;
 };
 
-export type CommitOutcome = "applied" | "refused";
+/** "applied" carries the revision of the snapshot its refresh rendered, or null if that refresh
+ *  failed: the commit's preview stands in until a snapshot at least that new has rendered. */
+export type CommitOutcome = { kind: "refused" } | { kind: "applied"; snapshotRev: number | null };
 
 /** Which property field a queued edit came from: edits to one field supersede each other. */
 export type PropertyField = "x" | "y" | "w" | "h";
@@ -98,7 +102,7 @@ function isTyping(t: EventTarget | null): boolean {
 }
 
 export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInteraction {
-  const { canvasRef, rendererRef, scene, selected, setSelected, expand, artboard, commit } = args;
+  const { canvasRef, rendererRef, scene, selected, setSelected, expand, artboard, commit, sceneRev } = args;
   const [view, setViewState] = useState<View>(IDENTITY_VIEW);
   const [size, setSize] = useState<Size>({ w: 0, h: 0 });
   // ponytail: the readout re-renders App on every pointer move. Fine at today's App size; if a
@@ -110,8 +114,8 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // Native listeners are registered once and pointer handlers run between renders; both read
   // these rather than a render's closure, so they see the selection the user just made.
   const viewRef = useRef(view);
-  const latest = useRef({ scene, selected, expand, commit });
-  latest.current = { scene, selected, expand, commit };
+  const latest = useRef({ scene, selected, expand, commit, sceneRev });
+  latest.current = { scene, selected, expand, commit, sceneRev };
   const pending = useRef<PendingPreview | null>(null);
   // One transform on the wire at a time. A gesture pressed while a commit is unanswered would build
   // its matrix on that commit's preview, and if the commit were refused it would land about the
@@ -121,7 +125,10 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   const queued = useRef(new Map<string, { ids: number[]; make: (s: Scene) => Matrix | null }>());
   // What gestures start from and what the renderer is put back to: the in-flight preview until a
   // snapshot replaces the scene it was built on, then the committed scene. CodeRabbit on #298.
-  const current = () => ({ scene: gestureScene(pending.current, latest.current.scene), selected: latest.current.selected });
+  const current = () => ({
+    scene: gestureScene(pending.current, latest.current.scene, latest.current.sceneRev),
+    selected: latest.current.selected,
+  });
   const gesture = useRef<Gesture | null>(null);
   const spaceHeld = useRef(false);
   const overCanvas = useRef(false);
@@ -281,14 +288,17 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // Every transform reaches the backend through here, so all producers share the one-in-flight
   // rule and the pending preview that stands in for an unread commit.
   function send(ids: number[], m: Matrix) {
-    pending.current = { base: latest.current.scene, preview: applyOptimistic(current().scene, latest.current.expand(ids), m) };
+    pending.current = { preview: applyOptimistic(current().scene, latest.current.expand(ids), m), retireAt: Infinity };
     inFlight.current = true;
     repaint();
     void latest.current.commit(ids, m).then((outcome) => {
       inFlight.current = false;
-      // Applied but perhaps not re-read (its snapshot can fail): the preview is what the backend now
-      // holds, so it stays until a snapshot replaces the scene it was built on.
-      if (outcome === "refused") pending.current = null;
+      // Applied: the preview is what the backend now holds, so it stays until the snapshot that
+      // includes this commit has rendered. If that refresh failed, the next successful one will.
+      if (outcome.kind === "refused") pending.current = null;
+      else if (pending.current) {
+        pending.current = { ...pending.current, retireAt: outcome.snapshotRev ?? latest.current.sceneRev + 1 };
+      }
       repaint();
       drain();
     });
@@ -435,7 +445,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     cursor: cursorScreen ? screenToWorld(view, cursorScreen) : null,
     requestFit,
     repaint,
-    effectiveScene: gestureScene(pending.current, scene),
+    effectiveScene: gestureScene(pending.current, scene, sceneRev),
     transformWith,
     handlers: { onPointerEnter, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onPointerLeave },
   };
