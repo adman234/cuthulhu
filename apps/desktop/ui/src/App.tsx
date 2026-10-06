@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import * as ipc from "./ipc";
 import { Canvas2DRenderer } from "./render/Canvas2DRenderer";
-import { hitTest, type Affine6, type Scene, type ShapeGeom } from "./render/hittest";
+import type { Affine6, Scene, ShapeGeom } from "./render/hittest";
 import { pathBounds } from "./render/pathdata";
 import { IDENTITY, compose, transformBounds } from "./render/affine";
 import { toggleId } from "./interaction/marquee";
-import { applyOptimistic, dragMatrix, type Matrix, type Pt } from "./interaction/transform";
+import type { Matrix } from "./interaction/transform";
+import { useCanvasInteraction } from "./interaction/useCanvasInteraction";
+import { viewMatrix, zoomPercent } from "./interaction/viewport";
+import { selectionBox } from "./interaction/selectionBox";
 import { TopBar } from "./panels/TopBar";
 import { ToolRail } from "./panels/ToolRail";
 import { LayersPanel } from "./panels/LayersPanel";
@@ -101,11 +104,6 @@ function buildScene(doc: DocSnapshot): Scene {
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<Canvas2DRenderer | null>(null);
-  const dragStart = useRef<Pt | null>(null);
-  // Ids being dragged, captured at mousedown. Reading `selected` in the move/up handlers
-  // would depend on React having flushed the mousedown's setSelected before the next
-  // event — true today, but fragile. The ref pins the gesture's selection explicitly.
-  const dragIds = useRef<number[]>([]);
 
   const [doc, setDoc] = useState<DocSnapshot | null>(null);
   const [selected, setSelected] = useState<number[]>([]);
@@ -216,14 +214,28 @@ export function App() {
     if (ctx) rendererRef.current = new Canvas2DRenderer(ctx);
   }, []);
 
+  // After the renderer is constructed, so it exists before the hook's observer first fires.
+  const interaction = useCanvasInteraction({
+    canvasRef,
+    rendererRef,
+    scene,
+    selected,
+    setSelected,
+    artboard: doc?.artboard ?? null,
+    commit: (ids, m) => run(() => ipc.commitTransform({ ids, m })),
+  });
+
   useEffect(() => {
     const r = rendererRef.current;
     if (!r) return;
     r.setScene(scene);
     r.setSelection(selected);
     r.setArtboard(doc?.artboard ?? null);
+    r.setView(viewMatrix(interaction.view));
+    r.setOverlay({ box: selectionBox(scene, selected), marquee: null });
     r.draw();
-  }, [scene, selected, doc]);
+    // `size` because a resize clears the backing store, and nothing else would repaint it.
+  }, [scene, selected, doc, interaction.view, interaction.size]);
 
   // Clears selection only once the delete actually lands, so a failed delete leaves the
   // (still valid) selection in place, and a successful one can't leave stale ids around to
@@ -250,61 +262,6 @@ export function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [selected, run, deleteSelected]);
-
-  const canvasPos = (e: MouseEvent<HTMLCanvasElement>): Pt => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-  };
-
-  const onCanvasMouseDown = (e: MouseEvent<HTMLCanvasElement>) => {
-    const p = canvasPos(e);
-    const hit = hitTest(scene, p.x, p.y);
-    const next =
-      e.shiftKey && hit !== null ? toggleId(selected, hit) : hit === null ? [] : [hit];
-    setSelected(next);
-    dragIds.current = next;
-    // Only start a drag when the hit node is part of the new selection — a
-    // shift-click that toggles a node OUT shouldn't begin dragging the rest.
-    dragStart.current = hit !== null && next.includes(hit) ? p : null;
-  };
-
-  const onCanvasMouseMove = (e: MouseEvent<HTMLCanvasElement>) => {
-    const r = rendererRef.current;
-    if (!dragStart.current || !r) return;
-    const m = dragMatrix(dragStart.current, canvasPos(e));
-    r.setScene(applyOptimistic(scene, dragIds.current, m));
-    r.setSelection(dragIds.current);
-    r.draw();
-  };
-
-  // Shared by the canvas's own mouseup and the window-level listener below, so a drag
-  // released outside the canvas (mouse left the element before the button came up) still
-  // commits instead of leaving the optimistic preview stranded and never saved.
-  const finishDrag = useCallback(
-    (clientX: number, clientY: number) => {
-      const start = dragStart.current;
-      dragStart.current = null;
-      if (!start || !canvasRef.current) return;
-      const rect = canvasRef.current.getBoundingClientRect();
-      const m = dragMatrix(start, { x: clientX - rect.left, y: clientY - rect.top });
-      if (m[4] === 0 && m[5] === 0) return; // click, not a drag
-      const ids = dragIds.current;
-      if (ids.length === 0) return;
-      run(() => ipc.commitTransform({ ids, m }));
-    },
-    [run],
-  );
-
-  const onCanvasMouseUp = (e: MouseEvent<HTMLCanvasElement>) => finishDrag(e.clientX, e.clientY);
-
-  // Catches mouseup anywhere in the window, not just over the canvas. finishDrag no-ops
-  // when dragStart is already null, so this is harmless on the common in-canvas release
-  // (which fires first and clears dragStart before this listener runs).
-  useEffect(() => {
-    const onWindowMouseUp = (e: globalThis.MouseEvent) => finishDrag(e.clientX, e.clientY);
-    window.addEventListener("mouseup", onWindowMouseUp);
-    return () => window.removeEventListener("mouseup", onWindowMouseUp);
-  }, [finishDrag]);
 
   const root = doc?.root ?? 0;
   const selectedBounds = selected.length === 1 ? (scene.nodes.find((n) => n.id === selected[0])?.bounds ?? null) : null;
@@ -424,6 +381,7 @@ export function App() {
                 await ipc.loadProject({ path: p });
                 setLastPath(p);
                 setSelected([]); // loaded doc may not contain the old ids
+                interaction.requestFit();
               }
             })
           }
@@ -431,6 +389,7 @@ export function App() {
             run(async () => {
               await ipc.loadProject({ path: lastPath! });
               setSelected([]);
+              interaction.requestFit();
             })
           }
           canReload={lastPath !== null}
@@ -451,15 +410,18 @@ export function App() {
         onBoolean={onBooleanOp}
         onDelete={deleteSelected}
       />
-      <canvas
-        ref={canvasRef}
-        width={800}
-        height={600}
-        style={{ background: "var(--workspace)" }}
-        onMouseDown={onCanvasMouseDown}
-        onMouseMove={onCanvasMouseMove}
-        onMouseUp={onCanvasMouseUp}
-      />
+      {/* The wrapper is what lets the canvas fill its grid cell: a canvas sized 100% directly in
+          the grid adds its intrinsic 300×150 to the track minimum and never shrinks. `data-view`
+          lets e2e turn document mm into page px, since the canvas's pixels are unreadable there. */}
+      <div style={{ position: "relative", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
+        <canvas
+          ref={canvasRef}
+          data-testid="design-canvas"
+          data-view={`${interaction.view.scale} ${interaction.view.tx} ${interaction.view.ty}`}
+          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", display: "block", background: "var(--workspace)", touchAction: "none" }}
+          {...interaction.handlers}
+        />
+      </div>
       <div style={{ display: "grid", gridTemplateRows: "1fr 1fr", borderLeft: "1px solid var(--border)", minHeight: 0 }}>
         <LayersPanel
           doc={doc}
@@ -481,7 +443,14 @@ export function App() {
         />
       </div>
       <div style={{ gridColumn: "1 / -1" }}>
-        <StatusBar machine={doc?.machine ?? null} artboard={doc?.artboard ?? null} error={error} status={status} />
+        <StatusBar
+          machine={doc?.machine ?? null}
+          artboard={doc?.artboard ?? null}
+          error={error}
+          status={status}
+          zoomPercent={doc ? zoomPercent(interaction.view) : null}
+          cursor={interaction.cursor}
+        />
       </div>
       {cutOpen && doc ? (
         <CutDialog
