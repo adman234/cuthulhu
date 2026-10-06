@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { describe, it, expect } from "vitest";
-import { apply, isIdentity, rotateAbout, translate, type Pt } from "../render/affine";
+import { apply, axisLengths, compose, isIdentity, rotateAbout, scaleAbout, translate, type Pt } from "../render/affine";
 import { gestureMatrix, MIN_SIZE_MM } from "./gesture";
-import { boxCenter, type Box } from "./selectionBox";
+import { boxCenter, HANDLE_UNIT, SCALE_HANDLES, type Box } from "./selectionBox";
 
 const close = (a: Pt, b: Pt) => {
   expect(a.x).toBeCloseTo(b.x, 9);
@@ -77,5 +77,60 @@ describe("rotate", () => {
     const m = gestureMatrix("rotate", box, { x: c.x + 10, y: c.y }, { x: c.x + 10 * Math.cos(a), y: c.y + 10 * Math.sin(a) }, { shift: true, alt: false });
     const b = (45 * Math.PI) / 180;
     close(apply(m, { x: c.x + 10, y: c.y }), { x: c.x + 10 * Math.cos(b), y: c.y + 10 * Math.sin(b) });
+  });
+});
+
+// Every handle under every modifier, on a rotated box and on a sheared one (a rotated node inside
+// a non-uniformly scaled Group), asserting what must hold whichever handle it is rather than one
+// hand-worked matrix per case (Copilot on #298).
+describe("every handle × modifier", () => {
+  const boxes: [string, Box][] = [
+    ["rotated", { frame: compose(rotateAbout(0.5, { x: 0, y: 0 }), translate(2, 3)), w: 8, h: 4 }],
+    ["sheared", { frame: compose(rotateAbout(Math.PI / 4, { x: 0, y: 0 }), scaleAbout(3, 1, { x: 0, y: 0 })), w: 6, h: 2 }],
+  ];
+  const modifiers: [string, { shift: boolean; alt: boolean }][] = [
+    ["none", { shift: false, alt: false }],
+    ["Shift", { shift: true, alt: false }],
+    ["Alt", { shift: false, alt: true }],
+    ["Shift+Alt", { shift: true, alt: true }],
+  ];
+
+  for (const [boxName, b] of boxes) {
+    for (const h of SCALE_HANDLES) {
+      for (const [modName, mods] of modifiers) {
+        it(`${boxName} box, ${h} handle, ${modName}`, () => {
+          const unit = HANDLE_UNIT[h];
+          const grab = { x: unit.x * b.w, y: unit.y * b.h };
+          // Outward along the axes this handle moves, so the box grows and no clamp interferes.
+          const target = { x: grab.x + 3 * Math.sign(unit.x - 0.5), y: grab.y + 2 * Math.sign(unit.y - 0.5) };
+          const start = apply(b.frame, grab);
+          const m = gestureMatrix(h, b, start, apply(b.frame, target), mods);
+
+          const anchor = mods.alt ? { x: b.w / 2, y: b.h / 2 } : { x: (1 - unit.x) * b.w, y: (1 - unit.y) * b.h };
+          close(apply(m, apply(b.frame, anchor)), apply(b.frame, anchor));
+
+          // How far each of the box's own axes stretched: under shear too, a scale in the box's
+          // frame multiplies its edge vectors and nothing else.
+          const [ax, ay] = axisLengths(b.frame);
+          const [bx, by] = axisLengths(compose(b.frame, m));
+          if (mods.shift) {
+            expect(bx / ax).toBeCloseTo(by / ay, 9);
+          } else {
+            close(apply(m, start), apply(b.frame, target));
+          }
+        });
+      }
+    }
+  }
+
+  it("a zero-width box ignores the axis it has no length along and scales the other", () => {
+    const line: Box = { frame: rotateAbout(0.3, { x: 0, y: 0 }), w: 0, h: 10 };
+    const at = (x: number, y: number) => apply(line.frame, { x, y });
+    expect(isIdentity(gestureMatrix("e", line, at(0, 5), at(4, 5), none))).toBe(true);
+    for (const mods of [none, { shift: true, alt: false }]) {
+      const m = gestureMatrix("se", line, at(0, 10), at(4, 15), mods);
+      close(apply(m, at(0, 10)), at(0, 15));
+      close(apply(m, at(0, 0)), at(0, 0));
+    }
   });
 });
