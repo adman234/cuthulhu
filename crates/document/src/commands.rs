@@ -188,6 +188,31 @@ pub fn reorder(doc: &Document, id: NodeId, new_index: usize) -> Result<Delta, Cm
     ]))
 }
 
+/// Several moves, each with its own world-space matrix, committed as one Delta and so one undo.
+/// Align and distribute need a translation per unit, which `transform_nodes`' single matrix cannot
+/// express. All or nothing: one refused entry refuses the batch, so a half-aligned selection is
+/// never saved. Each entry runs against the document as the earlier ones left it, and a node whose
+/// ancestor any entry selects is skipped, as within one `transform_nodes` call, so nothing moves
+/// twice.
+pub fn transform_each(doc: &Document, moves: &[(Vec<NodeId>, Affine)]) -> Result<Delta, CmdError> {
+    if moves.is_empty() { return Err(CmdError::EmptySelection); }
+    let selected: HashSet<NodeId> = moves.iter().flat_map(|(ids, _)| ids.iter().copied()).collect();
+    let mut scratch = doc.clone();
+    let mut ops = Vec::new();
+    for (ids, m) in moves {
+        for &id in ids { scratch.get(id).ok_or(CmdError::NotFound)?; }
+        let own: Vec<NodeId> = ids.iter().copied()
+            .filter(|&id| !has_selected_ancestor(&scratch, &selected, id))
+            .collect();
+        if own.is_empty() { continue; }
+        let d = transform_nodes(&scratch, &own, *m)?;
+        ops.extend(d.0.iter().cloned());
+        scratch.apply(d);
+    }
+    if ops.is_empty() { return Err(CmdError::EmptySelection); }
+    Ok(Delta(ops))
+}
+
 fn parent_of(doc: &Document, id: NodeId) -> Option<NodeId> {
     doc.nodes.iter().find(|(_, n)| n.children.contains(&id)).map(|(pid, _)| *pid)
 }
@@ -971,5 +996,61 @@ mod tests {
             Err(CmdError::EmptySelection));
         assert_eq!(set_material_preset(&doc, &[NodeId(9999)], PresetAssignment::Inherit),
             Err(CmdError::NotFound));
+    }
+
+    // Two rects at the root and a Group holding a third, for transform_each.
+    fn batch_doc() -> (Editor, NodeId, NodeId, NodeId, NodeId) {
+        let mut ed = Editor::new();
+        let root = ed.doc.root;
+        let mut add = |ed: &mut Editor, parent: NodeId, node: crate::Node| {
+            ed.commit(crate::Delta(vec![crate::NodeOp::Add { parent, node, index: usize::MAX }]));
+        };
+        let a = ed.doc.ids.next();
+        add(&mut ed, root, crate::Node::shape(a, ShapeKind::Rect { w: 10.0, h: 10.0 }));
+        let b = ed.doc.ids.next();
+        add(&mut ed, root, crate::Node::shape(b, ShapeKind::Rect { w: 10.0, h: 10.0 }));
+        let g = ed.doc.ids.next();
+        add(&mut ed, root, crate::Node::container(g, crate::NodeKind::Group));
+        let c = ed.doc.ids.next();
+        add(&mut ed, g, crate::Node::shape(c, ShapeKind::Rect { w: 10.0, h: 10.0 }));
+        (ed, a, b, g, c)
+    }
+
+    #[test]
+    fn transform_each_commits_every_move_as_one_undo() {
+        // Align gives each unit its own translation; one click must still be one undo.
+        let (mut ed, a, b, _, _) = batch_doc();
+        let d = transform_each(&ed.doc, &[(vec![a], Affine::translate(5.0, 0.0)), (vec![b], Affine::translate(0.0, 7.0))]).unwrap();
+        ed.commit(d);
+        assert_eq!(ed.doc.get(a).unwrap().transform.apply(0.0, 0.0), (5.0, 0.0));
+        assert_eq!(ed.doc.get(b).unwrap().transform.apply(0.0, 0.0), (0.0, 7.0));
+        ed.undo().unwrap();
+        assert_eq!(ed.doc.get(a).unwrap().transform.apply(0.0, 0.0), (0.0, 0.0));
+        assert_eq!(ed.doc.get(b).unwrap().transform.apply(0.0, 0.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn transform_each_refuses_the_whole_batch_for_one_bad_entry() {
+        // A half-aligned selection is never saved.
+        let (ed, a, _, _, _) = batch_doc();
+        let r = transform_each(&ed.doc, &[(vec![a], Affine::translate(5.0, 0.0)), (vec![NodeId(9_999)], Affine::translate(1.0, 0.0))]);
+        assert!(matches!(r, Err(CmdError::NotFound)));
+    }
+
+    #[test]
+    fn transform_each_runs_each_entry_on_what_the_earlier_ones_left() {
+        // Translate then scale about the origin: (1, 0) → (6, 0) → (12, 0).
+        let (mut ed, a, _, _, _) = batch_doc();
+        let scale2 = Affine([2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
+        ed.commit(transform_each(&ed.doc, &[(vec![a], Affine::translate(5.0, 0.0)), (vec![a], scale2)]).unwrap());
+        assert_eq!(ed.doc.get(a).unwrap().transform.apply(1.0, 0.0), (12.0, 0.0));
+    }
+
+    #[test]
+    fn transform_each_moves_a_node_once_when_another_entry_selects_its_ancestor() {
+        // The Group carries its child; the child's own entry would move it a second time.
+        let (mut ed, _, _, g, c) = batch_doc();
+        ed.commit(transform_each(&ed.doc, &[(vec![g], Affine::translate(5.0, 0.0)), (vec![c], Affine::translate(5.0, 0.0))]).unwrap());
+        assert_eq!(world_transform(&ed.doc, c).unwrap().apply(0.0, 0.0), (5.0, 0.0));
     }
 }
