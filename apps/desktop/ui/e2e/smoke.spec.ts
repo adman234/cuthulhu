@@ -3656,3 +3656,23 @@ test("an align's preview moves every unit while its commit is on the wire", asyn
   await expect(page.getByLabel("X", { exact: true })).toHaveValue("15");
   await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
 });
+
+test("distribute is disabled per axis where one piece spans the others, and says why", async ({ page }) => {
+  await seedAlignExtras(page);
+  const horizontal = page.getByRole("button", { name: "Distribute horizontal spacing" });
+  const vertical = page.getByRole("button", { name: "Distribute vertical spacing" });
+
+  // Widen red to 100 mm: it spans the others across x (0..100 over 0..80) but not down y.
+  await selectRows(page, [0]);
+  await page.getByLabel("W", { exact: true }).fill("100");
+  await expect.poll(async () => (await nodeTransform(page, 2))[0]).toBeCloseTo(10, 6);
+
+  await selectRows(page, [0, 2]);
+  await expect(horizontal).toHaveAttribute("title", /select three or more pieces/);
+
+  await page.getByTestId("layer-row").nth(1).click({ modifiers: ["Shift"] });
+  await expect(horizontal).toBeDisabled();
+  await expect(horizontal).toHaveAttribute("title", /one selected piece spans the others/);
+  await expect(vertical).toBeEnabled();
+  await expect(vertical).toHaveAttribute("title", "Distribute vertical spacing");
+});

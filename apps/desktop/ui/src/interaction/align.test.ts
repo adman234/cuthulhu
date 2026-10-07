@@ -114,4 +114,13 @@ describe("canDistribute", () => {
     expect(canDistribute([plate, p1, p2], "x")).toBe(false);
     expect(canDistribute([plate, p1, p2], "y")).toBe(true);
   });
+
+  it("finds a spanning unit that shares its start with another, in either document order", () => {
+    const narrow = unit(23, 0, 0, 5, 1);
+    const plate = unit(24, 0, 0, 100, 1);
+    const piece = unit(25, 10, 0, 10, 1);
+    expect(canDistribute([narrow, plate, piece], "x")).toBe(false);
+    expect(canDistribute([plate, narrow, piece], "x")).toBe(false);
+    expect(distributeMoves([narrow, plate, piece], "x")).toEqual([]);
+  });
 });

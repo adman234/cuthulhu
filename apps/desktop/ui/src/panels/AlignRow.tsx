@@ -59,12 +59,16 @@ function DistributeIcon({ vertical }: { vertical: boolean }) {
   );
 }
 
+function distributeTitle(label: string, unitCount: number, enabled: boolean): string {
+  if (enabled) return label;
+  return unitCount < 3 ? `${label}: select three or more pieces` : `${label}: one selected piece spans the others`;
+}
+
 const AT: Record<AlignMode, number> = { left: 0, hcenter: 0.5, right: 1, top: 0, vmiddle: 0.5, bottom: 1 };
 
 export function AlignRow({ unitCount, distributable, onAlign, onDistribute }: Props) {
   // One unit aligns to the artboard, so align needs one. Distribute keeps the outer two in place
-  // and needs a third to move; the tooltip names the case where three are selected and it still
-  // cannot.
+  // and needs a third to move; the tooltip says which of the two reasons disabled it.
   return (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
       {ALIGNS.map(({ mode, label }) => (
@@ -75,7 +79,7 @@ export function AlignRow({ unitCount, distributable, onAlign, onDistribute }: Pr
       ))}
       {DISTRIBUTES.map(({ axis, label }) => (
         <button key={axis} aria-label={label} disabled={!distributable[axis]} style={btn}
-                title={unitCount >= 3 && !distributable[axis] ? `${label}: one selected piece spans the others` : label}
+                title={distributeTitle(label, unitCount, distributable[axis])}
                 onClick={() => onDistribute(axis)}>
           <DistributeIcon vertical={axis === "y"} />
         </button>

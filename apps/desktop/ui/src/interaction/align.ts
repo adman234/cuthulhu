@@ -60,7 +60,12 @@ function outerUnits(units: Unit[], axis: Axis): { order: Unit[]; li: number } | 
   order.forEach((u, i) => {
     if (end(u) >= end(order[li])) li = i;
   });
-  return li === 0 ? null : { order, li };
+  // Spanning is asked of every unit, not read off the ends: a plate sharing its start with a piece
+  // earlier in the document sorts second, and was taken as the far end (code-reviewer).
+  const lo = start(order[0].bounds, axis);
+  const hi = end(order[li]);
+  const spans = order.some((u) => start(u.bounds, axis) <= lo && end(u) >= hi);
+  return spans ? null : { order, li };
 }
 
 /** Whether distribute can act, so the button says so rather than doing nothing: a backing plate
