@@ -9,6 +9,18 @@
 **Architecture:** a pure `interaction/snap.ts` gathers per-axis target lines once per gesture and adjusts the gesture's *pointer* before `gestureMatrix` runs. Preview, commit, Shift and Alt therefore stay unchanged. The hook keeps the targets and the current guides on the transform gesture. The renderer draws the guides from the overlay.
 
 **Spec:** `docs/superpowers/specs/2026-10-07-snapping-and-guides-design.md`.
+> **Implementation and review overturned some details after this plan was written. The task bodies
+> below still state the originals and are left as they were**, as with the earlier plans: this
+> file records the instructions the implementation was given. What shipped:
+>
+> 1. **Task 3, test 3 expects `a` ≈ 3, not 2.** The right edge goes from 10 to 30 mm with the left
+>    edge at 0, so the 10 mm rect becomes 30 mm wide. Unsnapped, it would be 2.96 (CodeRabbit on
+>    #300).
+> 2. **Guides are kept only for lines the landed box touches, and stretched over it.** `keepLanded`
+>    runs after `gestureMatrix`. Each guide carries its `axis` rather than having it inferred from
+>    its ends, and a Shift move holds its locked axis at the start (gate-1 review).
+> 3. **Task 3 grew from three e2e tests to seven**: press-and-drag, the artboard's centre line, a
+>    Group not snapping to its own shape, and Alt edge scaling (gate-1 review).
 
 ## Global constraints
 
