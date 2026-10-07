@@ -7,6 +7,7 @@
   --muted: #9a9aa2;
   --accent: #22d3ee; /* selection */
   --cut: #ff4d4d; /* reserved for cut, unused for now */
+  --guide: #f472b6; /* smart guides — distinct from selection cyan and cut red */
   --ready: #34d399;
 }
 

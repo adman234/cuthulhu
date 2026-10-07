@@ -165,15 +165,15 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     if (g?.t === "transform") {
       r.setScene(applyOptimistic(s, g.shapes, g.m));
       r.setSelection(g.shapes);
-      r.setOverlay({ box: { ...g.box, frame: compose(g.box.frame, g.m) }, marquee: null });
+      r.setOverlay({ box: { ...g.box, frame: compose(g.box.frame, g.m) }, marquee: null, guides: [] });
     } else {
       const shapes = latest.current.expand(sel);
       r.setScene(s);
       r.setSelection(shapes);
       r.setOverlay(
         g?.t === "marquee"
-          ? { box: null, marquee: normalizeRect(g.start, g.cur) }
-          : { box: selectionBox(s, shapes), marquee: null },
+          ? { box: null, marquee: normalizeRect(g.start, g.cur), guides: [] }
+          : { box: selectionBox(s, shapes), marquee: null, guides: [] },
       );
     }
     r.draw();
