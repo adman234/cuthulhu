@@ -7,7 +7,7 @@ import type { Affine6, Scene, ShapeGeom } from "./render/hittest";
 import { pathBounds } from "./render/pathdata";
 import { IDENTITY, compose, transformBounds } from "./render/affine";
 import { outermost, shapesUnder, toggleId } from "./interaction/marquee";
-import { alignMoves, canDistribute, distributeMoves, type AlignMode, type Axis, type Unit } from "./interaction/align";
+import { alignMoves, distributeBlock, distributeMoves, type AlignMode, type Axis, type Unit } from "./interaction/align";
 import type { Matrix } from "./interaction/transform";
 import { useCanvasInteraction, type CommitOutcome } from "./interaction/useCanvasInteraction";
 import { viewMatrix, zoomPercent } from "./interaction/viewport";
@@ -359,7 +359,7 @@ export function App() {
   // two units and did nothing, or sent a lone shape to the artboard (silent-failure-hunter).
   const shownUnits = unitsIn(interaction.effectiveScene);
   const unitCount = shownUnits.length;
-  const distributable = { x: canDistribute(shownUnits, "x"), y: canDistribute(shownUnits, "y") };
+  const distributeBlocked = { x: distributeBlock(shownUnits, "x"), y: distributeBlock(shownUnits, "y") };
 
   const cutLineType = doc ? selectionCutLineType(doc.nodes, selected) : null;
 
@@ -510,7 +510,7 @@ export function App() {
           onChangeW={(v) => commitScale("w", v)}
           onChangeH={(v) => commitScale("h", v)}
           unitCount={unitCount}
-          distributable={distributable}
+          distributeBlocked={distributeBlocked}
           onAlign={align}
           onDistribute={distribute}
           cutLineType={cutLineType}

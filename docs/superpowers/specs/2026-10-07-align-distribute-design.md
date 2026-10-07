@@ -39,8 +39,8 @@ From `main` at `5dfde3b`:
   (`// ponytail:` no key object or "align to artboard" toggle for multi-selections. Ceiling: you
   cannot align five pieces to a sixth that stays put. Upgrade: a key object, chosen by clicking a
   selected unit again, as in Illustrator.)
-- **Distribute needs three or more units.** The two outermost stay put: the unit that starts first
-  and the unit that reaches furthest. The others move between them so the gaps between neighbours
+- **Distribute needs three or more units.** Unless one unit is a frame (below), the two outermost
+  stay put: the unit that starts first and the unit that reaches furthest. The others move between them so the gaps between neighbours
   are equal, ordered by their left (or top) edge, with document order breaking ties. (Revised in
   gate 1: taking the far end from the unit that starts last threw small pieces past each other when
   a wide one started first.) If the units together are wider than the span, the gaps come out
@@ -51,7 +51,10 @@ From `main` at `5dfde3b`:
   margins at its edges equal to the gaps between them. Sure Cuts A Lot 6 offers this as a separate
   "Distribute to Selection Below" mode (manual §3.19); Silhouette Studio has no equivalent. Here
   the selection says which is meant, so there is no mode to set. When more than one unit spans
-  the rest (stacked copies of one shape), none of them is the frame and distribute is disabled.
+  the rest (stacked copies of one shape), none of them is the frame and distribute is disabled; it
+  is also disabled when the pieces are longer than the frame, since spacing them evenly would push
+  the outer ones through it. Edges are compared to within 1e-6 mm, so a piece flush with its border
+  counts as inside it despite float noise.
   (Decided 2026-10-07, after gate 1 had first disabled distribute whenever a unit spanned.)
 - **Moves are axis-locked translations.** Horizontal commands change x only and vertical commands
   change y only. A rotated unit aligns by its axis-aligned bounds, the same convention snapping

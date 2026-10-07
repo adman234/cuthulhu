@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import type { CSSProperties } from "react";
-import type { AlignMode, Axis } from "../interaction/align";
+import type { AlignMode, Axis, DistributeBlock } from "../interaction/align";
 
 type Props = {
   /** Selected ids that move as a piece; see `outermost`. */
   unitCount: number;
-  /** Per axis, from `canDistribute`: three units are not enough when several span the rest. */
-  distributable: Record<Axis, boolean>;
+  /** Per axis, from `distributeBlock`: why distribute cannot act there, or null. */
+  distributeBlocked: Record<Axis, DistributeBlock | null>;
   onAlign: (mode: AlignMode) => void;
   onDistribute: (axis: Axis) => void;
 };
@@ -59,16 +59,22 @@ function DistributeIcon({ vertical }: { vertical: boolean }) {
   );
 }
 
-function distributeTitle(label: string, unitCount: number, enabled: boolean): string {
-  if (enabled) return label;
-  return unitCount < 3 ? `${label}: select three or more pieces` : `${label}: selected pieces lie on top of each other`;
+const BLOCKED: Record<DistributeBlock, string> = {
+  few: "select three or more pieces",
+  stacked: "selected pieces lie on top of each other",
+  tight: "the pieces do not fit inside the one around them",
+};
+
+/** Exported for its own test: the reason is the only thing a disabled button can tell. */
+export function distributeTitle(label: string, block: DistributeBlock | null): string {
+  return block ? `${label}: ${BLOCKED[block]}` : label;
 }
 
 const AT: Record<AlignMode, number> = { left: 0, hcenter: 0.5, right: 1, top: 0, vmiddle: 0.5, bottom: 1 };
 
-export function AlignRow({ unitCount, distributable, onAlign, onDistribute }: Props) {
-  // One unit aligns to the artboard, so align needs one. Distribute keeps the outer two in place
-  // and needs a third to move; the tooltip says which of the two reasons disabled it.
+export function AlignRow({ unitCount, distributeBlocked, onAlign, onDistribute }: Props) {
+  // One unit aligns to the artboard, so align needs one. Distribute's reasons come from
+  // `distributeBlock`, per axis, and the tooltip names the one that disabled it.
   return (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
       {ALIGNS.map(({ mode, label }) => (
@@ -78,8 +84,8 @@ export function AlignRow({ unitCount, distributable, onAlign, onDistribute }: Pr
         </button>
       ))}
       {DISTRIBUTES.map(({ axis, label }) => (
-        <button key={axis} aria-label={label} disabled={!distributable[axis]} style={btn}
-                title={distributeTitle(label, unitCount, distributable[axis])}
+        <button key={axis} aria-label={label} disabled={distributeBlocked[axis] !== null} style={btn}
+                title={distributeTitle(label, distributeBlocked[axis])}
                 onClick={() => onDistribute(axis)}>
           <DistributeIcon vertical={axis === "y"} />
         </button>

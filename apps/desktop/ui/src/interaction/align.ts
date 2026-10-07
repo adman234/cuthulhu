@@ -48,6 +48,14 @@ export function alignMoves(units: Unit[], mode: AlignMode, artboard: Bounds | nu
 }
 
 const end = (u: Unit, a: Axis) => start(u.bounds, a) + size(u.bounds, a);
+/** mm. Edges an operator sees as shared can differ by float noise once transformed; compared
+ *  exactly, a piece flush with its border started a hair before it and the border stopped being
+ *  the frame (silent-failure-hunter). */
+const EPS = 1e-6;
+
+/** Why distribute cannot act on an axis: fewer than three units, several units spanning the rest
+ *  (stacked copies), or a frame too small for what is inside it. */
+export type DistributeBlock = "few" | "stacked" | "tight";
 
 /** How a distribute is anchored, or null when it has nothing to do.
  *  - "ends": the unit that starts first and the unit that reaches furthest stay put, and the rest
@@ -57,52 +65,62 @@ const end = (u: Unit, a: Axis) => start(u.bounds, a) + size(u.bounds, a);
  *    at its edges equal to the gaps between them. Sure Cuts A Lot offers the same as a separate
  *    "Distribute to Selection Below" mode; here the selection says which is meant, so there is no
  *    mode to set.
- *  Null for fewer than three units, or when more than one unit spans the rest (stacked copies of
- *  one shape), since no one of them is the frame. */
+ *  Blocked when more than one unit spans the rest, since no one of them is the frame, and when the
+ *  pieces inside a frame are longer than it: spacing them evenly would push the outer ones through
+ *  the border that was meant to hold them (silent-failure-hunter). */
 type Anchors =
   | { kind: "ends"; order: Unit[]; li: number }
-  | { kind: "frame"; frame: Unit; inner: Unit[] };
+  | { kind: "frame"; frame: Unit; inner: Unit[] }
+  | { kind: "blocked"; reason: DistributeBlock };
 
-function anchors(units: Unit[], axis: Axis): Anchors | null {
-  if (units.length < 3) return null;
+function anchors(units: Unit[], axis: Axis): Anchors {
+  if (units.length < 3) return { kind: "blocked", reason: "few" };
   // Array.prototype.sort is stable, so document order breaks ties.
   const order = [...units].sort((a, b) => start(a.bounds, axis) - start(b.bounds, axis));
   // Of the units reaching furthest, the one that starts last, so it is never the first as well
   // unless it spans the rest.
   let li = 0;
   order.forEach((u, i) => {
-    if (end(u, axis) >= end(order[li], axis)) li = i;
+    if (end(u, axis) >= end(order[li], axis) - EPS) li = i;
   });
   // Spanning is asked of every unit, not read off the ends: a plate sharing its start with a piece
   // earlier in the document sorts second, and was taken as the far end (code-reviewer).
   const lo = start(order[0].bounds, axis);
   const hi = end(order[li], axis);
-  const spanning = order.filter((u) => start(u.bounds, axis) <= lo && end(u, axis) >= hi);
-  if (spanning.length > 1) return null;
+  const spanning = order.filter((u) => start(u.bounds, axis) <= lo + EPS && end(u, axis) >= hi - EPS);
+  if (spanning.length > 1) return { kind: "blocked", reason: "stacked" };
   if (spanning.length === 1) {
     const frame = spanning[0];
-    return { kind: "frame", frame, inner: order.filter((u) => u !== frame) };
+    const inner = order.filter((u) => u !== frame);
+    if (room(frame, inner, axis) < -EPS) return { kind: "blocked", reason: "tight" };
+    return { kind: "frame", frame, inner };
   }
   return { kind: "ends", order, li };
 }
 
-/** Whether distribute can act, so the button says so rather than doing nothing. */
-export function canDistribute(units: Unit[], axis: Axis): boolean {
-  return anchors(units, axis) !== null;
+/** What the frame has left once its pieces are laid end to end. */
+function room(frame: Unit, inner: Unit[], axis: Axis): number {
+  return size(frame.bounds, axis) - inner.reduce((s, u) => s + size(u.bounds, axis), 0);
+}
+
+/** Why distribute cannot act, or null when it can, so the button says so rather than doing
+ *  nothing. */
+export function distributeBlock(units: Unit[], axis: Axis): DistributeBlock | null {
+  const a = anchors(units, axis);
+  return a.kind === "blocked" ? a.reason : null;
 }
 
 /** Equal gaps between neighbours, because gaps are what a weeder works between; see `Anchors` for
  *  what stays put. Taking the far end from whichever unit starts last threw small pieces past each
- *  other when a wide one started first (code-reviewer). When the units are longer than the room
- *  they have, the gaps come out negative and they overlap evenly, which is still the arithmetic
- *  answer. */
+ *  other when a wide one started first (code-reviewer). Between two ends, units longer than the
+ *  span get negative gaps and overlap evenly, which is still the arithmetic answer; a frame they
+ *  do not fit is blocked instead (see `Anchors`). */
 export function distributeMoves(units: Unit[], axis: Axis): Move[] {
   const a = anchors(units, axis);
-  if (!a) return [];
+  if (a.kind === "blocked") return [];
   // The units that stay put are never listed, so float drift cannot turn them into a move.
   if (a.kind === "frame") {
-    const room = size(a.frame.bounds, axis) - a.inner.reduce((s, u) => s + size(u.bounds, axis), 0);
-    return place(a.inner, start(a.frame.bounds, axis), room / (a.inner.length + 1), axis);
+    return place(a.inner, start(a.frame.bounds, axis), room(a.frame, a.inner, axis) / (a.inner.length + 1), axis);
   }
   const { order, li } = a;
   const first = order[0];

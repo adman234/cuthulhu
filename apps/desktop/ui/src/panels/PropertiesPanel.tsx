@@ -6,7 +6,7 @@ import type { Preset } from "../cut/viewmodel";
 import type { EffectiveMaterial } from "./materialPreset";
 import { NumberField } from "./NumberField";
 import { AlignRow } from "./AlignRow";
-import type { AlignMode, Axis } from "../interaction/align";
+import type { AlignMode, Axis, DistributeBlock } from "../interaction/align";
 
 type Props = {
   bounds: Bounds | null;
@@ -20,7 +20,7 @@ type Props = {
   onChangeW: (v: number) => void;
   onChangeH: (v: number) => void;
   unitCount: number;
-  distributable: Record<Axis, boolean>;
+  distributeBlocked: Record<Axis, DistributeBlock | null>;
   onAlign: (mode: AlignMode) => void;
   onDistribute: (axis: Axis) => void;
   onChangeCutLineType: (v: CutLineTypeJson) => void;
@@ -48,7 +48,7 @@ export function materialLabel(
 }
 
 export function PropertiesPanel({ bounds, cutLineType, materialPreset, effectiveMaterial, presets,
-                                  onChangeX, onChangeY, onChangeW, onChangeH, unitCount, distributable, onAlign, onDistribute,
+                                  onChangeX, onChangeY, onChangeW, onChangeH, unitCount, distributeBlocked, onAlign, onDistribute,
                                   onChangeCutLineType, onChangeMaterialPreset }: Props) {
   return (
     <div style={{ padding: 8, display: "flex", flexDirection: "column", gap: 6, overflowY: "auto" }}>
@@ -63,7 +63,7 @@ export function PropertiesPanel({ bounds, cutLineType, materialPreset, effective
       ) : null}
       {/* Also outside it, since aligning is mostly for multi-node selections. Always shown, disabled
           when it cannot act, so the buttons do not jump the rows below them in and out. */}
-      <AlignRow unitCount={unitCount} distributable={distributable} onAlign={onAlign} onDistribute={onDistribute} />
+      <AlignRow unitCount={unitCount} distributeBlocked={distributeBlocked} onAlign={onAlign} onDistribute={onDistribute} />
       {/* Outside the `bounds` branch: `selectedBounds` is null for every multi-node selection
           and for a selected container (App.tsx), both of which do have a cuttability. */}
       {cutLineType !== null ? (

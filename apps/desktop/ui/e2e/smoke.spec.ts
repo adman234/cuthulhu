@@ -3676,3 +3676,24 @@ test("distribute spaces the pieces inside a border selected with them", async ({
   await expect.poll(async () => (await batchLog(page)).length).toBe(2); // the W edit, then this
   expect((await batchLog(page))[1]).toMatchObject({ ids: [3], m: [1, 0, 0, 1, 20, 0] });
 });
+
+test("a border too small for its pieces blocks distribute on that axis only, and says why", async ({ page }) => {
+  await seedAlignExtras(page);
+  const horizontal = page.getByRole("button", { name: "Distribute horizontal spacing" });
+  const vertical = page.getByRole("button", { name: "Distribute vertical spacing" });
+
+  // Red becomes a 100 mm border; green grows to 75 mm, so with the 30 mm Group the pieces need
+  // 105 mm across. Down y nothing spans and the three distribute between two ends as usual.
+  await selectRows(page, [0]);
+  await page.getByLabel("W", { exact: true }).fill("100");
+  await expect.poll(async () => (await nodeTransform(page, 2))[0]).toBeCloseTo(10, 6);
+  await selectRows(page, [1]);
+  await page.getByLabel("W", { exact: true }).fill("75");
+  await expect.poll(async () => (await nodeTransform(page, 3))[0]).toBeCloseTo(7.5, 6);
+
+  await selectRows(page, [0, 1, 2]);
+  await expect(horizontal).toBeDisabled();
+  await expect(horizontal).toHaveAttribute("title", /the pieces do not fit inside the one around them/);
+  await expect(vertical).toBeEnabled();
+  await expect(vertical).toHaveAttribute("title", "Distribute vertical spacing");
+});

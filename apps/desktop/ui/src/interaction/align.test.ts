@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { describe, it, expect } from "vitest";
-import { alignMoves, canDistribute, distributeMoves, type AlignMode, type Unit } from "./align";
+import { alignMoves, distributeBlock, distributeMoves, type AlignMode, type Unit } from "./align";
 
 const unit = (id: number, x: number, y: number, w: number, h: number): Unit => ({ ids: [id], bounds: { x, y, w, h } });
 // Three units: A 0..10 × 0..10, B 20..24 × 5..25, C 40..60 × 2..6. Selection bounds 0..60 × 0..25.
@@ -113,15 +113,50 @@ describe("distributeMoves", () => {
   });
 });
 
-describe("canDistribute", () => {
-  it("says no to fewer than three units and to stacked copies, yes to a frame", () => {
+describe("distributeBlock", () => {
+  it("names why distribute cannot act, and is null for a frame or two ends", () => {
     const plate = unit(20, 0, 0, 100, 5);
     const p1 = unit(21, 10, 10, 10, 10);
     const p2 = unit(22, 40, 30, 10, 10);
-    expect(canDistribute([A, B], "x")).toBe(false);
-    expect(canDistribute([A, B, C], "x")).toBe(true);
-    expect(canDistribute([plate, p1, p2], "x")).toBe(true);
-    expect(canDistribute([A, unit(16, 0, 0, 10, 10), unit(17, 2, 2, 4, 4)], "x")).toBe(false);
+    expect(distributeBlock([A, B], "x")).toBe("few");
+    expect(distributeBlock([A, B, C], "x")).toBeNull();
+    expect(distributeBlock([plate, p1, p2], "x")).toBeNull();
+    expect(distributeBlock([A, unit(16, 0, 0, 10, 10), unit(17, 2, 2, 4, 4)], "x")).toBe("stacked");
+  });
+
+  it("blocks a frame too small for its pieces rather than pushing them through it", () => {
+    // Three overlapping 50 mm pieces in a 100 mm border: spaced evenly they would leave it.
+    const border = unit(30, 0, 0, 100, 100);
+    const pieces = [unit(31, 0, 10, 50, 10), unit(32, 25, 30, 50, 10), unit(33, 50, 50, 50, 10)];
+    expect(distributeBlock([border, ...pieces], "x")).toBe("tight");
+    expect(distributeMoves([border, ...pieces], "x")).toEqual([]);
+    expect(distributeBlock([border, ...pieces], "y")).toBeNull(); // 30 mm of pieces in 100 fits
+  });
+
+  it("judges each axis on its own: a frame on y, two ends on x", () => {
+    // A tall plate on the left holding the pieces' heights but not their x positions.
+    const plate = unit(40, 0, 0, 5, 100);
+    const p1 = unit(41, 20, 10, 10, 10);
+    const p2 = unit(42, 50, 60, 10, 10);
+    expect(distributeBlock([p1, plate, p2], "x")).toBeNull();
+    const moves = distributeMoves([p1, plate, p2], "y"); // 80 mm of room over three spaces
+    expect(moves.map((m) => m.ids[0])).toEqual([41, 42]);
+    expect(dy(moves, 41)).toBeCloseTo(80 / 3 - 10, 9);
+    expect(moves.every((m) => m.m[4] === 0)).toBe(true);
+  });
+
+  it("treats a piece flush with its border within float noise as inside it", () => {
+    // 0.1 + 0.2 is 0.30000000000000004: compared exactly, this piece "reached further" than the
+    // 0.3 plate, and the plate stopped being the frame.
+    const plate = unit(50, 0, 0, 0.3, 1);
+    const inner = unit(51, 0.05, 0, 0.05, 1);
+    const flush = unit(52, 0.1, 0, 0.2, 1);
+    expect(distributeBlock([plate, inner, flush], "x")).toBeNull();
+    expect(distributeMoves([plate, inner, flush], "x").map((m) => m.ids[0])).toEqual([51, 52]);
+  });
+
+  it("blocks two units with exactly the same span as stacked", () => {
+    expect(distributeBlock([unit(60, 0, 0, 100, 1), unit(61, 0, 0, 100, 1), unit(62, 40, 0, 10, 1)], "x")).toBe("stacked");
   });
 
   it("finds a frame that shares its start with another unit, in either document order", () => {
