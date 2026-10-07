@@ -74,7 +74,7 @@ ui/src/interaction/
 ui/src/render/
   Renderer.ts           Overlay gains `guides: Guide[]` (world-space segments)
   Canvas2DRenderer.ts   draws guides in screen space, 1 px, --guide
-ui/src/styles/…         the --guide token, dark and light
+ui/src/tokens.css       the --guide token, dark and light, beside --accent and --cut
 ```
 
 No IPC change, so `ipc-inventory.json` and `Cargo.lock` do not move. `dist/` is rebuilt and
