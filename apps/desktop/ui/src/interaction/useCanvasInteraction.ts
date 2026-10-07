@@ -10,6 +10,7 @@ import {
 } from "./viewport";
 import { handleAt, selectionBox, type Box, type HandleKind } from "./selectionBox";
 import { gestureMatrix, type Modifiers } from "./gesture";
+import { SNAP_PX, snapMove, snapScale, snapTargets, type Guide, type Targets } from "./snap";
 import { marqueeHits, marqueeSelection, normalizeRect, toggleId } from "./marquee";
 
 // CSS px, divided by the view scale at use so they feel the same at every zoom.
@@ -31,7 +32,9 @@ type Gesture =
   | { t: "pan"; last: Pt } // screen px
   // `ids` is what commits (a container moves its whole subtree); `shapes` is what that moves on
   // screen, so the preview can match the commit.
-  | { t: "transform"; kind: HandleKind; box: Box; ids: number[]; shapes: number[]; start: Pt; m: Matrix } // world mm
+  // `targets` are gathered once at the press, since only the selection moves during a gesture;
+  // `guides` are the snap lines of the current frame.
+  | { t: "transform"; kind: HandleKind; box: Box; ids: number[]; shapes: number[]; start: Pt; m: Matrix; targets: Targets; guides: Guide[] } // world mm
   | { t: "marquee"; start: Pt; cur: Pt; additive: boolean }; // world mm
 
 export type CanvasInteractionArgs = {
@@ -114,8 +117,8 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // Native listeners are registered once and pointer handlers run between renders; both read
   // these rather than a render's closure, so they see the selection the user just made.
   const viewRef = useRef(view);
-  const latest = useRef({ scene, selected, expand, commit, sceneRev });
-  latest.current = { scene, selected, expand, commit, sceneRev };
+  const latest = useRef({ scene, selected, expand, commit, sceneRev, artboard });
+  latest.current = { scene, selected, expand, commit, sceneRev, artboard };
   const pending = useRef<PendingPreview | null>(null);
   // One transform on the wire at a time. A gesture pressed while a commit is unanswered would build
   // its matrix on that commit's preview, and if the commit were refused it would land about the
@@ -137,6 +140,8 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // it from these rather than keep the matrix of the last move (CodeRabbit on #298).
   const lastScreen = useRef<Pt | null>(null);
   const lastMods = useRef<Modifiers>({ shift: false, alt: false });
+  // ⌘ (Ctrl off the Mac) held: drag without snapping. Read on every move, so it can be pressed mid-drag.
+  const snapOff = useRef(false);
 
   const setView = useCallback((v: View) => {
     viewRef.current = v;
@@ -165,7 +170,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     if (g?.t === "transform") {
       r.setScene(applyOptimistic(s, g.shapes, g.m));
       r.setSelection(g.shapes);
-      r.setOverlay({ box: { ...g.box, frame: compose(g.box.frame, g.m) }, marquee: null, guides: [] });
+      r.setOverlay({ box: { ...g.box, frame: compose(g.box.frame, g.m) }, marquee: null, guides: g.guides });
     } else {
       const shapes = latest.current.expand(sel);
       r.setScene(s);
@@ -185,8 +190,24 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     const screen = lastScreen.current;
     if (!g || g.t === "pan" || !screen) return;
     const p = screenToWorld(viewRef.current, screen);
-    gesture.current =
-      g.t === "marquee" ? { ...g, cur: p } : { ...g, m: gestureMatrix(g.kind, g.box, g.start, p, lastMods.current) };
+    if (g.t === "marquee") {
+      gesture.current = { ...g, cur: p };
+      return;
+    }
+    // Snapping moves the pointer, not the matrix, so Shift, Alt and the commit see an ordinary
+    // drag that happened to end on a line. Rotation keeps its own 15° steps.
+    let point = p;
+    let guides: Guide[] = [];
+    if (g.kind !== "rotate" && !snapOff.current) {
+      const tol = SNAP_PX / viewRef.current.scale;
+      const snapped =
+        g.kind === "move"
+          ? snapMove(g.box, g.start, p, g.targets, tol, lastMods.current.shift)
+          : snapScale(g.box, g.kind, g.start, p, g.targets, tol);
+      point = snapped.point;
+      guides = snapped.guides;
+    }
+    gesture.current = { ...g, m: gestureMatrix(g.kind, g.box, g.start, point, lastMods.current), guides };
   }, []);
 
   // Declared before App's draw effect runs, so the repaint that follows a view change already
@@ -334,6 +355,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     const screen = toCanvas(e.currentTarget, e.clientX, e.clientY);
     lastScreen.current = screen;
     lastMods.current = { shift: e.shiftKey, alt: e.altKey };
+    snapOff.current = e.metaKey || e.ctrlKey;
     const v = viewRef.current;
     const p = screenToWorld(v, screen);
     if (e.button === 1 || (e.button === 0 && spaceHeld.current)) {
@@ -352,7 +374,8 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     // Shift-click inside the box toggles the node under the pointer rather than dragging.
     if (box && kind && !(kind === "move" && e.shiftKey)) {
       if (inFlight.current) return;
-      gesture.current = { t: "transform", kind, box, ids: sel, shapes, start: p, m: IDENTITY };
+      const targets = snapTargets(s, shapes, latest.current.artboard);
+      gesture.current = { t: "transform", kind, box, ids: sel, shapes, start: p, m: IDENTITY, targets, guides: [] };
       return;
     }
     const hit = hitTest(s, p.x, p.y, HIT_TOL_PX / v.scale);
@@ -371,7 +394,10 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     const nextShapes = latest.current.expand(next);
     const nextBox = next.includes(hit) ? selectionBox(s, nextShapes) : null;
     gesture.current = nextBox
-      ? { t: "transform", kind: "move", box: nextBox, ids: next, shapes: nextShapes, start: p, m: IDENTITY }
+      ? {
+          t: "transform", kind: "move", box: nextBox, ids: next, shapes: nextShapes, start: p, m: IDENTITY,
+          targets: snapTargets(s, nextShapes, latest.current.artboard), guides: [],
+        }
       : null;
   };
 
@@ -383,6 +409,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     setCursorScreen(screen);
     lastScreen.current = screen;
     lastMods.current = { shift: e.shiftKey, alt: e.altKey };
+    snapOff.current = e.metaKey || e.ctrlKey;
     const g = gesture.current;
     if (!g) {
       const { scene: s, selected: sel } = current();

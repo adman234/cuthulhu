@@ -3296,3 +3296,42 @@ test("queued X then W behind a move scale about where X put the shape", async ({
     return [a, e];
   }).toEqual([expect.closeTo(2, 1), expect.closeTo(5, 1)]);
 });
+
+// Snapping (spec 2026-10-07). With both seeds: the Group's rect at 30..40 mm (id 3) and the red
+// rect (id 4) and green rect at 0..10 mm. Layer rows run Group, its rect, red, green.
+async function selectRedBesideGroup(page: Page): Promise<CanvasView> {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").nth(2).click();
+  return zoomInAt(page, { x: 20, y: 5 }, -350);
+}
+
+test("a move that stops just short of another shape snaps flush against it", async ({ page }) => {
+  const v = await selectRedBesideGroup(page);
+  // Right edge would stop at 29.6 mm, 0.4 mm short of the Group's rect: within reach, so it butts.
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 19.6 * v.scale, 0);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  const [{ ids, m }] = await commitLog(page);
+  expect(ids).toEqual([4]);
+  expect(m[4]).toBeCloseTo(20, 2);
+});
+
+test("holding Ctrl drags without snapping", async ({ page }) => {
+  const v = await selectRedBesideGroup(page);
+  await page.keyboard.down("Control");
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 19.6 * v.scale, 0);
+  await page.keyboard.up("Control");
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  expect((await commitLog(page))[0].m[4]).toBeCloseTo(19.6, 1);
+});
+
+test("an edge handle that stops just short of another shape snaps its edge to it", async ({ page }) => {
+  const v = await selectRedBesideGroup(page);
+  await dragBy(page, await toPage(page, v, { x: 10, y: 5 }), 19.6 * v.scale, 0); // the e handle
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  const [a, , , , e] = (await commitLog(page))[0].m;
+  // The right edge goes 10 → 30 mm (snapped from 29.6), so the 10 mm rect becomes 30 wide: ×3, not
+  // the 2.96 an unsnapped drag would give, with its left edge fixed at 0.
+  expect(a).toBeCloseTo(3, 2);
+  expect(e).toBeCloseTo(0, 2);
+});
