@@ -26,6 +26,19 @@ pub fn commit_transform(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>, m
     state.lock().unwrap().commit_transform(ids, m).map_err(|e| e.to_string())
 }
 
+/// One entry of `commit_transforms`: the ids a matrix moves, and the world-space matrix.
+#[derive(serde::Deserialize)]
+pub struct TransformMove {
+    pub ids: Vec<NodeId>,
+    pub m: Affine,
+}
+
+#[tauri::command]
+pub fn commit_transforms(state: tauri::State<AppStateHandle>, moves: Vec<TransformMove>) -> Result<Delta, String> {
+    let moves = moves.into_iter().map(|t| (t.ids, t.m)).collect();
+    state.lock().unwrap().commit_transforms(moves).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn add_primitive(state: tauri::State<AppStateHandle>, parent: NodeId, kind: ShapeKind) -> Result<Delta, String> {
     state.lock().unwrap().add_primitive(parent, kind).map_err(|e| e.to_string())

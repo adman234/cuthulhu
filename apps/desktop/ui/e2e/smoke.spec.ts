@@ -139,46 +139,26 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
         throw new Error("transform refused");
       }
       const m = a.m as number[];
-      const hooks = window as unknown as { __commitTransforms?: { ids: number[]; m: number[] }[] };
+      const hooks = window as unknown as { __commitTransforms?: { ids: number[]; m: number[]; batch?: number }[] };
       hooks.__commitTransforms ??= [];
       hooks.__commitTransforms.push({ ids: a.ids as number[], m });
-      // Mirrors crates/document/src/commands.rs transform_nodes (L53-77): `m` is world-space, so
-      // each node's local transform becomes local · parentWorld · m · parentWorld⁻¹, and a node
-      // whose ancestor is also selected is skipped, since the ancestor already carries it.
-      // Composing `m` straight onto a nested node's local transform lands it where the real
-      // backend never would (Copilot on #298).
-      const cmp = (p: number[], q: number[]) => [
-        q[0] * p[0] + q[2] * p[1], q[1] * p[0] + q[3] * p[1],
-        q[0] * p[2] + q[2] * p[3], q[1] * p[2] + q[3] * p[3],
-        q[0] * p[4] + q[2] * p[5] + q[4], q[1] * p[4] + q[3] * p[5] + q[5],
-      ];
-      const inv = (p: number[]) => {
-        const det = p[0] * p[3] - p[1] * p[2];
-        const [ia, ib, ic, id] = [p[3] / det, -p[1] / det, -p[2] / det, p[0] / det];
-        return [ia, ib, ic, id, -(ia * p[4] + ic * p[5]), -(ib * p[4] + id * p[5])];
-      };
-      const parentOf = (id: number) => Object.values(doc.nodes).find((n) => n.children.includes(id))?.id;
-      const worldOf = (id: number | undefined): number[] =>
-        id === undefined ? [1, 0, 0, 1, 0, 0] : cmp(doc.nodes[id].transform, worldOf(parentOf(id)));
-      const selectedIds = new Set(a.ids as number[]);
-      const hasSelectedAncestor = (id: number) => {
-        for (let p = parentOf(id); p !== undefined; p = parentOf(p)) if (selectedIds.has(p)) return true;
-        return false;
-      };
-      const applyIt = () => {
-        for (const id of selectedIds) {
-          const node = doc.nodes[id];
-          if (!node || hasSelectedAncestor(id)) continue;
-          const pw = worldOf(parentOf(id));
-          node.transform = cmp(cmp(cmp(node.transform, pw), m), inv(pw));
-        }
-        return {};
-      };
-      // Answered on a later task, as a real IPC round trip is: resolving in the same microtask burst
-      // let a whole chain of queued commits finish before React rendered between them, which hid
-      // the window where an intermediate snapshot renders while the next commit is on the wire.
-      if (!holdingCommits) return new Promise((resolve) => setTimeout(() => resolve(applyIt()), 0));
-      return new Promise((resolve) => heldCommits.push(() => resolve(applyIt())));
+      return answer(() => applyTransforms([{ ids: a.ids as number[], m }]));
+    },
+    commit_transforms: (a) => {
+      // Mirrors commands::transform_each: every move in one undo, all or nothing, each entry on
+      // what the earlier ones left, and nothing moved twice. Each entry is recorded with its batch,
+      // so a test can tell one click from several.
+      if (failNextCommit) {
+        failNextCommit = false;
+        throw new Error("transform refused");
+      }
+      const moves = a.moves as { ids: number[]; m: number[] }[];
+      for (const mv of moves) for (const id of mv.ids) if (!doc.nodes[id]) throw new Error("the node or machine this command names is not there");
+      const hooks = window as unknown as { __commitTransforms?: { ids: number[]; m: number[]; batch?: number }[]; __batches?: number };
+      hooks.__commitTransforms ??= [];
+      hooks.__batches = (hooks.__batches ?? 0) + 1;
+      for (const mv of moves) hooks.__commitTransforms.push({ ids: mv.ids, m: mv.m, batch: hooks.__batches });
+      return answer(() => applyTransforms(moves));
     },
     delete: (a) => {
       for (const id of a.ids as number[]) {
@@ -443,6 +423,49 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     __releasePlans: () => release(heldPlans),
     __releaseTravel: () => release(heldTravel),
   });
+
+  // Mirrors crates/document/src/commands.rs transform_nodes (L53-77) and transform_each: `m` is
+  // world-space, so each node's local transform becomes local · parentWorld · m · parentWorld⁻¹,
+  // and a node whose ancestor any entry selects is skipped, since the ancestor already carries it.
+  // Composing `m` straight onto a nested node's local transform lands it where the real backend
+  // never would (Copilot on #298).
+  function applyTransforms(moves: { ids: number[]; m: number[] }[]) {
+    const cmp = (p: number[], q: number[]) => [
+      q[0] * p[0] + q[2] * p[1], q[1] * p[0] + q[3] * p[1],
+      q[0] * p[2] + q[2] * p[3], q[1] * p[2] + q[3] * p[3],
+      q[0] * p[4] + q[2] * p[5] + q[4], q[1] * p[4] + q[3] * p[5] + q[5],
+    ];
+    const inv = (p: number[]) => {
+      const det = p[0] * p[3] - p[1] * p[2];
+      const [ia, ib, ic, id] = [p[3] / det, -p[1] / det, -p[2] / det, p[0] / det];
+      return [ia, ib, ic, id, -(ia * p[4] + ic * p[5]), -(ib * p[4] + id * p[5])];
+    };
+    const parentOf = (id: number) => Object.values(doc.nodes).find((n) => n.children.includes(id))?.id;
+    const worldOf = (id: number | undefined): number[] =>
+      id === undefined ? [1, 0, 0, 1, 0, 0] : cmp(doc.nodes[id].transform, worldOf(parentOf(id)));
+    const selectedIds = new Set(moves.flatMap((mv) => mv.ids));
+    const hasSelectedAncestor = (id: number) => {
+      for (let p = parentOf(id); p !== undefined; p = parentOf(p)) if (selectedIds.has(p)) return true;
+      return false;
+    };
+    for (const { ids, m } of moves) {
+      for (const id of new Set(ids)) {
+        const node = doc.nodes[id];
+        if (!node || hasSelectedAncestor(id)) continue;
+        const pw = worldOf(parentOf(id));
+        node.transform = cmp(cmp(cmp(node.transform, pw), m), inv(pw));
+      }
+    }
+    return {};
+  }
+
+  // Answered on a later task, as a real IPC round trip is: resolving in the same microtask burst
+  // let a whole chain of queued commits finish before React rendered between them, which hid the
+  // window where an intermediate snapshot renders while the next commit is on the wire.
+  function answer<T>(run: () => T): Promise<T> {
+    if (!holdingCommits) return new Promise((resolve) => setTimeout(() => resolve(run()), 0));
+    return new Promise((resolve) => heldCommits.push(() => resolve(run())));
+  }
 
   function ipcError(code: string, message: string) {
     return { code, message };

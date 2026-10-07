@@ -18,6 +18,11 @@ export async function commitTransform(args: Args) {
   return invoke("commit_transform", args);
 }
 
+/** Several moves, each with its own matrix, committed as one undo (align and distribute). */
+export async function commitTransforms(args: { moves: { ids: number[]; m: number[] }[] }) {
+  return invoke("commit_transforms", args);
+}
+
 export async function addPrimitive(args: Args) {
   return invoke("add_primitive", args);
 }
