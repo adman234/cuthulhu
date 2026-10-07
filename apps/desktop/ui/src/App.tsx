@@ -6,7 +6,8 @@ import { Canvas2DRenderer } from "./render/Canvas2DRenderer";
 import type { Affine6, Scene, ShapeGeom } from "./render/hittest";
 import { pathBounds } from "./render/pathdata";
 import { IDENTITY, compose, transformBounds } from "./render/affine";
-import { shapesUnder, toggleId } from "./interaction/marquee";
+import { outermost, shapesUnder, toggleId } from "./interaction/marquee";
+import { alignMoves, distributeMoves, type AlignMode, type Axis, type Unit } from "./interaction/align";
 import type { Matrix } from "./interaction/transform";
 import { useCanvasInteraction, type CommitOutcome } from "./interaction/useCanvasInteraction";
 import { viewMatrix, zoomPercent } from "./interaction/viewport";
@@ -236,10 +237,10 @@ export function App() {
     // Not `run`: it reports one `false` for two failures that need opposite repairs. A refused
     // transform must put the shape back; one that landed but could not be re-read must keep it,
     // because the backend already holds the new geometry (silent-failure-hunter on #298).
-    commit: async (ids, m): Promise<CommitOutcome> => {
+    commit: async (moves): Promise<CommitOutcome> => {
       setError(null);
       try {
-        await ipc.commitTransform({ ids, m });
+        await ipc.commitTransforms({ moves });
       } catch (e) {
         setError(ipc.ipcErrorMessage(e));
         return { kind: "refused" };
@@ -320,6 +321,33 @@ export function App() {
       const k = v / size;
       return axis === "w" ? [k, 0, 0, 1, b.x - k * b.x, 0] : [1, 0, 0, k, 0, b.y - k * b.y];
     });
+
+  // One unit per selected id that no other selected id contains, bounded by every shape it moves,
+  // so a Group lines up as a drag would move it. Read from the scene the hook passes in, which holds
+  // any unread commit's preview. Listed in document order (the scene's, by each unit's first shape)
+  // rather than the order they were clicked, since that is what breaks a distribute tie.
+  const units = doc ? outermost(doc.nodes, selected) : [];
+  const unitsIn = (s: Scene): Unit[] => {
+    const at = new Map(s.nodes.map((n, i) => [n.id, i]));
+    const found = units.flatMap((id) => {
+      const shapes = expand([id]).flatMap((sid) => {
+        const i = at.get(sid);
+        return i === undefined ? [] : [s.nodes[i]];
+      });
+      if (shapes.length === 0) return [];
+      const x0 = Math.min(...shapes.map((n) => n.bounds.x));
+      const y0 = Math.min(...shapes.map((n) => n.bounds.y));
+      const x1 = Math.max(...shapes.map((n) => n.bounds.x + n.bounds.w));
+      const y1 = Math.max(...shapes.map((n) => n.bounds.y + n.bounds.h));
+      const first = Math.min(...shapes.map((n) => at.get(n.id) ?? 0));
+      return [{ first, unit: { ids: [id], bounds: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } } }];
+    });
+    return found.sort((a, b) => a.first - b.first).map((f) => f.unit);
+  };
+  // One queue key for all eight buttons: a newer click replaces a queued one, whichever it was.
+  const align = (mode: AlignMode) =>
+    interaction.transformEach("align", (s) => alignMoves(unitsIn(s), mode, doc?.artboard ?? null));
+  const distribute = (axis: Axis) => interaction.transformEach("align", (s) => distributeMoves(unitsIn(s), axis));
 
   const cutLineType = doc ? selectionCutLineType(doc.nodes, selected) : null;
 
@@ -469,6 +497,9 @@ export function App() {
           onChangeY={(v) => commitAxis("y", v)}
           onChangeW={(v) => commitScale("w", v)}
           onChangeH={(v) => commitScale("h", v)}
+          unitCount={units.length}
+          onAlign={align}
+          onDistribute={distribute}
           cutLineType={cutLineType}
           onChangeCutLineType={setCutLineType}
           materialPreset={materialPreset}

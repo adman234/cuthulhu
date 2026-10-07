@@ -3406,3 +3406,96 @@ test("an Alt edge scale snaps the dragged edge and mirrors the other", async ({ 
   expect(a).toBeCloseTo(5, 2);
   expect(e).toBeCloseTo(-20, 1);
 });
+
+// Align and distribute (spec 2026-10-07). With both seeds: the Group (id 2) holds a rect at 30..40
+// mm, and the red (id 4) and green (id 5) rects sit at 0..10 mm. Layer rows run Group, its rect,
+// red, green.
+type BatchRecord = CommitRecord & { batch?: number };
+
+async function batchLog(page: Page): Promise<BatchRecord[]> {
+  return page.evaluate(() => (window as unknown as { __commitTransforms?: BatchRecord[] }).__commitTransforms ?? []);
+}
+
+async function selectRows(page: Page, rows: number[]) {
+  const [first, ...rest] = rows;
+  await page.getByTestId("layer-row").nth(first).click();
+  for (const r of rest) await page.getByTestId("layer-row").nth(r).click({ modifiers: ["Shift"] });
+}
+
+test("align left on two rects and a Group commits one batch that moves only the Group", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await selectRows(page, [2, 3, 0]);
+  await page.getByRole("button", { name: "Align left edges" }).click();
+
+  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
+  const [{ ids, m, batch }] = await batchLog(page);
+  expect(ids).toEqual([2]);
+  expect(m).toEqual([1, 0, 0, 1, -30, 0]);
+  expect(batch).toBe(1);
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(0, 6);
+});
+
+test("align on a single rect centres it on the artboard", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await selectRows(page, [2]);
+  await page.getByRole("button", { name: "Align horizontal centres" }).click();
+
+  // The 330 mm bed is centred at 165; the rect's centre is at 5.
+  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
+  const [{ ids, m }] = await batchLog(page);
+  expect(ids).toEqual([4]);
+  expect(m[4]).toBeCloseTo(160, 6);
+  expect(m[5]).toBe(0);
+});
+
+test("distribute equalises the gaps and breaks a tie by document order, not click order", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await selectRows(page, [0, 3, 2]); // Group, green, red: the reverse of document order
+  await page.getByRole("button", { name: "Distribute horizontal spacing" }).click();
+
+  // Span 0..40 holding 30 mm of shapes leaves two 5 mm gaps. Red and green both start at 0, so
+  // document order makes red first and green the one that moves, to 15.
+  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
+  const [{ ids, m }] = await batchLog(page);
+  expect(ids).toEqual([5]);
+  expect(m[4]).toBeCloseTo(15, 6);
+});
+
+test("align and distribute are disabled when they cannot act", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  const alignLeft = page.getByRole("button", { name: "Align left edges" });
+  const distribute = page.getByRole("button", { name: "Distribute horizontal spacing" });
+  await expect(alignLeft).toBeDisabled();
+  await expect(distribute).toBeDisabled();
+
+  // The Group, its own rect and red are two units, since the rect moves with the Group: still too
+  // few to distribute.
+  await selectRows(page, [0, 1, 2]);
+  await expect(alignLeft).toBeEnabled();
+  await expect(distribute).toBeDisabled();
+
+  await page.getByTestId("layer-row").nth(3).click({ modifiers: ["Shift"] });
+  await expect(distribute).toBeEnabled();
+});
+
+test("an align clicked while a drag's commit is on the wire lines up from where the drag left", async ({ page }) => {
+  const v = await selectRedBesideGroup(page);
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // red to 5..15, parked
+  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
+
+  await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] });
+  await page.getByRole("button", { name: "Align left edges" }).click();
+  expect((await batchLog(page)).length).toBe(1); // queued behind the drag, not sent
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // From the stale scene the Group would go to 0 (−30); from the drag's result it goes to 5.
+  await expect.poll(async () => (await batchLog(page)).length).toBe(2);
+  const { ids, m } = (await batchLog(page))[1];
+  expect(ids).toEqual([2]);
+  expect(m[4]).toBeCloseTo(-25, 6);
+});

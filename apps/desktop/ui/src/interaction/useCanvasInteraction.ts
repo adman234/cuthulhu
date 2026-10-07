@@ -12,6 +12,7 @@ import { handleAt, selectionBox, type Box, type HandleKind } from "./selectionBo
 import { gestureMatrix, type Modifiers } from "./gesture";
 import { boxBounds, keepLanded, SNAP_PX, snapMove, snapScale, snapTargets, type Guide, type Targets } from "./snap";
 import { marqueeHits, marqueeSelection, normalizeRect, toggleId } from "./marquee";
+import type { Move } from "./align";
 
 // CSS px, divided by the view scale at use so they feel the same at every zoom.
 const HANDLE_HIT_PX = 6;
@@ -51,7 +52,7 @@ export type CanvasInteractionArgs = {
   sceneRev: number;
   /** A refusal puts the preview back. An applied commit keeps it until its own snapshot has
    *  rendered, even if that refresh failed, because the backend then holds the new geometry. */
-  commit: (ids: number[], m: Matrix) => Promise<CommitOutcome>;
+  commit: (moves: Move[]) => Promise<CommitOutcome>;
 };
 
 /** "applied" carries the revision of the snapshot its refresh rendered, or null if that refresh
@@ -86,6 +87,9 @@ export type CanvasInteraction = {
    *  edit waits behind it (the latest per field), so it never starts from a position the shape has
    *  left. */
   transformWith: (field: PropertyField, ids: number[], make: (scene: Scene) => Matrix | null) => void;
+  /** The same, for a click that moves each unit differently (align, distribute) as one commit. A
+   *  newer click under the same key replaces a queued one. */
+  transformEach: (key: string, make: (scene: Scene) => Move[]) => void;
   handlers: Handlers;
 };
 
@@ -125,7 +129,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // wrong anchor. The window is one IPC round trip, so a press in it selects but does not drag.
   const inFlight = useRef(false);
   // Property edits made while a commit is on the wire, in the order they were made.
-  const queued = useRef(new Map<string, { ids: number[]; make: (s: Scene) => Matrix | null }>());
+  const queued = useRef(new Map<string, (s: Scene) => Move[]>());
   // What gestures start from and what the renderer is put back to: the in-flight preview until a
   // snapshot replaces the scene it was built on, then the committed scene. CodeRabbit on #298.
   const current = () => ({
@@ -311,11 +315,13 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
 
   // Every transform reaches the backend through here, so all producers share the one-in-flight
   // rule and the pending preview that stands in for an unread commit.
-  function send(ids: number[], m: Matrix) {
-    pending.current = { preview: applyOptimistic(current().scene, latest.current.expand(ids), m), retireAt: Infinity };
+  function send(moves: Move[]) {
+    const { expand } = latest.current;
+    const preview = moves.reduce((s, mv) => applyOptimistic(s, expand(mv.ids), mv.m), current().scene);
+    pending.current = { preview, retireAt: Infinity };
     inFlight.current = true;
     repaint();
-    void latest.current.commit(ids, m).then((outcome) => {
+    void latest.current.commit(moves).then((outcome) => {
       inFlight.current = false;
       // Applied: the preview is what the backend now holds, so it stays until the snapshot that
       // includes this commit has rendered. If that refresh failed, the next successful one will.
@@ -328,27 +334,36 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     });
   }
 
-  function transformWith(field: PropertyField, ids: number[], make: (s: Scene) => Matrix | null) {
+  // Moves that would change nothing are dropped, so a no-op never holds the wire.
+  const effective = (moves: Move[]) => moves.filter((mv) => !isIdentity(mv.m));
+
+  function transformEach(key: string, make: (s: Scene) => Move[]) {
     if (inFlight.current) {
-      // Keyed by field and selection: a newer X edit replaces an older one, but an edit to Y does
-      // not replace X, since each changes only its own axis (CodeRabbit and Copilot on #298).
-      const key = `${field}:${ids.join(",")}`;
       queued.current.delete(key);
-      queued.current.set(key, { ids, make });
+      queued.current.set(key, make);
       return;
     }
-    const m = make(current().scene);
-    if (m && !isIdentity(m)) send(ids, m);
+    const moves = effective(make(current().scene));
+    if (moves.length > 0) send(moves);
+  }
+
+  // Keyed by field and selection: a newer X edit replaces an older one, but an edit to Y does not
+  // replace X, since each changes only its own axis (CodeRabbit and Copilot on #298).
+  function transformWith(field: PropertyField, ids: number[], make: (s: Scene) => Matrix | null) {
+    transformEach(`${field}:${ids.join(",")}`, (s) => {
+      const m = make(s);
+      return m ? [{ ids, m }] : [];
+    });
   }
 
   // Sends queued edits in the order they were made, one per settled commit. An edit that comes out
   // as no change (its field already says that) is dropped so it cannot stall the rest.
   function drain() {
-    for (const [key, q] of queued.current) {
+    for (const [key, make] of queued.current) {
       queued.current.delete(key);
-      const m = q.make(current().scene);
-      if (m && !isIdentity(m)) {
-        send(q.ids, m);
+      const moves = effective(make(current().scene));
+      if (moves.length > 0) {
+        send(moves);
         return;
       }
     }
@@ -452,7 +467,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
       repaint();
       return;
     }
-    send(g.ids, g.m);
+    send([{ ids: g.ids, m: g.m }]);
   };
 
   const onPointerCancel = () => {
@@ -477,6 +492,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     repaint,
     effectiveScene: gestureScene(pending.current, scene, sceneRev),
     transformWith,
+    transformEach,
     handlers: { onPointerEnter, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onPointerLeave },
   };
 }
