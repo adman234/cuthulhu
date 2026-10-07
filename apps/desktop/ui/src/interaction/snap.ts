@@ -114,7 +114,13 @@ export function snapMove(box: Box, start: Pt, cur: Pt, t: Targets, tol: number, 
   const guides: Guide[] = [];
   if (sx) guides.push(guideAlongX(sx.at, landed, sx.lines));
   if (sy) guides.push(guideAlongY(sy.at, landed, sy.lines));
-  return { point: { x: cur.x + (sx?.delta ?? 0), y: cur.y + (sy?.delta ?? 0) }, guides };
+  // The locked component is held at its start: moveMatrix re-picks the lock from the point it is
+  // given, and a snap that shrank the free axis below the locked one would flip it.
+  const point = {
+    x: xFree ? cur.x + (sx?.delta ?? 0) : start.x,
+    y: yFree ? cur.y + (sy?.delta ?? 0) : start.y,
+  };
+  return { point: shift ? point : { x: cur.x + (sx?.delta ?? 0), y: cur.y + (sy?.delta ?? 0) }, guides };
 }
 
 /** A scale's pointer, pulled so the edge or edges the handle moves land on the nearest targets.
@@ -142,4 +148,16 @@ export function snapScale(box: Box, h: ScaleHandle, start: Pt, cur: Pt, t: Targe
   if (sx) guides.push(guideAlongX(sx.at, span, sx.lines));
   if (sy) guides.push(guideAlongY(sy.at, span, sy.lines));
   return { point: { x: cur.x + (sx?.delta ?? 0), y: cur.y + (sy?.delta ?? 0) }, guides };
+}
+
+/** The guides whose line the landed box actually touches, at an edge or a centre. A snap only
+ *  nudges the pointer; what the matrix then does with it can leave a line untouched (Shift sizing
+ *  from the other axis, the minimum-size clamp, an axis with no length to move), and a guide for
+ *  that line would claim a flush edge that is not there (stage-1 review). */
+export function keepLanded(guides: Guide[], landed: Bounds): Guide[] {
+  const on = (v: number, lo: number, len: number) =>
+    [lo, lo + len / 2, lo + len].some((line) => Math.abs(line - v) < 1e-6);
+  return guides.filter((g) =>
+    g.a.x === g.b.x ? on(g.a.x, landed.x, landed.w) : on(g.a.y, landed.y, landed.h),
+  );
 }

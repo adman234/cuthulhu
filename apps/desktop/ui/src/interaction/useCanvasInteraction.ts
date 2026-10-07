@@ -10,7 +10,7 @@ import {
 } from "./viewport";
 import { handleAt, selectionBox, type Box, type HandleKind } from "./selectionBox";
 import { gestureMatrix, type Modifiers } from "./gesture";
-import { SNAP_PX, snapMove, snapScale, snapTargets, type Guide, type Targets } from "./snap";
+import { boxBounds, keepLanded, SNAP_PX, snapMove, snapScale, snapTargets, type Guide, type Targets } from "./snap";
 import { marqueeHits, marqueeSelection, normalizeRect, toggleId } from "./marquee";
 
 // CSS px, divided by the view scale at use so they feel the same at every zoom.
@@ -207,7 +207,10 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
       point = snapped.point;
       guides = snapped.guides;
     }
-    gesture.current = { ...g, m: gestureMatrix(g.kind, g.box, g.start, point, lastMods.current), guides };
+    const m = gestureMatrix(g.kind, g.box, g.start, point, lastMods.current);
+    // Only guides for lines the box really landed on: the matrix can discard part of a snap.
+    const landed = boxBounds({ ...g.box, frame: compose(g.box.frame, m) });
+    gesture.current = { ...g, m, guides: keepLanded(guides, landed) };
   }, []);
 
   // Declared before App's draw effect runs, so the repaint that follows a view change already

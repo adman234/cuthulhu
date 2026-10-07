@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { describe, it, expect } from "vitest";
 import { rotateAbout, translate } from "../render/affine";
-import { SNAP_PX, snapMove, snapScale, snapTargets, type Targets } from "./snap";
+import { keepLanded, SNAP_PX, snapMove, snapScale, snapTargets, type Targets } from "./snap";
 import type { Box } from "./selectionBox";
 
 // Rect A (moving) at 0..10, rect B at 30..40, on a Cameo-sized artboard. Tolerance 1 mm.
@@ -45,7 +45,8 @@ describe("snapMove", () => {
   it("with Shift's axis lock snaps only the free axis", () => {
     const r = snapMove(boxA, { x: 5, y: 5 }, { x: 24.6, y: 5.4 }, t, 1, true);
     expect(r.point.x).toBeCloseTo(25, 9);
-    expect(r.point.y).toBe(5.4); // y would snap back to 5 unlocked; locked, it is not this axis's call
+    // Locked axis held at its start, so the snap cannot flip which axis the matrix locks to.
+    expect(r.point.y).toBe(5);
   });
 
   it("draws one guide along the snapped line, spanning A and B", () => {
@@ -81,5 +82,56 @@ describe("snapScale", () => {
     const rotated: Box = { frame: rotateAbout(Math.PI / 6, { x: 0, y: 0 }), w: 10, h: 10 };
     const cur = { x: 29.6, y: 5 };
     expect(snapScale(rotated, "e", { x: 10, y: 5 }, cur, t, 1)).toEqual({ point: cur, guides: [] });
+  });
+});
+
+describe("snapping, the rest of the cases", () => {
+  // C sits below A, 20 mm down, so A's bottom can meet C's top.
+  const C = { id: 3, bounds: { x: 0, y: 20, w: 10, h: 10 } };
+  const tc = snapTargets({ nodes: [A, C] }, [1], null);
+
+  it("snaps on y too: A's bottom meets C's top", () => {
+    expect(snapMove(boxA, { x: 5, y: 5 }, { x: 5, y: 14.6 }, tc, 1, false).point.y).toBeCloseTo(15, 9);
+  });
+
+  it("with Shift locked to y, snaps y and holds x at its start", () => {
+    // The locked component is pinned so the snap cannot flip which axis the matrix locks to.
+    const r = snapMove(boxA, { x: 5, y: 5 }, { x: 5.6, y: 14.6 }, tc, 1, true);
+    expect(r.point.y).toBeCloseTo(15, 9);
+    expect(r.point.x).toBe(5);
+  });
+
+  it("a corner handle snaps both axes at once", () => {
+    const both = snapTargets({ nodes: [A, { id: 4, bounds: { x: 30, y: 30, w: 10, h: 10 } }] }, [1], null);
+    const r = snapScale(boxA, "se", { x: 10, y: 10 }, { x: 29.6, y: 29.7 }, both, 1);
+    expect(r.point).toEqual({ x: expect.closeTo(30, 9), y: expect.closeTo(30, 9) });
+    expect(r.guides).toHaveLength(2);
+  });
+
+  it("a w handle, which moves the left edge, snaps it to a line on the left", () => {
+    const left: Targets = { x: [{ v: -5, lo: 0, hi: 10 }], y: [] };
+    expect(snapScale(boxA, "w", { x: 0, y: 5 }, { x: -4.6, y: 5 }, left, 1).point.x).toBeCloseTo(-5, 9);
+  });
+
+  it("a guide spans every target that shares its line", () => {
+    const D = { id: 5, bounds: { x: 30, y: 50, w: 10, h: 10 } }; // shares B's left edge, far below
+    const r = snapMove(boxA, { x: 5, y: 5 }, { x: 24.6, y: 5 }, snapTargets({ nodes: [A, B, D] }, [1], null), 1, false);
+    const g = r.guides.find((s) => s.a.x === s.b.x)!;
+    expect(Math.max(g.a.y, g.b.y)).toBeCloseTo(60, 9);
+  });
+});
+
+describe("keepLanded", () => {
+  const vertical = (x: number) => ({ a: { x, y: 0 }, b: { x, y: 10 } });
+  const horizontal = (y: number) => ({ a: { x: 0, y }, b: { x: 10, y } });
+
+  it("keeps a guide whose line the landed box touches, at an edge or a centre", () => {
+    const landed = { x: 20, y: 0, w: 10, h: 10 };
+    expect(keepLanded([vertical(30), vertical(25), horizontal(10)], landed)).toHaveLength(3);
+  });
+
+  it("drops a guide for a line the box did not land on", () => {
+    // Shift sized the box from its other axis, or the minimum-size clamp held the edge back.
+    expect(keepLanded([vertical(30), horizontal(30)], { x: 0, y: 0, w: 20, h: 20 })).toEqual([]);
   });
 });

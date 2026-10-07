@@ -71,8 +71,8 @@
 ### Task 2: Guides on screen
 
 - [ ] Add `guides: Guide[]` to `Overlay`. Every `setOverlay` call site passes `guides: []` until Task 3.
-- [ ] The renderer draws each guide after the box. It is a screen-space line between the view-mapped endpoints, 1 px, in `--guide` (fallback `#F472B6`).
-- [ ] `tokens.css` gets `--guide` in the dark and the light block, with a comment: "smart guides — distinct from selection cyan and cut red".
+- [ ] The renderer draws the guides before the box, so the box and handles they line up stay on top. Each is a screen-space line between the view-mapped endpoints, 1 px, in `--guide` (fallback `#F472B6`).
+- [ ] `tokens.css` gets `--guide` in its `:root` (there is one theme today), with a comment: "smart guides — distinct from selection cyan and cut red".
 - [ ] Build (no unit test: the renderer has none, by design), commit: "Draw smart guides in their own colour, since cyan means selection and red means cut".
 
 ### Task 3: Wire it into gestures
@@ -94,7 +94,7 @@
 ### Task 4: Hardware checks
 
 - [ ] Add to `MANUAL-CHECKLIST.md` under *Snapping (spec 2026-10-07, unverified)*:
-  - guides read clearly in the dark and light themes;
+  - guides read clearly against the artboard and the workspace;
   - snapping feels sticky, not grabby, at fit and at 400%;
   - ⌘ mid-drag releases the snap;
   - a decal snapped to the artboard's left edge cuts flush with the mat edge on the Cameo 5.

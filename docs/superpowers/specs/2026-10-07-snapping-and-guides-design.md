@@ -59,7 +59,9 @@ From `main` at `e371ab5`:
   token, a third colour distinct from cyan (selection) and red (cut). A guide runs along the
   snapped coordinate across the span of the moving box and every target sharing that line. An
   artboard snap spans the artboard. Guides show only while a gesture is snapped, and they go away
-  on release.
+  on release. A guide is drawn only if the landed box really touches its line: the matrix can
+  discard part of a snap (Shift sizing from the other axis, the minimum-size clamp), and a Shift
+  move holds its locked axis at the start so a snap cannot flip the lock.
 
 ## Structure
 
@@ -74,7 +76,7 @@ ui/src/interaction/
 ui/src/render/
   Renderer.ts           Overlay gains `guides: Guide[]` (world-space segments)
   Canvas2DRenderer.ts   draws guides in screen space, 1 px, --guide
-ui/src/tokens.css       the --guide token, dark and light, beside --accent and --cut
+ui/src/tokens.css       the --guide token, beside --accent and --cut (one theme today)
 ```
 
 No IPC change, so `ipc-inventory.json` and `Cargo.lock` do not move. `dist/` is rebuilt and
@@ -93,11 +95,14 @@ committed.
   - tolerance scales with zoom.
 - **Playwright** (fake backend):
   - dragging the red rect so its right edge stops 0.4 mm short of the Group's rect commits a move
-    that butts them exactly (e = 20, not 19.6);
-  - the same drag with ⌘ held commits 19.6;
-  - a corner-scale stopping 0.4 mm short of the artboard's right edge lands on it.
-- **Manual** (`MANUAL-CHECKLIST.md`): the guides read clearly in both themes, and snapping feels
-  sticky but not grabby at fit and at 400%.
+    that butts them exactly (e = 20, not 19.6), and so does a press-and-drag on an unselected rect;
+  - the same drag with Ctrl held commits 19.6;
+  - an `e`-handle scale stopping 0.4 mm short snaps its edge (×3, not ×2.96), and with Alt mirrors
+    the other edge (×5);
+  - a move snaps to the artboard's centre line;
+  - a selected Group does not snap to its own shape.
+- **Manual** (`MANUAL-CHECKLIST.md`): the guides read clearly against the artboard and the
+  workspace, and snapping feels sticky but not grabby at fit and at 400%.
 
 ## Out of scope
 
