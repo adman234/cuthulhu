@@ -223,6 +223,8 @@ export function App() {
     if (ctx) rendererRef.current = new Canvas2DRenderer(ctx);
   }, []);
 
+  // The last refresh warning a commit raised, so a later successful refresh can retract exactly it.
+  const refreshWarning = useRef<string | null>(null);
   const expand = useCallback((ids: number[]) => (doc ? shapesUnder(doc.nodes, ids) : ids), [doc]);
 
   // After the renderer is constructed, so it exists before the hook's observer first fires.
@@ -239,8 +241,8 @@ export function App() {
     // because the backend already holds the new geometry (silent-failure-hunter on #298).
     // A queued commit leaves the message alone: a refusal ahead of it would otherwise vanish the
     // moment the edit behind it went out, before anyone saw it (silent-failure-hunter, from #298).
-    commit: async (moves, queued): Promise<CommitOutcome> => {
-      if (!queued) setError(null);
+    commit: async (moves, fromQueue): Promise<CommitOutcome> => {
+      if (!fromQueue) setError(null);
       try {
         await ipc.commitTransforms({ moves });
       } catch (e) {
@@ -248,9 +250,15 @@ export function App() {
         return { kind: "refused" };
       }
       try {
-        return { kind: "applied", snapshotRev: await refresh() };
+        const snapshotRev = await refresh();
+        // A refresh that worked makes an earlier "could not be refreshed" untrue, so that one
+        // message goes even from a queued commit; a refusal stays (code-reviewer).
+        setError((shown) => (shown !== null && shown === refreshWarning.current ? null : shown));
+        return { kind: "applied", snapshotRev };
       } catch (e) {
-        setError(`Edit applied, but the canvas could not be refreshed: ${ipc.ipcErrorMessage(e)}`);
+        const warning = `Edit applied, but the canvas could not be refreshed: ${ipc.ipcErrorMessage(e)}`;
+        refreshWarning.current = warning;
+        setError(warning);
         return { kind: "applied", snapshotRev: null };
       }
     },

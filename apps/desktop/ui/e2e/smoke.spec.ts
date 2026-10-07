@@ -3724,3 +3724,39 @@ test("a refusal stays on screen when an edit queued behind it lands", async ({ p
   await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(30, 6);
   await expect(page.getByText("transform refused")).toBeVisible();
 });
+
+test("a queued edit whose refresh succeeds clears the refresh warning ahead of it", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // lands, refresh fails
+  await page.getByLabel("X", { exact: true }).fill("30"); // queued behind it
+  await page.evaluate(() => {
+    const w = window as unknown as { __failNextSnapshot: () => void; __releaseCommits: () => Promise<void> };
+    w.__failNextSnapshot();
+    return w.__releaseCommits();
+  });
+
+  // The warning was true when it went up; once the queued edit has re-read the canvas it is not.
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(30, 6);
+  await expect(page.getByText("the canvas could not be refreshed")).toBeHidden();
+});
+
+test("a fresh edit after a refusal clears its message", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __failNextCommit: () => void }).__failNextCommit());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0);
+  await expect(page.getByText("transform refused")).toBeVisible();
+
+  // Made after the refusal was on screen, so it is the operator's next act and starts clean.
+  await page.getByLabel("X", { exact: true }).fill("30");
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(30, 6);
+  await expect(page.getByText("transform refused")).toBeHidden();
+});
