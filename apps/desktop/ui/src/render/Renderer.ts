@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import type { Affine6, Bounds, Scene } from "./hittest";
 import type { Box } from "../interaction/selectionBox";
+import type { Guide } from "../interaction/snap";
 
 export type NodeId = number;
 
-/** What is drawn over the artwork: the selection's box and handles, and a marquee band. */
-export type Overlay = { box: Box | null; marquee: Bounds | null };
+/** What is drawn over the artwork: the selection's box and handles, a marquee band, and the
+ *  smart guides of a snapped gesture. */
+export type Overlay = { box: Box | null; marquee: Bounds | null; guides: Guide[] };
 
 export interface Renderer {
   setScene(s: Scene): void;

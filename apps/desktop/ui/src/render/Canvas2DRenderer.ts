@@ -8,6 +8,7 @@ const FALLBACK_ACCENT = "#22D3EE";
 const FALLBACK_BORDER = "#2E2E34";
 const FALLBACK_PANEL = "#1F1F23";
 const FALLBACK_TEXT = "#E7E7EA";
+const FALLBACK_GUIDE = "#F472B6";
 
 // CSS px, whatever the zoom.
 const STROKE_PX = 1;
@@ -21,7 +22,7 @@ export class Canvas2DRenderer implements Renderer {
   private artboard: Bounds | null = null;
   private view: Affine6 = IDENTITY;
   private dpr = 1;
-  private overlay: Overlay = { box: null, marquee: null };
+  private overlay: Overlay = { box: null, marquee: null, guides: [] };
   // ponytail: invalidation only — with the current full-clear+redraw loop this is just
   // a "needs redraw" signal, not a per-node dirty rect. draw() clears it each call.
   private dirty = new Set<NodeId>();
@@ -80,6 +81,7 @@ export class Canvas2DRenderer implements Renderer {
     const accent = style.getPropertyValue("--accent").trim() || FALLBACK_ACCENT;
     const border = style.getPropertyValue("--border").trim() || FALLBACK_BORDER;
     const panel = style.getPropertyValue("--panel").trim() || FALLBACK_PANEL;
+    const guide = style.getPropertyValue("--guide").trim() || FALLBACK_GUIDE;
     const text = style.getPropertyValue("--text").trim() || FALLBACK_TEXT;
 
     // Artboard drawn first so node outlines paint over it, not the other way around.
@@ -109,13 +111,26 @@ export class Canvas2DRenderer implements Renderer {
       }
     }
 
-    this.drawOverlay(accent, panel);
+    this.drawOverlay(accent, panel, guide);
     this.dirty.clear();
   }
 
-  private drawOverlay(accent: string, panel: string): void {
+  private drawOverlay(accent: string, panel: string, guide: string): void {
     const { ctx, view } = this;
-    const { box, marquee } = this.overlay;
+    const { box, marquee, guides } = this.overlay;
+    // Guides first, so the box and handles they line up stay on top of them.
+    if (guides.length > 0) {
+      ctx.beginPath();
+      for (const g of guides) {
+        const a = apply(view, g.a);
+        const b = apply(view, g.b);
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+      }
+      ctx.strokeStyle = guide;
+      ctx.lineWidth = STROKE_PX;
+      ctx.stroke();
+    }
     if (box) {
       const corners = boxCorners(box).map((p) => apply(view, p));
       ctx.beginPath();

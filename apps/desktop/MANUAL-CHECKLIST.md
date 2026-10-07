@@ -130,3 +130,11 @@ real network can confirm the swap end to end.
 - [ ] `node apps/desktop/ui/scripts/perf-svg.mjs > /tmp/perf.svg`, Import it, pan and zoom with the
       WebKit inspector's frame timeline open — record the frame rate here with the machine and date
       (target 60 fps).
+
+## Snapping (spec 2026-10-07, unverified)
+
+- [ ] Guides read clearly against the artboard and the workspace, distinct from the cyan selection.
+- [ ] Snapping feels sticky but not grabby at fit and at 400%; small deliberate offsets are still
+      reachable with ⌘ (Ctrl) held.
+- [ ] Pressing ⌘ (Ctrl) mid-drag releases a snap; releasing it snaps again on the next move.
+- [ ] A decal snapped to the artboard's left edge cuts flush with the mat's left limit on the Cameo 5.

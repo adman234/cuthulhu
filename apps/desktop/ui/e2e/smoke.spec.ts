@@ -3296,3 +3296,90 @@ test("queued X then W behind a move scale about where X put the shape", async ({
     return [a, e];
   }).toEqual([expect.closeTo(2, 1), expect.closeTo(5, 1)]);
 });
+
+// Snapping (spec 2026-10-07). With both seeds: the Group's rect at 30..40 mm (id 3) and the red
+// rect (id 4) and green rect at 0..10 mm. Layer rows run Group, its rect, red, green.
+async function selectRedBesideGroup(page: Page): Promise<CanvasView> {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").nth(2).click();
+  return zoomInAt(page, { x: 20, y: 5 }, -350);
+}
+
+test("a move that stops just short of another shape snaps flush against it", async ({ page }) => {
+  const v = await selectRedBesideGroup(page);
+  // Right edge would stop at 29.6 mm, 0.4 mm short of the Group's rect: within reach, so it butts.
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 19.6 * v.scale, 0);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  const [{ ids, m }] = await commitLog(page);
+  expect(ids).toEqual([4]);
+  expect(m[4]).toBeCloseTo(20, 2);
+});
+
+test("holding Ctrl drags without snapping", async ({ page }) => {
+  const v = await selectRedBesideGroup(page);
+  await page.keyboard.down("Control");
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 19.6 * v.scale, 0);
+  await page.keyboard.up("Control");
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  expect((await commitLog(page))[0].m[4]).toBeCloseTo(19.6, 1);
+});
+
+test("an edge handle that stops just short of another shape snaps its edge to it", async ({ page }) => {
+  const v = await selectRedBesideGroup(page);
+  await dragBy(page, await toPage(page, v, { x: 10, y: 5 }), 19.6 * v.scale, 0); // the e handle
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  const [a, , , , e] = (await commitLog(page))[0].m;
+  // The right edge goes 10 → 30 mm (snapped from 29.6), so the 10 mm rect becomes 30 wide: ×3, not
+  // the 2.96 an unsnapped drag would give, with its left edge fixed at 0.
+  expect(a).toBeCloseTo(3, 2);
+  expect(e).toBeCloseTo(0, 2);
+});
+
+test("a selected Group does not snap to its own shape", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").nth(0).click(); // the Group; its rect is excluded from targets
+  const v = await zoomInAt(page, { x: 35, y: 5 }, -350);
+  // 0.3 mm is well within reach of where the Group's rect started; a self-snap would pull it back.
+  await dragBy(page, await toPage(page, v, { x: 35, y: 5 }), 0.3 * v.scale, 0);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  expect((await commitLog(page))[0].m[4]).toBeCloseTo(0.3, 1);
+});
+
+test("pressing on an unselected shape and dragging snaps too", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  const v = await zoomInAt(page, { x: 20, y: 5 }, -350);
+  // Nothing selected: the press picks the topmost rect at the origin (green, id 5) and drags it.
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 19.6 * v.scale, 0);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  const [{ ids, m }] = await commitLog(page);
+  expect(ids).toEqual([5]);
+  expect(m[4]).toBeCloseTo(20, 2);
+});
+
+test("a move can snap to the artboard's centre line", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").nth(0).click(); // the Group, centred at x = 35
+  const v = await zoomInAt(page, { x: 35, y: 5 }, -200); // ~1.5 px/mm, so the reach is ~4 mm
+  // Its centre would stop at 164.6 mm; the Cameo's 330 mm bed is centred at 165, a line only the
+  // artboard has.
+  await dragBy(page, await toPage(page, v, { x: 35, y: 5 }), 129.6 * v.scale, 0);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  expect((await commitLog(page))[0].m[4]).toBeCloseTo(130, 1);
+});
+
+test("an Alt edge scale snaps the dragged edge and mirrors the other", async ({ page }) => {
+  const v = await selectRedBesideGroup(page);
+  await page.keyboard.down("Alt");
+  await dragBy(page, await toPage(page, v, { x: 10, y: 5 }), 19.6 * v.scale, 0); // e handle
+  await page.keyboard.up("Alt");
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  // About the centre (5): the right edge snaps 29.6 → 30, so the half-width 5 becomes 25 (×5), and
+  // the left edge mirrors to −20.
+  const [a, , , , e] = (await commitLog(page))[0].m;
+  expect(a).toBeCloseTo(5, 2);
+  expect(e).toBeCloseTo(-20, 1);
+});
