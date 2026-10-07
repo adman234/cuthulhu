@@ -47,56 +47,79 @@ export function alignMoves(units: Unit[], mode: AlignMode, artboard: Bounds | nu
   return moved(units.map((u) => [u, line - (start(u.bounds, axis) + at * size(u.bounds, axis))]), axis);
 }
 
-/** The units in start-edge order and the index of the far end, or null when distribute has
- *  nothing to do: fewer than three units, or one that spans the rest. */
-function outerUnits(units: Unit[], axis: Axis): { order: Unit[]; li: number } | null {
+const end = (u: Unit, a: Axis) => start(u.bounds, a) + size(u.bounds, a);
+
+/** How a distribute is anchored, or null when it has nothing to do.
+ *  - "ends": the unit that starts first and the unit that reaches furthest stay put, and the rest
+ *    go between them.
+ *  - "frame": one unit spans all the others, as a weed border or backing plate does when the
+ *    whole design is selected. It stays put and the rest are spaced inside it, with the margins
+ *    at its edges equal to the gaps between them. Sure Cuts A Lot offers the same as a separate
+ *    "Distribute to Selection Below" mode; here the selection says which is meant, so there is no
+ *    mode to set.
+ *  Null for fewer than three units, or when more than one unit spans the rest (stacked copies of
+ *  one shape), since no one of them is the frame. */
+type Anchors =
+  | { kind: "ends"; order: Unit[]; li: number }
+  | { kind: "frame"; frame: Unit; inner: Unit[] };
+
+function anchors(units: Unit[], axis: Axis): Anchors | null {
   if (units.length < 3) return null;
   // Array.prototype.sort is stable, so document order breaks ties.
   const order = [...units].sort((a, b) => start(a.bounds, axis) - start(b.bounds, axis));
-  const end = (u: Unit) => start(u.bounds, axis) + size(u.bounds, axis);
   // Of the units reaching furthest, the one that starts last, so it is never the first as well
-  // unless it is the only one.
+  // unless it spans the rest.
   let li = 0;
   order.forEach((u, i) => {
-    if (end(u) >= end(order[li])) li = i;
+    if (end(u, axis) >= end(order[li], axis)) li = i;
   });
   // Spanning is asked of every unit, not read off the ends: a plate sharing its start with a piece
   // earlier in the document sorts second, and was taken as the far end (code-reviewer).
   const lo = start(order[0].bounds, axis);
-  const hi = end(order[li]);
-  const spans = order.some((u) => start(u.bounds, axis) <= lo && end(u) >= hi);
-  return spans ? null : { order, li };
+  const hi = end(order[li], axis);
+  const spanning = order.filter((u) => start(u.bounds, axis) <= lo && end(u, axis) >= hi);
+  if (spanning.length > 1) return null;
+  if (spanning.length === 1) {
+    const frame = spanning[0];
+    return { kind: "frame", frame, inner: order.filter((u) => u !== frame) };
+  }
+  return { kind: "ends", order, li };
 }
 
-/** Whether distribute can act, so the button says so rather than doing nothing: a backing plate
- *  selected with the pieces on it spans them, and there is no gap to equalise (silent-failure-hunter). */
+/** Whether distribute can act, so the button says so rather than doing nothing. */
 export function canDistribute(units: Unit[], axis: Axis): boolean {
-  return outerUnits(units, axis) !== null;
+  return anchors(units, axis) !== null;
 }
 
-/** Equal gaps between neighbours, because gaps are what a weeder works between. The unit that starts
- *  first and the unit that reaches furthest stay put; the rest go between them in start-edge order.
- *  Taking the far end from whichever unit starts last threw small pieces past each other when a
- *  wide one started first (code-reviewer). When the units are longer than the span the gaps come
- *  out negative and they overlap evenly, which is still the arithmetic answer. When one unit spans
- *  the whole range there is no gap to equalise, so nothing moves. */
+/** Equal gaps between neighbours, because gaps are what a weeder works between; see `Anchors` for
+ *  what stays put. Taking the far end from whichever unit starts last threw small pieces past each
+ *  other when a wide one started first (code-reviewer). When the units are longer than the room
+ *  they have, the gaps come out negative and they overlap evenly, which is still the arithmetic
+ *  answer. */
 export function distributeMoves(units: Unit[], axis: Axis): Move[] {
-  const ends = outerUnits(units, axis);
-  if (!ends) return [];
-  const { order, li } = ends;
-  const end = (u: Unit) => start(u.bounds, axis) + size(u.bounds, axis);
-  const last = order[li];
-  const middle = order.filter((_, i) => i !== 0 && i !== li);
+  const a = anchors(units, axis);
+  if (!a) return [];
+  // The units that stay put are never listed, so float drift cannot turn them into a move.
+  if (a.kind === "frame") {
+    const room = size(a.frame.bounds, axis) - a.inner.reduce((s, u) => s + size(u.bounds, axis), 0);
+    return place(a.inner, start(a.frame.bounds, axis), room / (a.inner.length + 1), axis);
+  }
+  const { order, li } = a;
   const first = order[0];
-  const span = end(last) - start(first.bounds, axis);
+  const middle = order.filter((_, i) => i !== 0 && i !== li);
+  const span = end(order[li], axis) - start(first.bounds, axis);
   const total = order.reduce((s, u) => s + size(u.bounds, axis), 0);
   const gap = (span - total) / (order.length - 1);
+  return place(middle, end(first, axis), gap, axis);
+}
+
+/** Lays `units` out in order from `from`, with `gap` before each one. */
+function place(units: Unit[], from: number, gap: number, axis: Axis): Move[] {
   const entries: [Unit, number][] = [];
-  let cursor = end(first) + gap;
-  for (const u of middle) {
+  let cursor = from + gap;
+  for (const u of units) {
     entries.push([u, cursor - start(u.bounds, axis)]);
     cursor += size(u.bounds, axis) + gap;
   }
-  // The outer two are never listed, so float drift cannot turn them into a move.
   return moved(entries, axis);
 }

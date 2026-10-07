@@ -5,7 +5,7 @@ import type { AlignMode, Axis } from "../interaction/align";
 type Props = {
   /** Selected ids that move as a piece; see `outermost`. */
   unitCount: number;
-  /** Per axis, from `canDistribute`: three units are not enough when one spans the others. */
+  /** Per axis, from `canDistribute`: three units are not enough when several span the rest. */
   distributable: Record<Axis, boolean>;
   onAlign: (mode: AlignMode) => void;
   onDistribute: (axis: Axis) => void;
@@ -61,7 +61,7 @@ function DistributeIcon({ vertical }: { vertical: boolean }) {
 
 function distributeTitle(label: string, unitCount: number, enabled: boolean): string {
   if (enabled) return label;
-  return unitCount < 3 ? `${label}: select three or more pieces` : `${label}: one selected piece spans the others`;
+  return unitCount < 3 ? `${label}: select three or more pieces` : `${label}: selected pieces lie on top of each other`;
 }
 
 const AT: Record<AlignMode, number> = { left: 0, hcenter: 0.5, right: 1, top: 0, vmiddle: 0.5, bottom: 1 };

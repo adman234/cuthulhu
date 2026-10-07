@@ -75,10 +75,19 @@ describe("distributeMoves", () => {
     expect(dx(moves, 11)).toBeCloseTo(2.5 - 20, 9);
   });
 
-  it("moves nothing when one unit spans the whole range", () => {
-    // There is no gap to equalise; a span from the last-starting unit threw B past C here.
+  it("spaces the others inside a unit that spans them, with margins equal to the gaps", () => {
+    // A 100 mm border holding two 10 mm pieces: 80 mm of room over three spaces, so 80/3 each.
+    // The border stays; a span from the last-starting unit had thrown one piece past the other.
     const W = unit(12, 0, 0, 100, 1);
-    expect(distributeMoves([W, unit(13, 10, 0, 10, 1), unit(14, 20, 0, 10, 1)], "x")).toEqual([]);
+    const moves = distributeMoves([W, unit(13, 10, 0, 10, 1), unit(14, 20, 0, 10, 1)], "x");
+    expect(moves.map((m) => m.ids[0])).toEqual([13, 14]);
+    expect(dx(moves, 13)).toBeCloseTo(80 / 3 - 10, 9);
+    expect(dx(moves, 14)).toBeCloseTo(10 + 160 / 3 - 20, 9);
+  });
+
+  it("moves nothing when more than one unit spans the rest", () => {
+    // Stacked copies of one shape: no one of them is the frame.
+    expect(distributeMoves([A, unit(16, 0, 0, 10, 10), unit(17, 2, 2, 4, 4)], "x")).toEqual([]);
   });
 
   it("leaves out a move that is not a finite number", () => {
@@ -105,22 +114,26 @@ describe("distributeMoves", () => {
 });
 
 describe("canDistribute", () => {
-  it("says no to fewer than three units, and to one that spans the rest on that axis only", () => {
-    const plate = unit(20, 0, 0, 100, 5); // spans x, but not y: the others sit below it
+  it("says no to fewer than three units and to stacked copies, yes to a frame", () => {
+    const plate = unit(20, 0, 0, 100, 5);
     const p1 = unit(21, 10, 10, 10, 10);
     const p2 = unit(22, 40, 30, 10, 10);
     expect(canDistribute([A, B], "x")).toBe(false);
     expect(canDistribute([A, B, C], "x")).toBe(true);
-    expect(canDistribute([plate, p1, p2], "x")).toBe(false);
-    expect(canDistribute([plate, p1, p2], "y")).toBe(true);
+    expect(canDistribute([plate, p1, p2], "x")).toBe(true);
+    expect(canDistribute([A, unit(16, 0, 0, 10, 10), unit(17, 2, 2, 4, 4)], "x")).toBe(false);
   });
 
-  it("finds a spanning unit that shares its start with another, in either document order", () => {
+  it("finds a frame that shares its start with another unit, in either document order", () => {
+    // 100 - 15 = 85 mm of room over three spaces: the narrow piece goes to 85/3, the other after it.
     const narrow = unit(23, 0, 0, 5, 1);
     const plate = unit(24, 0, 0, 100, 1);
     const piece = unit(25, 10, 0, 10, 1);
-    expect(canDistribute([narrow, plate, piece], "x")).toBe(false);
-    expect(canDistribute([plate, narrow, piece], "x")).toBe(false);
-    expect(distributeMoves([narrow, plate, piece], "x")).toEqual([]);
+    for (const units of [[narrow, plate, piece], [plate, narrow, piece]]) {
+      const moves = distributeMoves(units, "x");
+      expect(moves.map((m) => m.ids[0])).toEqual([23, 25]);
+      expect(dx(moves, 23)).toBeCloseTo(85 / 3, 9);
+      expect(dx(moves, 25)).toBeCloseTo(85 / 3 + 5 + 85 / 3 - 10, 9);
+    }
   });
 });

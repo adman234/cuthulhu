@@ -43,10 +43,16 @@ From `main` at `5dfde3b`:
   and the unit that reaches furthest. The others move between them so the gaps between neighbours
   are equal, ordered by their left (or top) edge, with document order breaking ties. (Revised in
   gate 1: taking the far end from the unit that starts last threw small pieces past each other when
-  a wide one started first. When one unit spans the whole range there is no gap to equalise, and
-  nothing moves.) If the units together are wider than the span, the gaps come out
+  a wide one started first.) If the units together are wider than the span, the gaps come out
   negative, so they overlap evenly; that is still the arithmetic answer, and no special case hides
   it.
+- **A unit that spans all the others is a frame.** Selecting a whole design selects its weed
+  border or backing plate too. That unit stays put and the others are spaced inside it, with the
+  margins at its edges equal to the gaps between them. Sure Cuts A Lot 6 offers this as a separate
+  "Distribute to Selection Below" mode (manual §3.19); Silhouette Studio has no equivalent. Here
+  the selection says which is meant, so there is no mode to set. When more than one unit spans
+  the rest (stacked copies of one shape), none of them is the frame and distribute is disabled.
+  (Decided 2026-10-07, after gate 1 had first disabled distribute whenever a unit spanned.)
 - **Moves are axis-locked translations.** Horizontal commands change x only and vertical commands
   change y only. A rotated unit aligns by its axis-aligned bounds, the same convention snapping
   uses. (`// ponytail:` not by its outline.)
@@ -67,8 +73,8 @@ From `main` at `5dfde3b`:
 - **UI:** a row of six align buttons and a row of two distribute buttons in the properties panel,
   under X/Y/W/H. They are disabled when they cannot act: align with nothing selected, distribute
   with fewer than three units. Units are counted from the shapes on the canvas, so an empty Group
-  is not one, and distribute is also disabled on an axis where one unit spans the others (a
-  backing plate selected with its pieces), with a tooltip saying so. Each has an `aria-label` naming it, with icons from the panel's
+  is not one, and distribute is also disabled on an axis where several units span the rest, with a
+  tooltip giving the reason. Each has an `aria-label` naming it, with icons from the panel's
   existing line style. There are no keyboard shortcuts in this step.
 
 ## Structure
