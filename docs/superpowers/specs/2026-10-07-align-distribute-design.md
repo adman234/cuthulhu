@@ -58,15 +58,17 @@ From `main` at `5dfde3b`:
   batch commits nothing.
 - **Through the hook's send path, like every transform.** It extends the X/Y/W/H mechanism: the
   hook's `transformEach(key, make)` builds the moves from the effective scene when they are sent.
-  It queues behind a commit on the wire, keyed by axis and selection like the fields, so a newer
-  click on the same axis replaces a queued one while "Align top" does not replace "Align left".
+  It queues behind a commit on the wire, keyed by kind, axis and selection like the fields, so a
+  newer align on the same axis replaces a queued one, while "Align top" does not replace "Align
+  left" and a distribute does not replace an align.
   (Revised in gate 1, from a single `align` key.) The pending preview applies each move to its
   own shapes. The commit callback carries a list, and a single-move
   gesture becomes a list of one.
 - **UI:** a row of six align buttons and a row of two distribute buttons in the properties panel,
   under X/Y/W/H. They are disabled when they cannot act: align with nothing selected, distribute
   with fewer than three units. Units are counted from the shapes on the canvas, so an empty Group
-  is not one. Each has an `aria-label` naming it, with icons from the panel's
+  is not one, and distribute is also disabled on an axis where one unit spans the others (a
+  backing plate selected with its pieces), with a tooltip saying so. Each has an `aria-label` naming it, with icons from the panel's
   existing line style. There are no keyboard shortcuts in this step.
 
 ## Structure

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { describe, it, expect } from "vitest";
-import { alignMoves, distributeMoves, type AlignMode, type Unit } from "./align";
+import { alignMoves, canDistribute, distributeMoves, type AlignMode, type Unit } from "./align";
 
 const unit = (id: number, x: number, y: number, w: number, h: number): Unit => ({ ids: [id], bounds: { x, y, w, h } });
 // Three units: A 0..10 × 0..10, B 20..24 × 5..25, C 40..60 × 2..6. Selection bounds 0..60 × 0..25.
@@ -101,5 +101,17 @@ describe("distributeMoves", () => {
   it("works on y with the same rule", () => {
     // Tops: A 0..10, C 2..6, B 5..25. Span 0..25, sizes 34, gaps -4.5: C's top goes to 5.5 (+3.5).
     expect(dy(distributeMoves([A, B, C], "y"), 3)).toBeCloseTo(3.5, 9);
+  });
+});
+
+describe("canDistribute", () => {
+  it("says no to fewer than three units, and to one that spans the rest on that axis only", () => {
+    const plate = unit(20, 0, 0, 100, 5); // spans x, but not y: the others sit below it
+    const p1 = unit(21, 10, 10, 10, 10);
+    const p2 = unit(22, 40, 30, 10, 10);
+    expect(canDistribute([A, B], "x")).toBe(false);
+    expect(canDistribute([A, B, C], "x")).toBe(true);
+    expect(canDistribute([plate, p1, p2], "x")).toBe(false);
+    expect(canDistribute([plate, p1, p2], "y")).toBe(true);
   });
 });

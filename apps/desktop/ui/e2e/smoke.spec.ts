@@ -3620,3 +3620,39 @@ test("an align that would move nothing sends nothing and does not hold the next 
   await expect.poll(async () => (await batchLog(page)).length).toBe(1);
   expect((await batchLog(page))[0]).toMatchObject({ ids: [2], batch: 1 });
 });
+
+test("a queued distribute does not replace a queued align on the same axis", async ({ page }) => {
+  const v = await selectRedBesideGroup(page);
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // red to 5..15
+  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
+
+  await page.getByTestId("layer-row").nth(3).click({ modifiers: ["Shift"] }); // green
+  await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] }); // the Group
+  await page.getByRole("button", { name: "Distribute horizontal spacing" }).click();
+  await page.getByRole("button", { name: "Align left edges" }).click();
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // Distribute first: green 0..10 and the Group 30..40 stay, red goes to 15 (+10). Then align left
+  // from there: red −15, the Group −30. Align alone would have sent red −5.
+  await expect.poll(async () => (await batchLog(page)).length).toBe(4);
+  const log = await batchLog(page);
+  expect(log.slice(1).map((e) => [e.ids[0], Math.round(e.m[4] * 1e6) / 1e6, e.batch])).toEqual([[4, 10, 2], [2, -30, 3], [4, -15, 3]]);
+});
+
+test("an align's preview moves every unit while its commit is on the wire", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await selectRows(page, [0, 2, 3]); // the Group, red, green: the centre of 0..40 is 20
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await page.getByRole("button", { name: "Align horizontal centres" }).click();
+  await expect.poll(async () => (await batchLog(page)).length).toBe(3);
+
+  // The fields read the effective scene, so they show the preview: red and green both at 15. A
+  // preview that applied only the first move (the Group's) would leave them at 0.
+  await page.getByTestId("layer-row").nth(2).click();
+  await expect(page.getByLabel("X", { exact: true })).toHaveValue("15");
+  await page.getByTestId("layer-row").nth(3).click();
+  await expect(page.getByLabel("X", { exact: true })).toHaveValue("15");
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+});

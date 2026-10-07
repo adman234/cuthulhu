@@ -7,7 +7,7 @@ import type { Affine6, Scene, ShapeGeom } from "./render/hittest";
 import { pathBounds } from "./render/pathdata";
 import { IDENTITY, compose, transformBounds } from "./render/affine";
 import { outermost, shapesUnder, toggleId } from "./interaction/marquee";
-import { alignMoves, distributeMoves, type AlignMode, type Axis, type Unit } from "./interaction/align";
+import { alignMoves, canDistribute, distributeMoves, type AlignMode, type Axis, type Unit } from "./interaction/align";
 import type { Matrix } from "./interaction/transform";
 import { useCanvasInteraction, type CommitOutcome } from "./interaction/useCanvasInteraction";
 import { viewMatrix, zoomPercent } from "./interaction/viewport";
@@ -344,20 +344,22 @@ export function App() {
     });
     return found.sort((a, b) => a.first - b.first).map((f) => f.unit);
   };
-  // Keyed like the fields: a newer click on the same axis and selection replaces a queued one, but
-  // "Align top" does not replace a queued "Align left", since each moves only its own axis
-  // (code-reviewer).
-  const alignKey = (axis: Axis) => `align:${axis}:${units.join(",")}`;
+  // Keyed like the fields: a newer click of the same kind on the same axis and selection replaces a
+  // queued one, but "Align top" does not replace a queued "Align left", and a distribute does not
+  // replace an align, since each is a different request (code-reviewer).
+  const alignKey = (kind: "align" | "distribute", axis: Axis) => `${kind}:${axis}:${units.join(",")}`;
   const align = (mode: AlignMode) => {
     const axis: Axis = mode === "left" || mode === "hcenter" || mode === "right" ? "x" : "y";
-    interaction.transformEach(alignKey(axis), (s) => alignMoves(unitsIn(s), mode, doc?.artboard ?? null));
+    interaction.transformEach(alignKey("align", axis), (s) => alignMoves(unitsIn(s), mode, doc?.artboard ?? null));
   };
   const distribute = (axis: Axis) =>
-    interaction.transformEach(alignKey(axis), (s) => distributeMoves(unitsIn(s), axis));
+    interaction.transformEach(alignKey("distribute", axis), (s) => distributeMoves(unitsIn(s), axis));
   // Counted from the scene the moves are computed from, not from the selection: an empty Group
   // is a selected id with nothing to line up, and counting it enabled a distribute that then had
   // two units and did nothing, or sent a lone shape to the artboard (silent-failure-hunter).
-  const unitCount = unitsIn(interaction.effectiveScene).length;
+  const shownUnits = unitsIn(interaction.effectiveScene);
+  const unitCount = shownUnits.length;
+  const distributable = { x: canDistribute(shownUnits, "x"), y: canDistribute(shownUnits, "y") };
 
   const cutLineType = doc ? selectionCutLineType(doc.nodes, selected) : null;
 
@@ -508,6 +510,7 @@ export function App() {
           onChangeW={(v) => commitScale("w", v)}
           onChangeH={(v) => commitScale("h", v)}
           unitCount={unitCount}
+          distributable={distributable}
           onAlign={align}
           onDistribute={distribute}
           cutLineType={cutLineType}

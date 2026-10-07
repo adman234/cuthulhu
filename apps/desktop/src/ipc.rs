@@ -403,3 +403,18 @@ pub fn load_image_preview(
     use base64::Engine as _;
     Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The inventory pins `moves` but not the names inside each entry, and the e2e fake reads
+    /// `ids` and `m` by hand, so a rename here would pass every other test and refuse every align.
+    #[test]
+    fn transform_move_reads_the_shape_the_frontend_sends() {
+        let moves: Vec<TransformMove> =
+            serde_json::from_str(r#"[{"ids":[1,2],"m":[1,0,0,1,5,0]}]"#).unwrap();
+        assert_eq!(moves[0].ids, vec![NodeId(1), NodeId(2)]);
+        assert_eq!(moves[0].m, Affine([1.0, 0.0, 0.0, 1.0, 5.0, 0.0]));
+    }
+}

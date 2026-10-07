@@ -47,14 +47,10 @@ export function alignMoves(units: Unit[], mode: AlignMode, artboard: Bounds | nu
   return moved(units.map((u) => [u, line - (start(u.bounds, axis) + at * size(u.bounds, axis))]), axis);
 }
 
-/** Equal gaps between neighbours, because gaps are what a weeder works between. The unit that starts
- *  first and the unit that reaches furthest stay put; the rest go between them in start-edge order.
- *  Taking the far end from whichever unit starts last threw small pieces past each other when a
- *  wide one started first (code-reviewer). When the units are longer than the span the gaps come
- *  out negative and they overlap evenly, which is still the arithmetic answer. When one unit spans
- *  the whole range there is no gap to equalise, so nothing moves. */
-export function distributeMoves(units: Unit[], axis: Axis): Move[] {
-  if (units.length < 3) return [];
+/** The units in start-edge order and the index of the far end, or null when distribute has
+ *  nothing to do: fewer than three units, or one that spans the rest. */
+function outerUnits(units: Unit[], axis: Axis): { order: Unit[]; li: number } | null {
+  if (units.length < 3) return null;
   // Array.prototype.sort is stable, so document order breaks ties.
   const order = [...units].sort((a, b) => start(a.bounds, axis) - start(b.bounds, axis));
   const end = (u: Unit) => start(u.bounds, axis) + size(u.bounds, axis);
@@ -64,7 +60,26 @@ export function distributeMoves(units: Unit[], axis: Axis): Move[] {
   order.forEach((u, i) => {
     if (end(u) >= end(order[li])) li = i;
   });
-  if (li === 0) return [];
+  return li === 0 ? null : { order, li };
+}
+
+/** Whether distribute can act, so the button says so rather than doing nothing: a backing plate
+ *  selected with the pieces on it spans them, and there is no gap to equalise (silent-failure-hunter). */
+export function canDistribute(units: Unit[], axis: Axis): boolean {
+  return outerUnits(units, axis) !== null;
+}
+
+/** Equal gaps between neighbours, because gaps are what a weeder works between. The unit that starts
+ *  first and the unit that reaches furthest stay put; the rest go between them in start-edge order.
+ *  Taking the far end from whichever unit starts last threw small pieces past each other when a
+ *  wide one started first (code-reviewer). When the units are longer than the span the gaps come
+ *  out negative and they overlap evenly, which is still the arithmetic answer. When one unit spans
+ *  the whole range there is no gap to equalise, so nothing moves. */
+export function distributeMoves(units: Unit[], axis: Axis): Move[] {
+  const ends = outerUnits(units, axis);
+  if (!ends) return [];
+  const { order, li } = ends;
+  const end = (u: Unit) => start(u.bounds, axis) + size(u.bounds, axis);
   const last = order[li];
   const middle = order.filter((_, i) => i !== 0 && i !== li);
   const first = order[0];
