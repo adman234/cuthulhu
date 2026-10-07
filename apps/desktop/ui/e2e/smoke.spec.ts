@@ -11,7 +11,7 @@ import ipcInventory from "../../ipc-inventory.json" with { type: "json" };
 // can't close over anything outside itself) and mirrors the JSON shape produced by
 // crates/document's Document::snapshot_json() — see App.tsx's DocSnapshot/buildScene,
 // which is what actually parses this on the JS side.
-function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview?: boolean; dropTraceControl?: string; seedBusyHost?: boolean; seedRemoteConnected?: boolean; slowList?: boolean; failList?: boolean; noFonts?: boolean; seedMachine?: boolean; seedUserPreset?: boolean; seedEmptyPresetAssignment?: boolean }) {
+function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview?: boolean; dropTraceControl?: string; seedBusyHost?: boolean; seedRemoteConnected?: boolean; slowList?: boolean; failList?: boolean; noFonts?: boolean; seedMachine?: boolean; seedUserPreset?: boolean; seedEmptyPresetAssignment?: boolean; seedGroup?: boolean }) {
   type Style = { stroke: number | null; fill: number | null };
   type PresetAssignment = { state: "inherit" } | { state: "unassigned" } | { state: "preset"; id: string };
   type Node = { id: number; kind: unknown; transform: number[]; style: Style; children: number[]; cut_line_type: "Cut" | "NoCut"; material_preset: PresetAssignment };
@@ -55,6 +55,16 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
   // Seed two differently-stroked rects synchronously (bypassing invoke) so the doc is
   // already populated by the time App.tsx's mount effect calls snapshot() — avoids a
   // race between an async seed and React's first fetch.
+  // A Group 30 mm right of the origin holding one 10 × 10 mm rect: a selected container commits as
+  // its whole subtree, which the canvas has to preview and box the same way (Copilot on #298).
+  if (opts?.seedGroup) {
+    const groupId = nextId++;
+    const childId = nextId++;
+    doc.nodes[groupId] = { id: groupId, kind: "Group", transform: [1, 0, 0, 1, 30, 0], style: { stroke: null, fill: null }, children: [childId], cut_line_type: "Cut", material_preset: { state: "inherit" } };
+    doc.nodes[childId] = { id: childId, kind: { Shape: { Rect: { w: 10, h: 10 } } }, transform: [1, 0, 0, 1, 0, 0], style: { stroke: 0xff0000ff, fill: null }, children: [], cut_line_type: "Cut", material_preset: { state: "inherit" } };
+    doc.nodes[doc.root].children.push(groupId);
+  }
+
   if (opts?.seedTwoColorRects) {
     const redId = nextId++;
     doc.nodes[redId] = {
@@ -90,7 +100,15 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       doc = freshDoc();
       return JSON.stringify(doc);
     },
-    snapshot: () => JSON.stringify(doc),
+    snapshot: () => {
+      // One-shot, armed by a test: a refresh that fails after a commit already landed is the case
+      // whose repair is the opposite of a refusal (silent-failure-hunter on #298).
+      if (failNextSnapshot) {
+        failNextSnapshot = false;
+        throw new Error("snapshot unavailable");
+      }
+      return JSON.stringify(doc);
+    },
     add_primitive: (a) => {
       const id = nextId++;
       const style = a.stroke !== undefined ? { stroke: a.stroke as number | null, fill: null } : DEFAULT_STYLE;
@@ -113,15 +131,54 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       return {};
     },
     commit_transform: (a) => {
-      const m = a.m as number[];
-      for (const id of a.ids as number[]) {
-        const t = doc.nodes[id]?.transform;
-        if (t) {
-          t[4] += m[4];
-          t[5] += m[5];
-        }
+      // Composed in full: handles send scale and rotation, and a fake that kept only the
+      // translation passes a frontend whose preview and commit disagree. Recorded so a test can
+      // read the matrix.
+      if (failNextCommit) {
+        failNextCommit = false;
+        throw new Error("transform refused");
       }
-      return {};
+      const m = a.m as number[];
+      const hooks = window as unknown as { __commitTransforms?: { ids: number[]; m: number[] }[] };
+      hooks.__commitTransforms ??= [];
+      hooks.__commitTransforms.push({ ids: a.ids as number[], m });
+      // Mirrors crates/document/src/commands.rs transform_nodes (L53-77): `m` is world-space, so
+      // each node's local transform becomes local · parentWorld · m · parentWorld⁻¹, and a node
+      // whose ancestor is also selected is skipped, since the ancestor already carries it.
+      // Composing `m` straight onto a nested node's local transform lands it where the real
+      // backend never would (Copilot on #298).
+      const cmp = (p: number[], q: number[]) => [
+        q[0] * p[0] + q[2] * p[1], q[1] * p[0] + q[3] * p[1],
+        q[0] * p[2] + q[2] * p[3], q[1] * p[2] + q[3] * p[3],
+        q[0] * p[4] + q[2] * p[5] + q[4], q[1] * p[4] + q[3] * p[5] + q[5],
+      ];
+      const inv = (p: number[]) => {
+        const det = p[0] * p[3] - p[1] * p[2];
+        const [ia, ib, ic, id] = [p[3] / det, -p[1] / det, -p[2] / det, p[0] / det];
+        return [ia, ib, ic, id, -(ia * p[4] + ic * p[5]), -(ib * p[4] + id * p[5])];
+      };
+      const parentOf = (id: number) => Object.values(doc.nodes).find((n) => n.children.includes(id))?.id;
+      const worldOf = (id: number | undefined): number[] =>
+        id === undefined ? [1, 0, 0, 1, 0, 0] : cmp(doc.nodes[id].transform, worldOf(parentOf(id)));
+      const selectedIds = new Set(a.ids as number[]);
+      const hasSelectedAncestor = (id: number) => {
+        for (let p = parentOf(id); p !== undefined; p = parentOf(p)) if (selectedIds.has(p)) return true;
+        return false;
+      };
+      const applyIt = () => {
+        for (const id of selectedIds) {
+          const node = doc.nodes[id];
+          if (!node || hasSelectedAncestor(id)) continue;
+          const pw = worldOf(parentOf(id));
+          node.transform = cmp(cmp(cmp(node.transform, pw), m), inv(pw));
+        }
+        return {};
+      };
+      // Answered on a later task, as a real IPC round trip is: resolving in the same microtask burst
+      // let a whole chain of queued commits finish before React rendered between them, which hid
+      // the window where an intermediate snapshot renders while the next commit is on the wire.
+      if (!holdingCommits) return new Promise((resolve) => setTimeout(() => resolve(applyIt()), 0));
+      return new Promise((resolve) => heldCommits.push(() => resolve(applyIt())));
     },
     delete: (a) => {
       for (const id of a.ids as number[]) {
@@ -371,7 +428,17 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
   // without rows for the whole test.
   let holdingPresets = false;
   const heldPresets: (() => void)[] = [];
+  // Transforms hold on their own switch too: the race they exist for is a second gesture pressed
+  // while the first one's commit is still on the wire.
+  let holdingCommits = false;
+  const heldCommits: (() => void)[] = [];
+  let failNextCommit = false;
+  let failNextSnapshot = false;
   Object.assign(window, {
+    __failNextCommit: () => { failNextCommit = true; },
+    __failNextSnapshot: () => { failNextSnapshot = true; },
+    __holdCommits: () => { holdingCommits = true; },
+    __releaseCommits: () => { holdingCommits = false; return release(heldCommits); },
     __armHold: () => { holding = true; },
     __releasePlans: () => release(heldPlans),
     __releaseTravel: () => release(heldTravel),
@@ -2767,4 +2834,465 @@ test("trace dialog: a failed source thumbnail surfaces instead of blanking", asy
   // The trace itself still succeeded, so the dialog stays usable.
   await expect(page.getByText("1 path")).toBeVisible();
   await expect(page.getByRole("button", { name: "Insert" })).toBeEnabled();
+});
+
+// The canvas's pixels are unreadable from a test, so these turn document mm into page px with the
+// view the canvas publishes as `data-view="scale tx ty"`.
+type CanvasView = { scale: number; tx: number; ty: number };
+
+async function readView(page: Page): Promise<CanvasView> {
+  const attr = (await page.getByTestId("design-canvas").getAttribute("data-view")) ?? "";
+  const [scale, tx, ty] = attr.split(" ").map(Number);
+  return { scale, tx, ty };
+}
+
+async function fittedView(page: Page): Promise<CanvasView> {
+  await expect(page.getByTestId("design-canvas")).not.toHaveAttribute("data-view", "1 0 0");
+  return readView(page);
+}
+
+async function toPage(page: Page, v: CanvasView, mm: { x: number; y: number }) {
+  const box = await page.getByTestId("design-canvas").boundingBox();
+  if (!box) throw new Error("design canvas has no layout box");
+  return { x: box.x + mm.x * v.scale + v.tx, y: box.y + mm.y * v.scale + v.ty };
+}
+
+/** Ctrl-wheel at (the whole pixel nearest) a document point; returns the view once the zoom has
+ *  landed. Whole pixels because Chromium reports a wheel's position as integers: a fractional
+ *  target puts the pinned point up to a pixel away, and a 20× zoom turns that into twenty. */
+async function zoomInAt(page: Page, mm: { x: number; y: number }, deltaY: number): Promise<CanvasView> {
+  const before = await fittedView(page);
+  const at = await toPage(page, before, mm);
+  await page.mouse.move(Math.round(at.x), Math.round(at.y));
+  await page.keyboard.down("Control");
+  await page.mouse.wheel(0, deltaY);
+  await page.keyboard.up("Control");
+  await expect.poll(async () => (await readView(page)).scale).toBeGreaterThan(before.scale);
+  return readView(page);
+}
+
+test("Ctrl-wheel zooms about the cursor and the status bar reports it", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const v0 = await fittedView(page);
+  const zoom = page.getByTestId("status-zoom");
+  const before = parseInt((await zoom.textContent()) ?? "", 10);
+  const target = await toPage(page, v0, { x: 5, y: 5 });
+  const cursor = { x: Math.round(target.x), y: Math.round(target.y) }; // where zoomInAt puts it
+  const box = (await page.getByTestId("design-canvas").boundingBox())!;
+  const under = { x: (cursor.x - box.x - v0.tx) / v0.scale, y: (cursor.y - box.y - v0.ty) / v0.scale };
+
+  const v1 = await zoomInAt(page, { x: 5, y: 5 }, -300);
+
+  await expect.poll(async () => parseInt((await zoom.textContent()) ?? "", 10)).toBeGreaterThan(before);
+  // About the cursor: the document point that was under it is still under it.
+  const after = await toPage(page, v1, under);
+  expect(after.x).toBeCloseTo(cursor.x, 0);
+  expect(after.y).toBeCloseTo(cursor.y, 0);
+});
+
+test("dragging a corner handle commits one scale about the opposite corner", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click(); // the red 10 × 10 mm rect at the origin
+  // Far enough in that the handles are tens of px apart.
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  const se = await toPage(page, v, { x: 10, y: 10 });
+  await page.mouse.move(se.x, se.y);
+  await page.mouse.down();
+  await page.mouse.move(se.x + 10 * v.scale, se.y + 5 * v.scale, { steps: 4 });
+  await page.mouse.up();
+
+  const commits = await page.evaluate(
+    () => (window as unknown as { __commitTransforms?: { ids: number[]; m: number[] }[] }).__commitTransforms ?? [],
+  );
+  expect(commits).toHaveLength(1); // one gesture, one commit, one undo entry
+  expect(commits[0].ids).toEqual([2]);
+  // 10 → 20 mm wide, 10 → 15 mm tall, with the nw corner at the origin held still.
+  const [a, b, c, d, e, f] = commits[0].m;
+  expect(a).toBeCloseTo(2, 1);
+  expect(d).toBeCloseTo(1.5, 1);
+  for (const zero of [b, c, e, f]) expect(zero).toBeCloseTo(0, 1);
+});
+
+test("a marquee over both shapes selects both", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  // Zoomed in so the band's start point is clear of the shapes' hit tolerance. The band runs from
+  // empty space below-right up to a point inside both shapes: the shapes sit at the artboard's top
+  // edge, so after zooming there is almost no canvas above them, and a band only has to touch.
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  const from = await toPage(page, v, { x: 20, y: 20 });
+  const to = await toPage(page, v, { x: 4, y: 4 });
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(to.x, to.y, { steps: 5 });
+  await page.mouse.up();
+
+  await expect(page.locator('[data-testid="layer-row"][data-selected="true"]')).toHaveCount(2);
+});
+
+test("the cursor readout follows a wheel pan under a still pointer", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const v0 = await fittedView(page);
+  const box = (await page.getByTestId("design-canvas").boundingBox())!;
+  const pointer = { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
+  await page.mouse.move(pointer.x, pointer.y);
+  const readY = async () => Number(/y (-?[\d.]+) mm/.exec((await page.getByTestId("status-cursor").textContent()) ?? "")?.[1]);
+  const before = await readY();
+
+  await page.mouse.wheel(0, 100); // scroll down: the view pans up, the pointer is over a lower point
+  await expect.poll(async () => (await readView(page)).ty).toBeLessThan(v0.ty);
+
+  // A readout stored at the last pointer move would still say `before`; the world moved under it.
+  await expect.poll(readY).toBeCloseTo(before + 100 / v0.scale, 0);
+});
+
+// One transform on the wire at a time. A second gesture pressed while the first commit is
+// unanswered would compute its matrix from the first one's preview; if the first were then
+// refused, the second would land about the wrong anchor (CodeRabbit on #298).
+test("a drag pressed while the previous commit is in flight does not commit", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+  const commits = () =>
+    page.evaluate(() => ((window as unknown as { __commitTransforms?: unknown[] }).__commitTransforms ?? []).length);
+  const drag = async (from: { x: number; y: number }, dx: number) => {
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    await page.mouse.move(from.x + dx, from.y, { steps: 3 });
+    await page.mouse.up();
+  };
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  const centre = await toPage(page, v, { x: 5, y: 5 });
+  await drag(centre, 5 * v.scale); // move right 5 mm; its commit is now parked
+  await expect.poll(commits).toBe(1);
+
+  await drag({ x: centre.x + 5 * v.scale, y: centre.y }, 5 * v.scale); // press on the preview
+  expect(await commits()).toBe(1);
+
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+  await drag({ x: centre.x + 5 * v.scale, y: centre.y }, 5 * v.scale); // settled: drags commit again
+  await expect.poll(commits).toBe(2);
+});
+
+type CommitRecord = { ids: number[]; m: number[] };
+
+async function commitLog(page: Page): Promise<CommitRecord[]> {
+  return page.evaluate(() => (window as unknown as { __commitTransforms?: CommitRecord[] }).__commitTransforms ?? []);
+}
+
+async function dragBy(page: Page, from: { x: number; y: number }, dx: number, dy: number) {
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(from.x + dx, from.y + dy, { steps: 4 });
+  await page.mouse.up();
+}
+
+/** The fake's own transform for a node, read through the same command the app uses. */
+async function nodeTransform(page: Page, id: number): Promise<number[]> {
+  const json = await page.evaluate(() =>
+    (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> } })
+      .__TAURI_INTERNALS__.invoke("snapshot", {}),
+  );
+  return (JSON.parse(json as string) as { nodes: Record<string, { transform: number[] }> }).nodes[id].transform;
+}
+
+test("a refused transform puts the shape back and the next drag starts from where it was", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+  const centre = await toPage(page, v, { x: 5, y: 5 });
+
+  await page.evaluate(() => (window as unknown as { __failNextCommit: () => void }).__failNextCommit());
+  await dragBy(page, centre, 5 * v.scale, 0);
+  await expect(page.getByText("transform refused")).toBeVisible();
+
+  // Pressed where the shape was: a preview left stranded would put the box 5 mm to the right.
+  await dragBy(page, centre, 5 * v.scale, 0);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(5, 0);
+});
+
+test("a transform that lands but cannot be re-read keeps the shape where the backend has it", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+  const centre = await toPage(page, v, { x: 5, y: 5 });
+
+  await page.evaluate(() => (window as unknown as { __failNextSnapshot: () => void }).__failNextSnapshot());
+  await dragBy(page, centre, 20 * v.scale, 0); // the commit lands; its refresh fails
+  await expect(page.getByText(/Edit applied, but the canvas could not be refreshed/)).toBeVisible();
+
+  // The box is where the backend put it (20 mm right), clear of where the shape used to be: a
+  // revert to the stale scene would make this press miss and start a marquee instead.
+  await dragBy(page, { x: centre.x + 20 * v.scale, y: centre.y }, 5 * v.scale, 0);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(25, 0);
+});
+
+test("an edit keeps the operator's zoom; Ctrl+0 and a machine switch refit", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const fitted = await fittedView(page);
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  // The snapshot after the commit rebuilds the artboard object; the view must not refit for it.
+  expect(await readView(page)).toEqual(v);
+
+  await page.getByTestId("design-canvas").hover();
+  await page.keyboard.press("Control+0");
+  await expect.poll(() => readView(page)).toEqual(fitted);
+
+  await page.getByLabel("Machine").selectOption("puma");
+  const box = (await page.getByTestId("design-canvas").boundingBox())!;
+  // The Puma's 600 × 5000 mm bed, height-bound in this window like the Cameo's.
+  await expect.poll(async () => (await readView(page)).scale).toBeCloseTo((box.height - 48) / 5000, 3);
+});
+
+test("keyboard zoom works after a toolbar click and leaves a focused field alone", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const fitted = await fittedView(page);
+  await page.getByRole("button", { name: "Select" }).click(); // focus stays on the button
+
+  await page.keyboard.press("Control+=");
+  await expect.poll(async () => (await readView(page)).scale).toBeCloseTo(fitted.scale * 1.25, 6);
+  await page.keyboard.press("Control+1");
+  await expect(page.getByTestId("status-zoom")).toHaveText("100%");
+  await page.keyboard.press("Control+0");
+  await expect.poll(() => readView(page)).toEqual(fitted);
+
+  await page.getByTestId("layer-row").first().click();
+  await page.getByLabel("X", { exact: true }).focus();
+  await page.keyboard.press("Control+=");
+  expect(await readView(page)).toEqual(fitted);
+});
+
+test("Shift-click inside the selection toggles a shape out without dragging the rest", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+  await dragBy(page, await toPage(page, v, { x: 20, y: 20 }), -16 * v.scale, -16 * v.scale); // marquee both
+  const selectedRows = page.locator('[data-testid="layer-row"][data-selected="true"]');
+  await expect(selectedRows).toHaveCount(2);
+
+  // Both seeded rects share the origin, so this lands on the topmost of the two.
+  await page.keyboard.down("Shift");
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0);
+  await page.keyboard.up("Shift");
+
+  await expect(selectedRows).toHaveCount(1);
+  expect(await commitLog(page)).toEqual([]);
+});
+
+test("Space-drag pans after a toolbar click without pressing the button, and so does a middle drag", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const v0 = await fittedView(page);
+  await page.getByRole("button", { name: "Rectangle" }).click(); // adds one; focus stays on it
+  const rows = page.getByTestId("layer-row");
+  await expect(rows).toHaveCount(3);
+  const box = (await page.getByTestId("design-canvas").boundingBox())!;
+  const start = { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
+
+  await page.mouse.move(start.x, start.y);
+  await page.keyboard.down("Space");
+  await dragBy(page, start, 50, 30);
+  await page.keyboard.up("Space");
+  await expect.poll(async () => (await readView(page)).tx).toBeCloseTo(v0.tx + 50, 0);
+  expect((await readView(page)).ty).toBeCloseTo(v0.ty + 30, 0);
+  await expect(rows).toHaveCount(3); // Space never reached the Rectangle button
+  expect(await commitLog(page)).toEqual([]);
+
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(start.x - 20, start.y, { steps: 3 });
+  await page.mouse.up({ button: "middle" });
+  await expect.poll(async () => (await readView(page)).tx).toBeCloseTo(v0.tx + 30, 0);
+});
+
+test("dragging just outside a corner rotates about the centre; Alt scales about it", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+  const c = await toPage(page, v, { x: 5, y: 5 });
+  const se = await toPage(page, v, { x: 10, y: 10 });
+
+  // Inside the rotate zone (18 px) and outside the handle (6 px), a quarter turn clockwise.
+  const from = { x: se.x + 8, y: se.y + 8 };
+  const r = Math.hypot(from.x - c.x, from.y - c.y);
+  const to = { x: c.x + r * Math.cos((3 * Math.PI) / 4), y: c.y + r * Math.sin((3 * Math.PI) / 4) };
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(to.x, to.y, { steps: 8 });
+  await page.mouse.up();
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  const [a, b, cc, d, e, f] = (await commitLog(page))[0].m;
+  expect([a, b, cc, d]).toEqual([expect.closeTo(0, 1), expect.closeTo(1, 1), expect.closeTo(-1, 1), expect.closeTo(0, 1)]);
+  // About the centre (5, 5): it maps to itself.
+  expect(a * 5 + cc * 5 + e).toBeCloseTo(5, 0);
+  expect(b * 5 + d * 5 + f).toBeCloseTo(5, 0);
+});
+
+test("Alt-dragging a corner scales about the centre", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+  const se = await toPage(page, v, { x: 10, y: 10 });
+
+  await page.keyboard.down("Alt");
+  await dragBy(page, se, 10 * v.scale, 5 * v.scale);
+  await page.keyboard.up("Alt");
+
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  // Half-widths 5 → 15 and 5 → 10 about (5, 5): ×3 and ×2 with the centre fixed.
+  const [a, b, c, d, e, f] = (await commitLog(page))[0].m;
+  expect([a, b, c, d, e, f]).toEqual([3, 0, 0, 2, -10, -5].map((x) => expect.closeTo(x, 1)));
+});
+
+// The gesture follows the document point under the pointer, not the pointer's last world position:
+// a pan under a held, still pointer must move the shape with it (CodeRabbit on #298).
+test("a wheel pan during a drag carries the shape with the pointer and commits that", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+  const centre = await toPage(page, v, { x: 5, y: 5 });
+
+  await page.mouse.move(centre.x, centre.y);
+  await page.mouse.down();
+  await page.mouse.move(centre.x + 5 * v.scale, centre.y, { steps: 3 });
+  await page.mouse.wheel(0, 100); // the view pans up 100 px; the pointer now sits 100 px lower in mm
+  await expect.poll(async () => (await readView(page)).ty).toBeLessThan(v.ty);
+  await page.mouse.up();
+
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  const [, , , , e, f] = (await commitLog(page))[0].m;
+  expect(e).toBeCloseTo(5, 0);
+  expect(f).toBeCloseTo(100 / v.scale, 0);
+});
+
+test("a Group selected in the layers panel gets a box around its shapes and commits as itself", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedGroup: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").filter({ hasText: "Group" }).click();
+  const v = await zoomInAt(page, { x: 35, y: 5 }, -350);
+
+  // The box spans the Group's rect, 30..40 mm; drag its se corner out by 10 × 5 mm.
+  await dragBy(page, await toPage(page, v, { x: 40, y: 10 }), 10 * v.scale, 5 * v.scale);
+
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  const [{ ids, m }] = await commitLog(page);
+  expect(ids).toEqual([1 + 1]); // the Group (id 2, after the root), not its rect
+  // Width 10 → 20 and height 10 → 15 about the nw corner (30, 0).
+  const [a, b, c, d, e, f] = m;
+  expect([a, b, c, d, e, f]).toEqual([2, 0, 0, 1.5, -30, 0].map((x) => expect.closeTo(x, 1)));
+});
+
+// The X/Y/W/H fields are a transform producer too: they must compute from the geometry the canvas
+// shows (an unread commit's preview included) and wait their turn behind a commit on the wire, or
+// they send a matrix built on the position the shape has already left (Copilot on #298).
+test("a property edit after an applied-but-unread commit starts from where the shape now is", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __failNextSnapshot: () => void }).__failNextSnapshot());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 20 * v.scale, 0); // lands at x = 20; refresh fails
+  await expect(page.getByText(/Edit applied, but the canvas could not be refreshed/)).toBeVisible();
+
+  await page.getByLabel("X", { exact: true }).fill("5");
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  expect((await commitLog(page))[1].m[4]).toBeCloseTo(-15, 1);
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(5, 1);
+});
+
+test("a property edit made while a commit is in flight waits for it, then lands where it says", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 20 * v.scale, 0); // parked on the wire
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+
+  await page.getByLabel("X", { exact: true }).fill("5");
+  expect((await commitLog(page)).length).toBe(1); // queued, not sent alongside
+
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(5, 1);
+});
+
+test("edits to two different fields made during an in-flight commit both land", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 20 * v.scale, 0);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+
+  // Different fields do not supersede each other: a single queue slot dropped X when Y arrived
+  // (CodeRabbit and Copilot on #298).
+  await page.getByLabel("X", { exact: true }).fill("5");
+  await page.getByLabel("Y", { exact: true }).fill("7");
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  await expect.poll(async () => (await nodeTransform(page, 2)).slice(4)).toEqual([expect.closeTo(5, 1), expect.closeTo(7, 1)]);
+});
+
+// The fake has to mirror transform_nodes for nested nodes (Copilot on #298): a scale committed on
+// a Group's child lands in the parent's space, not as if the child sat at the root.
+test("scaling a shape inside a moved Group keeps it where the real backend would", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedGroup: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").filter({ hasText: "Rectangle" }).click(); // the Group's rect
+  const v = await zoomInAt(page, { x: 35, y: 5 }, -350);
+
+  await dragBy(page, await toPage(page, v, { x: 40, y: 10 }), 10 * v.scale, 5 * v.scale);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  // World: ×2, ×1.5 about (30, 0). In the Group's space, which is translated by 30, that is a pure
+  // scale about its origin.
+  await expect.poll(async () => nodeTransform(page, 3)).toEqual([2, 0, 0, 1.5, 0, 0].map((x) => expect.closeTo(x, 1)));
+});
+
+// Queued edits drain one per settled commit, and the snapshot of one can render while the next is
+// on the wire. That intermediate snapshot must not retire the in-flight preview, or the edit after
+// it is computed from geometry the backend has already left (Copilot on #298).
+test("queued X then W behind a move scale about where X put the shape", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 20 * v.scale, 0); // to x = 20, parked
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  await page.getByLabel("X", { exact: true }).fill("5");
+  await page.getByLabel("W", { exact: true }).fill("20");
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // The 10 mm rect ends at x = 5, 20 mm wide: scale ×2 about x = 5, so e = 5 and a = 2.
+  await expect.poll(async () => (await commitLog(page)).length).toBe(3);
+  await expect.poll(async () => {
+    const [a, , , , e] = await nodeTransform(page, 2);
+    return [a, e];
+  }).toEqual([expect.closeTo(2, 1), expect.closeTo(5, 1)]);
 });

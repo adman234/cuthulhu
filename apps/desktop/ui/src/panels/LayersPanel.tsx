@@ -23,6 +23,7 @@ function Row({ doc, node, depth, selected, onSelect }: { doc: DocSnapshot; node:
     <>
       <div
         data-testid="layer-row"
+        data-selected={isSelected}
         onClick={(e) => onSelect(node.id, e.shiftKey)}
         style={{
           padding: `4px 8px 4px ${8 + depth * 12}px`,

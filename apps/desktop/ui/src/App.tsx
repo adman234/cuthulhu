@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import * as ipc from "./ipc";
 import { Canvas2DRenderer } from "./render/Canvas2DRenderer";
-import { hitTest, type Affine6, type Scene, type ShapeGeom } from "./render/hittest";
+import type { Affine6, Scene, ShapeGeom } from "./render/hittest";
 import { pathBounds } from "./render/pathdata";
-import { applyOptimistic, dragMatrix, type Matrix, type Pt } from "./interaction/transform";
+import { IDENTITY, compose, transformBounds } from "./render/affine";
+import { shapesUnder, toggleId } from "./interaction/marquee";
+import type { Matrix } from "./interaction/transform";
+import { useCanvasInteraction, type CommitOutcome } from "./interaction/useCanvasInteraction";
+import { viewMatrix, zoomPercent } from "./interaction/viewport";
 import { TopBar } from "./panels/TopBar";
 import { ToolRail } from "./panels/ToolRail";
 import { LayersPanel } from "./panels/LayersPanel";
@@ -56,10 +60,6 @@ export type DocSnapshot = {
   machine: MachineProfile | null;
 };
 
-function toggleId(ids: number[], id: number): number[] {
-  return ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id];
-}
-
 function shapeBounds(kind: ShapeKindJson) {
   if ("Rect" in kind) return { x: 0, y: 0, w: kind.Rect.w, h: kind.Rect.h };
   if ("Ellipse" in kind) {
@@ -80,74 +80,29 @@ function shapeGeom(kind: ShapeKindJson): ShapeGeom | undefined {
   return undefined;
 }
 
-const IDENTITY_AFFINE6: Affine6 = [1, 0, 0, 1, 0, 0];
-
-// Mirrors crates/geometry/src/affine.rs's Affine::then: "self.then(other) = apply self,
-// then other". Used to accumulate each node's local transform into its ancestors' world
-// transform on the way down the tree (self=node.transform, other=parentWorld).
-function composeThen(self: Affine6, other: Affine6): Affine6 {
-  const [a1, b1, c1, d1, e1, f1] = self;
-  const [a2, b2, c2, d2, e2, f2] = other;
-  return [
-    a2 * a1 + c2 * b1,
-    b2 * a1 + d2 * b1,
-    a2 * c1 + c2 * d1,
-    b2 * c1 + d2 * d1,
-    a2 * e1 + c2 * f1 + e2,
-    b2 * e1 + d2 * f1 + f2,
-  ];
-}
-
-function applyAffine(m: Affine6, x: number, y: number): Pt {
-  const [a, b, c, d, e, f] = m;
-  return { x: a * x + c * y + e, y: b * x + d * y + f };
-}
-
 function buildScene(doc: DocSnapshot): Scene {
   const nodes: Scene["nodes"] = [];
   const walk = (id: number, parentWorld: Affine6) => {
     const n = doc.nodes[id];
     if (!n) return;
-    const world = composeThen(n.transform, parentWorld);
+    const world = compose(n.transform, parentWorld);
     if (typeof n.kind === "object" && "Shape" in n.kind) {
-      // Full affine bounds: transform each corner of the shape's local box by the
-      // accumulated world transform and take the axis-aligned box, so committed scale
-      // (from the PropertiesPanel's W/H fields) shows up and repeated edits don't compound
-      // against stale untransformed dims. Handles rotation too, once nodes can have any
-      // (corner-transform doesn't care whether a/b/c/d came from scale or rotation).
-      const b = shapeBounds(n.kind.Shape);
-      const corners = [
-        applyAffine(world, b.x, b.y),
-        applyAffine(world, b.x + b.w, b.y),
-        applyAffine(world, b.x, b.y + b.h),
-        applyAffine(world, b.x + b.w, b.y + b.h),
-      ];
-      const xs = corners.map((c) => c.x);
-      const ys = corners.map((c) => c.y);
-      const x = Math.min(...xs);
-      const y = Math.min(...ys);
-      nodes.push({
-        id: n.id,
-        bounds: { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y },
-        shape: shapeGeom(n.kind.Shape),
-        world,
-      });
+      // `local` travels with the node so hit-testing and handles work in its own frame;
+      // `bounds` is its axis-aligned world box (all four corners, so committed scale and
+      // rotation both show up), for the marquee and the properties panel.
+      const local = shapeBounds(n.kind.Shape);
+      nodes.push({ id: n.id, bounds: transformBounds(world, local), local, shape: shapeGeom(n.kind.Shape), world });
     } else {
       for (const child of n.children) walk(child, world);
     }
   };
-  walk(doc.root, IDENTITY_AFFINE6);
+  walk(doc.root, IDENTITY);
   return { nodes };
 }
 
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<Canvas2DRenderer | null>(null);
-  const dragStart = useRef<Pt | null>(null);
-  // Ids being dragged, captured at mousedown. Reading `selected` in the move/up handlers
-  // would depend on React having flushed the mousedown's setSelected before the next
-  // event — true today, but fragile. The ref pins the gesture's selection explicitly.
-  const dragIds = useRef<number[]>([]);
 
   const [doc, setDoc] = useState<DocSnapshot | null>(null);
   const [selected, setSelected] = useState<number[]>([]);
@@ -168,15 +123,24 @@ export function App() {
 
   const scene = useMemo(() => (doc ? buildScene(doc) : { nodes: [] }), [doc]);
 
+  // Every successful snapshot gets the next revision, set in the same render as the document it
+  // came with. A pending canvas preview retires by revision, not on any new document, because
+  // queued commits can render an earlier one's snapshot while a later one is still on the wire.
+  const revCounter = useRef(0);
+  const [docRev, setDocRev] = useState(0);
   const refresh = useCallback(async () => {
     const json = (await ipc.snapshot()) as string;
-    setDoc(JSON.parse(json) as DocSnapshot);
+    const parsed = JSON.parse(json) as DocSnapshot;
+    const rev = ++revCounter.current;
+    setDoc(parsed);
+    setDocRev(rev);
+    return rev;
   }, []);
 
   // ponytail: every command re-fetches the full snapshot instead of applying its returned
-  // Delta locally with reconcile() — correct and simple while scenes stay tiny. The canvas
-  // drag gesture below uses applyOptimistic for live feedback then also just re-fetches on
-  // mouseup; reconcile() stays unused until per-frame delta application is worth the wiring.
+  // Delta locally with reconcile() — correct and simple while scenes stay tiny. Canvas gestures
+  // (useCanvasInteraction) use applyOptimistic for live feedback, then also just re-fetch once
+  // their commit lands; reconcile() stays unused until per-frame delta application is worth it.
   const run = useCallback(
     async (fn: () => Promise<unknown>) => {
       try {
@@ -258,14 +222,49 @@ export function App() {
     if (ctx) rendererRef.current = new Canvas2DRenderer(ctx);
   }, []);
 
+  const expand = useCallback((ids: number[]) => (doc ? shapesUnder(doc.nodes, ids) : ids), [doc]);
+
+  // After the renderer is constructed, so it exists before the hook's observer first fires.
+  const interaction = useCanvasInteraction({
+    canvasRef,
+    rendererRef,
+    scene,
+    selected,
+    setSelected,
+    expand,
+    artboard: doc?.artboard ?? null,
+    // Not `run`: it reports one `false` for two failures that need opposite repairs. A refused
+    // transform must put the shape back; one that landed but could not be re-read must keep it,
+    // because the backend already holds the new geometry (silent-failure-hunter on #298).
+    commit: async (ids, m): Promise<CommitOutcome> => {
+      setError(null);
+      try {
+        await ipc.commitTransform({ ids, m });
+      } catch (e) {
+        setError(ipc.ipcErrorMessage(e));
+        return { kind: "refused" };
+      }
+      try {
+        return { kind: "applied", snapshotRev: await refresh() };
+      } catch (e) {
+        setError(`Edit applied, but the canvas could not be refreshed: ${ipc.ipcErrorMessage(e)}`);
+        return { kind: "applied", snapshotRev: null };
+      }
+    },
+    sceneRev: docRev,
+  });
+
+  const { repaint } = interaction;
   useEffect(() => {
     const r = rendererRef.current;
     if (!r) return;
-    r.setScene(scene);
-    r.setSelection(selected);
     r.setArtboard(doc?.artboard ?? null);
-    r.draw();
-  }, [scene, selected, doc]);
+    r.setView(viewMatrix(interaction.view));
+    // The hook draws the scene, so a redraw here cannot paint the committed scene over a live
+    // gesture. `scene` and `selected` are listed because they are what it draws; `size` because a
+    // resize clears the backing store and nothing else would repaint it.
+    repaint();
+  }, [scene, selected, doc, interaction.view, interaction.size, repaint]);
 
   // Clears selection only once the delete actually lands, so a failed delete leaves the
   // (still valid) selection in place, and a successful one can't leave stale ids around to
@@ -293,83 +292,34 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [selected, run, deleteSelected]);
 
-  const canvasPos = (e: MouseEvent<HTMLCanvasElement>): Pt => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-  };
-
-  const onCanvasMouseDown = (e: MouseEvent<HTMLCanvasElement>) => {
-    const p = canvasPos(e);
-    const hit = hitTest(scene, p.x, p.y);
-    const next =
-      e.shiftKey && hit !== null ? toggleId(selected, hit) : hit === null ? [] : [hit];
-    setSelected(next);
-    dragIds.current = next;
-    // Only start a drag when the hit node is part of the new selection — a
-    // shift-click that toggles a node OUT shouldn't begin dragging the rest.
-    dragStart.current = hit !== null && next.includes(hit) ? p : null;
-  };
-
-  const onCanvasMouseMove = (e: MouseEvent<HTMLCanvasElement>) => {
-    const r = rendererRef.current;
-    if (!dragStart.current || !r) return;
-    const m = dragMatrix(dragStart.current, canvasPos(e));
-    r.setScene(applyOptimistic(scene, dragIds.current, m));
-    r.setSelection(dragIds.current);
-    r.draw();
-  };
-
-  // Shared by the canvas's own mouseup and the window-level listener below, so a drag
-  // released outside the canvas (mouse left the element before the button came up) still
-  // commits instead of leaving the optimistic preview stranded and never saved.
-  const finishDrag = useCallback(
-    (clientX: number, clientY: number) => {
-      const start = dragStart.current;
-      dragStart.current = null;
-      if (!start || !canvasRef.current) return;
-      const rect = canvasRef.current.getBoundingClientRect();
-      const m = dragMatrix(start, { x: clientX - rect.left, y: clientY - rect.top });
-      if (m[4] === 0 && m[5] === 0) return; // click, not a drag
-      const ids = dragIds.current;
-      if (ids.length === 0) return;
-      run(() => ipc.commitTransform({ ids, m }));
-    },
-    [run],
-  );
-
-  const onCanvasMouseUp = (e: MouseEvent<HTMLCanvasElement>) => finishDrag(e.clientX, e.clientY);
-
-  // Catches mouseup anywhere in the window, not just over the canvas. finishDrag no-ops
-  // when dragStart is already null, so this is harmless on the common in-canvas release
-  // (which fires first and clears dragStart before this listener runs).
-  useEffect(() => {
-    const onWindowMouseUp = (e: globalThis.MouseEvent) => finishDrag(e.clientX, e.clientY);
-    window.addEventListener("mouseup", onWindowMouseUp);
-    return () => window.removeEventListener("mouseup", onWindowMouseUp);
-  }, [finishDrag]);
-
   const root = doc?.root ?? 0;
-  const selectedBounds = selected.length === 1 ? (scene.nodes.find((n) => n.id === selected[0])?.bounds ?? null) : null;
+  // Bounds of a single selection in a given scene. The fields read the effective scene, which holds
+  // an unread or in-flight commit's preview, so they show (and compute from) where the shape is now.
+  const boundsIn = (s: Scene) =>
+    selected.length === 1 ? (s.nodes.find((n) => n.id === selected[0])?.bounds ?? null) : null;
+  const selectedBounds = boundsIn(interaction.effectiveScene);
 
-  const commitAxis = (axis: "x" | "y", v: number) => {
-    if (!selectedBounds) return;
-    const m: Matrix = [1, 0, 0, 1, axis === "x" ? v - selectedBounds.x : 0, axis === "y" ? v - selectedBounds.y : 0];
-    if (m[4] === 0 && m[5] === 0) return;
-    run(() => ipc.commitTransform({ ids: selected, m }));
-  };
+  // Through the hook rather than straight to commitTransform: a field edit then waits behind a
+  // commit on the wire and builds its matrix from the geometry as it stands when it is sent, not
+  // from a position the shape has already left (Copilot on #298).
+  const commitAxis = (axis: "x" | "y", v: number) =>
+    interaction.transformWith(axis, selected, (s): Matrix | null => {
+      const b = boundsIn(s);
+      return b ? [1, 0, 0, 1, axis === "x" ? v - b.x : 0, axis === "y" ? v - b.y : 0] : null;
+    });
 
   // Scale about the bounds origin (x for width, y for height) so the opposite edge stays
   // put: translate(origin) · scale(s) · translate(-origin), i.e. [s,0,0,1, x-s*x, 0] for
   // width and [1,0,0,s, 0, y-s*y] for height.
-  const commitScale = (axis: "w" | "h", v: number) => {
-    if (!selectedBounds) return;
-    const { x, y, w, h } = selectedBounds;
-    const size = axis === "w" ? w : h;
-    if (size <= 0 || v <= 0) return;
-    const s = v / size;
-    const m: Matrix = axis === "w" ? [s, 0, 0, 1, x - s * x, 0] : [1, 0, 0, s, 0, y - s * y];
-    run(() => ipc.commitTransform({ ids: selected, m }));
-  };
+  const commitScale = (axis: "w" | "h", v: number) =>
+    interaction.transformWith(axis, selected, (s): Matrix | null => {
+      const b = boundsIn(s);
+      if (!b) return null;
+      const size = axis === "w" ? b.w : b.h;
+      if (size <= 0 || v <= 0) return null;
+      const k = v / size;
+      return axis === "w" ? [k, 0, 0, 1, b.x - k * b.x, 0] : [1, 0, 0, k, 0, b.y - k * b.y];
+    });
 
   const cutLineType = doc ? selectionCutLineType(doc.nodes, selected) : null;
 
@@ -466,6 +416,7 @@ export function App() {
                 await ipc.loadProject({ path: p });
                 setLastPath(p);
                 setSelected([]); // loaded doc may not contain the old ids
+                interaction.requestFit();
               }
             })
           }
@@ -473,6 +424,7 @@ export function App() {
             run(async () => {
               await ipc.loadProject({ path: lastPath! });
               setSelected([]);
+              interaction.requestFit();
             })
           }
           canReload={lastPath !== null}
@@ -493,15 +445,18 @@ export function App() {
         onBoolean={onBooleanOp}
         onDelete={deleteSelected}
       />
-      <canvas
-        ref={canvasRef}
-        width={800}
-        height={600}
-        style={{ background: "var(--workspace)" }}
-        onMouseDown={onCanvasMouseDown}
-        onMouseMove={onCanvasMouseMove}
-        onMouseUp={onCanvasMouseUp}
-      />
+      {/* The wrapper is what lets the canvas fill its grid cell: a canvas sized 100% directly in
+          the grid adds its intrinsic 300×150 to the track minimum and never shrinks. `data-view`
+          lets e2e turn document mm into page px, since the canvas's pixels are unreadable there. */}
+      <div style={{ position: "relative", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
+        <canvas
+          ref={canvasRef}
+          data-testid="design-canvas"
+          data-view={`${interaction.view.scale} ${interaction.view.tx} ${interaction.view.ty}`}
+          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", display: "block", background: "var(--workspace)", touchAction: "none" }}
+          {...interaction.handlers}
+        />
+      </div>
       <div style={{ display: "grid", gridTemplateRows: "1fr 1fr", borderLeft: "1px solid var(--border)", minHeight: 0 }}>
         <LayersPanel
           doc={doc}
@@ -523,7 +478,14 @@ export function App() {
         />
       </div>
       <div style={{ gridColumn: "1 / -1" }}>
-        <StatusBar machine={doc?.machine ?? null} artboard={doc?.artboard ?? null} error={error} status={status} />
+        <StatusBar
+          machine={doc?.machine ?? null}
+          artboard={doc?.artboard ?? null}
+          error={error}
+          status={status}
+          zoomPercent={doc ? zoomPercent(interaction.view) : null}
+          cursor={interaction.cursor}
+        />
       </div>
       {cutOpen && doc ? (
         <CutDialog

@@ -1,24 +1,41 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import type { Renderer, NodeId } from "./Renderer";
-import type { Bounds, Scene } from "./hittest";
+import type { Renderer, NodeId, Overlay } from "./Renderer";
+import type { Affine6, Bounds, Scene, ShapeGeom } from "./hittest";
+import { apply, compose, IDENTITY, transformBounds } from "./affine";
+import { boxCorners, handleWorld, SCALE_HANDLES } from "../interaction/selectionBox";
 
 const FALLBACK_ACCENT = "#22D3EE";
 const FALLBACK_BORDER = "#2E2E34";
 const FALLBACK_PANEL = "#1F1F23";
 const FALLBACK_TEXT = "#E7E7EA";
 
+// CSS px, whatever the zoom.
+const STROKE_PX = 1;
+const SELECTED_STROKE_PX = 2;
+const HANDLE_PX = 7;
+const MARQUEE_ALPHA = 0.12;
+
 export class Canvas2DRenderer implements Renderer {
   private scene: Scene = { nodes: [] };
   private selected = new Set<NodeId>();
   private artboard: Bounds | null = null;
+  private view: Affine6 = IDENTITY;
+  private dpr = 1;
+  private overlay: Overlay = { box: null, marquee: null };
   // ponytail: invalidation only — with the current full-clear+redraw loop this is just
   // a "needs redraw" signal, not a per-node dirty rect. draw() clears it each call.
   private dirty = new Set<NodeId>();
+  // Parsed geometry per node, keyed on the geometry's value: a snapshot rebuilds every ShapeGeom
+  // object, so object identity would miss after each edit while an equal string still hits.
+  private paths = new Map<NodeId, { key: string; path: Path2D }>();
 
   constructor(private readonly ctx: CanvasRenderingContext2D) {}
 
   setScene(s: Scene): void {
     this.scene = s;
+    // Without this every deleted node's parsed path lives as long as the window.
+    const live = new Set(s.nodes.map((n) => n.id));
+    for (const id of this.paths.keys()) if (!live.has(id)) this.paths.delete(id);
   }
 
   setArtboard(b: Bounds | null): void {
@@ -33,13 +50,31 @@ export class Canvas2DRenderer implements Renderer {
     this.selected = new Set(ids);
   }
 
+  resize(cssW: number, cssH: number, dpr: number): void {
+    const canvas = this.ctx.canvas;
+    canvas.width = Math.max(1, Math.round(cssW * dpr));
+    canvas.height = Math.max(1, Math.round(cssH * dpr));
+    this.dpr = dpr;
+  }
+
+  setView(m: Affine6): void {
+    this.view = m;
+  }
+
+  setOverlay(o: Overlay): void {
+    this.overlay = o;
+  }
+
   draw(): void {
-    // ponytail: full clear + redraw every frame instead of tracking/patching just the
-    // dirty region — scenes are tiny during scaffolding. Revisit once real path
-    // rendering and larger scenes make a full repaint measurably expensive.
-    const { ctx } = this;
+    // ponytail: full clear + redraw every frame instead of patching a dirty region. With the
+    // Path2D cache a frame is one matrix multiply and one stroke per node; revisit when the
+    // 5 000-path check in MANUAL-CHECKLIST.md drops below 60 fps.
+    const { ctx, dpr, view } = this;
     const canvas = ctx.canvas;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // From here on, units are CSS px: the pixel ratio is applied once so Retina gets real pixels.
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     const style = getComputedStyle(document.documentElement);
     const accent = style.getPropertyValue("--accent").trim() || FALLBACK_ACCENT;
@@ -49,46 +84,95 @@ export class Canvas2DRenderer implements Renderer {
 
     // Artboard drawn first so node outlines paint over it, not the other way around.
     if (this.artboard) {
-      const { x, y, w, h } = this.artboard;
+      const a = transformBounds(view, this.artboard);
       ctx.fillStyle = panel;
-      ctx.fillRect(x, y, w, h);
+      ctx.fillRect(a.x, a.y, a.w, a.h);
       ctx.strokeStyle = border;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(x, y, w, h);
+      ctx.lineWidth = STROKE_PX;
+      ctx.strokeRect(a.x, a.y, a.w, a.h);
     }
 
     for (const node of this.scene.nodes) {
       const selected = this.selected.has(node.id);
-      const stroke = selected ? accent : text;
-      const lineWidth = selected ? 2 : 1;
+      ctx.strokeStyle = selected ? accent : text;
+      ctx.lineWidth = selected ? SELECTED_STROKE_PX : STROKE_PX;
       if (node.shape && node.world) {
-        ctx.save();
-        const [a, b, c, d, e, f] = node.world;
-        ctx.transform(a, b, c, d, e, f);
-        ctx.beginPath();
-        if (node.shape.t === "rect") {
-          ctx.rect(0, 0, node.shape.w, node.shape.h);
-        } else if (node.shape.t === "ellipse") {
-          ctx.ellipse(node.shape.rx, node.shape.ry, node.shape.rx, node.shape.ry, 0, 0, Math.PI * 2);
-        }
-        ctx.strokeStyle = stroke;
-        // ponytail: lineWidth is in local units, so a scaled node gets a scaled
-        // stroke; screen-constant strokes need lineWidth / scale once zoom lands.
-        ctx.lineWidth = lineWidth;
-        if (node.shape.t === "path") {
-          ctx.stroke(new Path2D(node.shape.d));
-        } else {
-          ctx.stroke();
-        }
-        ctx.restore();
+        // Geometry is carried to screen space before stroking, so the line is in CSS px whatever
+        // the zoom or the node's own scale. Stroking under the node's transform scaled it too.
+        const onScreen = new Path2D();
+        onScreen.addPath(this.localPath(node.id, node.shape), toDOMMatrix(compose(node.world, view)));
+        ctx.stroke(onScreen);
       } else {
         // Nodes without geometry (tests, mocks) keep the SP3 bounds outline.
-        ctx.strokeStyle = stroke;
-        ctx.lineWidth = lineWidth;
-        ctx.strokeRect(node.bounds.x, node.bounds.y, node.bounds.w, node.bounds.h);
+        const b = transformBounds(view, node.bounds);
+        ctx.strokeRect(b.x, b.y, b.w, b.h);
       }
     }
 
+    this.drawOverlay(accent, panel);
     this.dirty.clear();
   }
+
+  private drawOverlay(accent: string, panel: string): void {
+    const { ctx, view } = this;
+    const { box, marquee } = this.overlay;
+    if (box) {
+      const corners = boxCorners(box).map((p) => apply(view, p));
+      ctx.beginPath();
+      corners.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      ctx.closePath();
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = STROKE_PX;
+      ctx.stroke();
+      ctx.fillStyle = panel;
+      const half = HANDLE_PX / 2;
+      for (const h of SCALE_HANDLES) {
+        const p = apply(view, handleWorld(box, h));
+        ctx.fillRect(p.x - half, p.y - half, HANDLE_PX, HANDLE_PX);
+        ctx.strokeRect(p.x - half, p.y - half, HANDLE_PX, HANDLE_PX);
+      }
+    }
+    if (marquee) {
+      const m = transformBounds(view, marquee);
+      ctx.save();
+      ctx.globalAlpha = MARQUEE_ALPHA;
+      ctx.fillStyle = accent;
+      ctx.fillRect(m.x, m.y, m.w, m.h);
+      ctx.restore();
+      ctx.save();
+      ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = STROKE_PX;
+      ctx.strokeRect(m.x, m.y, m.w, m.h);
+      ctx.restore();
+    }
+  }
+
+  private localPath(id: NodeId, shape: ShapeGeom): Path2D {
+    const key = geomKey(shape);
+    const hit = this.paths.get(id);
+    if (hit && hit.key === key) return hit.path;
+    const path = buildPath(shape);
+    this.paths.set(id, { key, path });
+    return path;
+  }
+}
+
+function geomKey(g: ShapeGeom): string {
+  if (g.t === "rect") return `r ${g.w} ${g.h}`;
+  if (g.t === "ellipse") return `e ${g.rx} ${g.ry}`;
+  return `p ${g.d}`;
+}
+
+function buildPath(g: ShapeGeom): Path2D {
+  if (g.t === "path") return new Path2D(g.d);
+  const p = new Path2D();
+  if (g.t === "rect") p.rect(0, 0, g.w, g.h);
+  // Canonical convention (crates/document/src/commands.rs): local space is centred at (rx, ry).
+  else p.ellipse(g.rx, g.ry, g.rx, g.ry, 0, 0, Math.PI * 2);
+  return p;
+}
+
+function toDOMMatrix([a, b, c, d, e, f]: Affine6): DOMMatrix {
+  return new DOMMatrix([a, b, c, d, e, f]);
 }

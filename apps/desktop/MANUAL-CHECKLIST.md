@@ -110,3 +110,23 @@ real network can confirm the swap end to end.
 - [ ] On hardware: `--group-by preset` on a document with two materials cuts one pass per
       material, **each with that preset's own speed and force**, prompting between them. Nothing
       but real material settles that the settings followed the key.
+
+## Viewport and handles (spec 2026-10-06, unverified)
+
+- [ ] Launch on a Retina Mac — strokes and handles are crisp, not blurred; the artboard fits the window.
+- [ ] Trackpad: pinch zooms about the fingers; two-finger scroll pans; ⌘0 refits; ⌘1 is CSS reference
+      size — record how far a 100 mm rect is from 100 mm on a ruler, with the display and its OS
+      scaling (it is exact only at the reference density; per-monitor calibration is a ponytail).
+- [ ] Mouse (Windows/Linux): the wheel pans; Ctrl-wheel zooms; middle-drag pans; Space-drag pans.
+- [ ] Switch machine Cameo 5 ⇄ Puma IV — the view refits to the new artboard. Resizing the window
+      does not refit.
+- [ ] Marquee a word of imported text; Shift-drag a corner — it scales proportionally; Alt-drag
+      scales from the centre; one undo reverts each gesture.
+- [ ] Pinch-zoom or scroll-pan while dragging a handle — the shape keeps following the pointer
+      instead of snapping back, and the release saves what is on screen. (Canvas pixels are
+      unreadable from e2e, so this one is only checkable by eye.)
+- [ ] Rotate a rect 30° with Shift held (snaps in 15° steps), cut it on the Cameo 5, and measure —
+      the cut matches the screen.
+- [ ] `node apps/desktop/ui/scripts/perf-svg.mjs > /tmp/perf.svg`, Import it, pan and zoom with the
+      WebKit inspector's frame timeline open — record the frame rate here with the machine and date
+      (target 60 fps).

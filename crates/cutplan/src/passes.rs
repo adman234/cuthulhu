@@ -366,6 +366,33 @@ mod tests {
         assert_eq!(planned.passes[1].key, PassKey::Color(Some(BLUE)));
     }
 
+    /// The viewport spec (2026-10-06) leans on this: a rotation committed from a canvas handle
+    /// reaches the blade as the rotated outline, not as the shape's axis-aligned box. Rotation
+    /// enters through `transform_nodes` exactly as `commit_transform` sends it.
+    #[test]
+    fn plans_a_rotated_rect_as_its_rotated_corners() {
+        let mut ed = Editor::new();
+        let root = ed.doc.root;
+        let id = ed.doc.ids.next();
+        let node = Node::shape(id, ShapeKind::Rect { w: 10.0, h: 4.0 });
+        ed.commit(Delta(vec![NodeOp::Add { parent: root, node, index: usize::MAX }]));
+
+        let (s, c) = 30f64.to_radians().sin_cos();
+        let rotate = Affine([c, s, -s, c, 0.0, 0.0]);
+        let d = document::commands::transform_nodes(&ed.doc, &[id], rotate).unwrap();
+        ed.commit(d);
+
+        let planned = plan_passes(&ed.doc).unwrap();
+        let points = &planned.passes[0].shapes[0].polylines[0];
+        for (x, y) in [(0.0, 0.0), (10.0, 0.0), (10.0, 4.0), (0.0, 4.0)] {
+            let (ex, ey) = rotate.apply(x, y);
+            assert!(
+                points.iter().any(|p| (p.x - ex).abs() < 1e-9 && (p.y - ey).abs() < 1e-9),
+                "corner ({x}, {y}) should plan at ({ex}, {ey}); planned {points:?}"
+            );
+        }
+    }
+
     #[test]
     fn text_with_unknown_family_falls_back_or_reports_no_fonts() {
         let mut ed = Editor::new();

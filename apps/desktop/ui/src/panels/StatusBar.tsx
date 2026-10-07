@@ -7,6 +7,10 @@ type Props = {
   artboard: { w: number; h: number } | null;
   error: string | null;
   status: CutStatus;
+  /** Null until a document is loaded: there is no artboard to be zoomed relative to. */
+  zoomPercent: number | null;
+  /** Pointer position in document mm, or null when the pointer is off the canvas. */
+  cursor: { x: number; y: number } | null;
 };
 
 // Idle/Disconnected read as "nothing wrong" (green), a failed device is red, and every
@@ -17,7 +21,7 @@ function dotColor(phase: Phase): string {
   return "var(--accent)";
 }
 
-export function StatusBar({ machine, artboard, error, status }: Props) {
+export function StatusBar({ machine, artboard, error, status, zoomPercent, cursor }: Props) {
   return (
     <div
       style={{
@@ -39,6 +43,16 @@ export function StatusBar({ machine, artboard, error, status }: Props) {
         </span>
       ) : null}
       <div style={{ flex: 1 }} />
+      {cursor ? (
+        <span data-testid="status-cursor" style={{ fontVariantNumeric: "tabular-nums" }}>
+          x {cursor.x.toFixed(1)}  y {cursor.y.toFixed(1)} mm
+        </span>
+      ) : null}
+      {zoomPercent !== null ? (
+        <span data-testid="status-zoom" style={{ fontVariantNumeric: "tabular-nums" }}>
+          {zoomPercent}%
+        </span>
+      ) : null}
       {error ? <span style={{ color: "var(--cut)" }}>{error}</span> : null}
     </div>
   );
