@@ -162,10 +162,11 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     commit_transforms: (a) => {
       // Mirrors commands::transform_each: every move in one undo, all or nothing, each entry on
       // what the earlier ones left, and nothing moved twice. Each entry is recorded with its batch,
-      // so a test can tell one click from several.
+      // so a test can tell one click from several. A refusal waits on a hold like an answer does,
+      // so a test can queue edits behind a commit that will be refused.
       if (failNextCommit) {
         failNextCommit = false;
-        throw new Error("transform refused");
+        return answer(() => { throw new Error("transform refused"); });
       }
       const moves = a.moves as { ids: number[]; m: number[] }[];
       for (const mv of moves) for (const id of mv.ids) if (!doc.nodes[id]) throw new Error("the node or machine this command names is not there");
@@ -478,8 +479,13 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
   // let a whole chain of queued commits finish before React rendered between them, which hid the
   // window where an intermediate snapshot renders while the next commit is on the wire.
   function answer<T>(run: () => T): Promise<T> {
-    if (!holdingCommits) return new Promise((resolve) => setTimeout(() => resolve(run()), 0));
-    return new Promise((resolve) => heldCommits.push(() => resolve(run())));
+    return new Promise((resolve, reject) => {
+      const settle = () => {
+        try { resolve(run()); } catch (e) { reject(e); }
+      };
+      if (holdingCommits) heldCommits.push(settle);
+      else setTimeout(settle, 0);
+    });
   }
 
   function ipcError(code: string, message: string) {
@@ -3696,4 +3702,25 @@ test("a border too small for its pieces blocks distribute on that axis only, and
   await expect(horizontal).toHaveAttribute("title", /the pieces do not fit inside the one around them/);
   await expect(vertical).toBeEnabled();
   await expect(vertical).toHaveAttribute("title", "Distribute vertical spacing");
+});
+
+// #298: a commit drained from the queue was made before the refusal ahead of it arrived, so it
+// must not clear that refusal's message before the operator has seen it.
+test("a refusal stays on screen when an edit queued behind it lands", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => {
+    const w = window as unknown as { __holdCommits: () => void; __failNextCommit: () => void };
+    w.__holdCommits();
+    w.__failNextCommit();
+  });
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // will be refused
+  await page.getByLabel("X", { exact: true }).fill("30"); // queued behind it
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(30, 6);
+  await expect(page.getByText("transform refused")).toBeVisible();
 });

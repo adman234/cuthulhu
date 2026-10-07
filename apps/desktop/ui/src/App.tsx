@@ -237,8 +237,10 @@ export function App() {
     // Not `run`: it reports one `false` for two failures that need opposite repairs. A refused
     // transform must put the shape back; one that landed but could not be re-read must keep it,
     // because the backend already holds the new geometry (silent-failure-hunter on #298).
-    commit: async (moves): Promise<CommitOutcome> => {
-      setError(null);
+    // A queued commit leaves the message alone: a refusal ahead of it would otherwise vanish the
+    // moment the edit behind it went out, before anyone saw it (silent-failure-hunter, from #298).
+    commit: async (moves, queued): Promise<CommitOutcome> => {
+      if (!queued) setError(null);
       try {
         await ipc.commitTransforms({ moves });
       } catch (e) {

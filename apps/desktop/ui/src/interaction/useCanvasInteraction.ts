@@ -52,7 +52,9 @@ export type CanvasInteractionArgs = {
   sceneRev: number;
   /** A refusal puts the preview back. An applied commit keeps it until its own snapshot has
    *  rendered, even if that refresh failed, because the backend then holds the new geometry. */
-  commit: (moves: Move[]) => Promise<CommitOutcome>;
+  /** `queued` marks a commit drained from the queue: it was made before the outcome ahead of it
+   *  arrived, so it must not clear a message that outcome left. */
+  commit: (moves: Move[], queued: boolean) => Promise<CommitOutcome>;
 };
 
 /** "applied" carries the revision of the snapshot its refresh rendered, or null if that refresh
@@ -317,13 +319,13 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // rule and the pending preview that stands in for an unread commit. The moves must not share a
   // shape: the backend moves a node under another listed node only with it, and the preview would
   // move it twice. Every caller sends one move or align's units, which `outermost` keeps disjoint.
-  function send(moves: Move[]) {
+  function send(moves: Move[], queued = false) {
     const { expand } = latest.current;
     const preview = moves.reduce((s, mv) => applyOptimistic(s, expand(mv.ids), mv.m), current().scene);
     pending.current = { preview, retireAt: Infinity };
     inFlight.current = true;
     repaint();
-    void latest.current.commit(moves).then((outcome) => {
+    void latest.current.commit(moves, queued).then((outcome) => {
       inFlight.current = false;
       // Applied: the preview is what the backend now holds, so it stays until the snapshot that
       // includes this commit has rendered. If that refresh failed, the next successful one will.
@@ -365,7 +367,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
       queued.current.delete(key);
       const moves = effective(make(current().scene));
       if (moves.length > 0) {
-        send(moves);
+        send(moves, true);
         return;
       }
     }
