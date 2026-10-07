@@ -169,7 +169,12 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
         return answer(() => { throw new Error("transform refused"); });
       }
       const moves = a.moves as { ids: number[]; m: number[] }[];
-      for (const mv of moves) for (const id of mv.ids) if (!doc.nodes[id]) throw new Error("the node or machine this command names is not there");
+      // Checked before anything is recorded (all or nothing), and answered in turn like every
+      // other outcome: the real backend serialises commands, so a refusal never overtakes a held
+      // commit ahead of it (CodeRabbit on #301).
+      if (moves.some((mv) => mv.ids.some((id) => !doc.nodes[id]))) {
+        return answer(() => { throw new Error("the node or machine this command names is not there"); });
+      }
       const hooks = window as unknown as { __commitTransforms?: { ids: number[]; m: number[]; batch?: number }[]; __batches?: number };
       hooks.__commitTransforms ??= [];
       hooks.__batches = (hooks.__batches ?? 0) + 1;
