@@ -135,3 +135,20 @@ describe("keepLanded", () => {
     expect(keepLanded([vertical(30), horizontal(30)], { x: 0, y: 0, w: 20, h: 20 })).toEqual([]);
   });
 });
+
+describe("keepLanded spans", () => {
+  it("stretches a kept guide over the landed box, not where the box would have been", () => {
+    // A guide along x = 30 from a target at y 0..10; the box landed lower, at y 40..50, as a Shift
+    // move or a uniform scale can leave it. The guide must reach the box it lines up.
+    const guide = { a: { x: 30, y: 0 }, b: { x: 30, y: 10 } };
+    const [g] = keepLanded([guide], { x: 20, y: 40, w: 10, h: 10 });
+    expect([Math.min(g.a.y, g.b.y), Math.max(g.a.y, g.b.y)]).toEqual([0, 50]);
+  });
+
+  it("does not stretch over a box position the matrix never produced", () => {
+    // snapMove's own guide covers only the targets; the box's extent is added from the landed box.
+    const r = snapMove(boxA, { x: 5, y: 5 }, { x: 24.6, y: 20 }, t, 1, true); // Shift: locked to x
+    const g = r.guides.find((s) => s.a.x === s.b.x)!;
+    expect(Math.max(g.a.y, g.b.y)).toBeCloseTo(10, 9); // B's extent only, not the phantom y 15..25
+  });
+});

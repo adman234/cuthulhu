@@ -85,16 +85,15 @@ function snapAxis(cands: number[], lines: Line[], tol: number): AxisHit | null {
   return best;
 }
 
-function guideAlongX(at: number, span: Bounds, lines: Line[]): Guide {
-  const lo = Math.min(span.y, ...lines.map((l) => l.lo));
-  const hi = Math.max(span.y + span.h, ...lines.map((l) => l.hi));
-  return { a: { x: at, y: lo }, b: { x: at, y: hi } };
+// A guide here spans only the targets it lines up with. The moving box's own extent is added by
+// keepLanded from where the box actually lands, since Shift or a uniform scale can put it
+// somewhere other than the raw drag suggests.
+function guideAlongX(at: number, lines: Line[]): Guide {
+  return { a: { x: at, y: Math.min(...lines.map((l) => l.lo)) }, b: { x: at, y: Math.max(...lines.map((l) => l.hi)) } };
 }
 
-function guideAlongY(at: number, span: Bounds, lines: Line[]): Guide {
-  const lo = Math.min(span.x, ...lines.map((l) => l.lo));
-  const hi = Math.max(span.x + span.w, ...lines.map((l) => l.hi));
-  return { a: { x: lo, y: at }, b: { x: hi, y: at } };
+function guideAlongY(at: number, lines: Line[]): Guide {
+  return { a: { x: Math.min(...lines.map((l) => l.lo)), y: at }, b: { x: Math.max(...lines.map((l) => l.hi)), y: at } };
 }
 
 /** A move's pointer, pulled so the moved box's left/centre/right and top/middle/bottom lines land
@@ -110,10 +109,9 @@ export function snapMove(box: Box, start: Pt, cur: Pt, t: Targets, tol: number, 
   const moved = { x: b.x + dx, y: b.y + dy, w: b.w, h: b.h };
   const sx = xFree ? snapAxis([moved.x + moved.w / 2, moved.x, moved.x + moved.w], t.x, tol) : null;
   const sy = yFree ? snapAxis([moved.y + moved.h / 2, moved.y, moved.y + moved.h], t.y, tol) : null;
-  const landed = { ...moved, x: moved.x + (sx?.delta ?? 0), y: moved.y + (sy?.delta ?? 0) };
   const guides: Guide[] = [];
-  if (sx) guides.push(guideAlongX(sx.at, landed, sx.lines));
-  if (sy) guides.push(guideAlongY(sy.at, landed, sy.lines));
+  if (sx) guides.push(guideAlongX(sx.at, sx.lines));
+  if (sy) guides.push(guideAlongY(sy.at, sy.lines));
   // The locked component is held at its start: moveMatrix re-picks the lock from the point it is
   // given, and a snap that shrank the free axis below the locked one would flip it.
   const point = {
@@ -135,29 +133,25 @@ export function snapScale(box: Box, h: ScaleHandle, start: Pt, cur: Pt, t: Targe
   const dragged = { x: grab.x + cur.x - start.x, y: grab.y + cur.y - start.y };
   const sx = unit.x !== 0.5 ? snapAxis([dragged.x], t.x, tol) : null;
   const sy = unit.y !== 0.5 ? snapAxis([dragged.y], t.y, tol) : null;
-  const bb = boxBounds(box);
-  const nx = dragged.x + (sx?.delta ?? 0);
-  const ny = dragged.y + (sy?.delta ?? 0);
-  const span = {
-    x: Math.min(bb.x, nx),
-    y: Math.min(bb.y, ny),
-    w: Math.max(bb.x + bb.w, nx) - Math.min(bb.x, nx),
-    h: Math.max(bb.y + bb.h, ny) - Math.min(bb.y, ny),
-  };
   const guides: Guide[] = [];
-  if (sx) guides.push(guideAlongX(sx.at, span, sx.lines));
-  if (sy) guides.push(guideAlongY(sy.at, span, sy.lines));
+  if (sx) guides.push(guideAlongX(sx.at, sx.lines));
+  if (sy) guides.push(guideAlongY(sy.at, sy.lines));
   return { point: { x: cur.x + (sx?.delta ?? 0), y: cur.y + (sy?.delta ?? 0) }, guides };
 }
 
-/** The guides whose line the landed box actually touches, at an edge or a centre. A snap only
- *  nudges the pointer; what the matrix then does with it can leave a line untouched (Shift sizing
- *  from the other axis, the minimum-size clamp, an axis with no length to move), and a guide for
- *  that line would claim a flush edge that is not there (stage-1 review). */
+/** The guides whose line the landed box actually touches, at an edge or a centre, each stretched
+ *  over the landed box. A snap only nudges the pointer; what the matrix then does with it can leave
+ *  a line untouched (Shift sizing from the other axis, the minimum-size clamp, an axis with no
+ *  length to move) or the box elsewhere along the guide, and a guide drawn from the pre-matrix
+ *  position would claim a flush edge, or reach a box, that is not there (gate-1 review). */
 export function keepLanded(guides: Guide[], landed: Bounds): Guide[] {
   const on = (v: number, lo: number, len: number) =>
     [lo, lo + len / 2, lo + len].some((line) => Math.abs(line - v) < 1e-6);
-  return guides.filter((g) =>
-    g.a.x === g.b.x ? on(g.a.x, landed.x, landed.w) : on(g.a.y, landed.y, landed.h),
-  );
+  return guides
+    .filter((g) => (g.a.x === g.b.x ? on(g.a.x, landed.x, landed.w) : on(g.a.y, landed.y, landed.h)))
+    .map((g) =>
+      g.a.x === g.b.x
+        ? { a: { x: g.a.x, y: Math.min(g.a.y, g.b.y, landed.y) }, b: { x: g.a.x, y: Math.max(g.a.y, g.b.y, landed.y + landed.h) } }
+        : { a: { x: Math.min(g.a.x, g.b.x, landed.x), y: g.a.y }, b: { x: Math.max(g.a.x, g.b.x, landed.x + landed.w), y: g.a.y } },
+    );
 }
