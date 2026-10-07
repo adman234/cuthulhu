@@ -138,3 +138,11 @@ real network can confirm the swap end to end.
       reachable with ⌘ (Ctrl) held.
 - [ ] Pressing ⌘ (Ctrl) mid-drag releases a snap; releasing it snaps again on the next move.
 - [ ] A decal snapped to the artboard's left edge cuts flush with the mat's left limit on the Cameo 5.
+
+## Align and distribute (spec 2026-10-07, unverified)
+
+- [ ] Six names aligned left cut in a straight column on the Cameo 5: every left edge on one line.
+- [ ] A single decal centred with "Align horizontal centres" cuts centred on the mat.
+- [ ] A row of letters distributed horizontally weeds with even gaps between neighbours.
+- [ ] One ⌘Z (Ctrl+Z) after an align puts every moved piece back at once.
+- [ ] The eight icons read as what they do at the panel's size, in light and dark themes.
