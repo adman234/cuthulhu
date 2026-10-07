@@ -168,6 +168,21 @@ mod tests {
     }
 
     #[test]
+    fn app_state_commit_transforms_refused_changes_nothing() {
+        // Refused before anything is committed: no half-aligned document and no undo entry.
+        let mut app = AppState::new();
+        let a = app.add_rect(10.0, 10.0);
+        let r = app.commit_transforms(vec![
+            (vec![a], geometry::Affine::translate(3.0, 0.0)),
+            (vec![NodeId(9_999)], geometry::Affine::translate(1.0, 0.0)),
+        ]);
+        assert!(r.is_err());
+        assert_eq!(app.editor.doc.get(a).unwrap().transform.apply(0.0, 0.0), (0.0, 0.0));
+        app.undo().unwrap(); // the undo is the rect's own add, so the rect goes
+        assert!(app.editor.doc.get(a).is_none());
+    }
+
+    #[test]
     fn app_state_undo_reverts_last_commit() {
         let mut app = AppState::new();
         let id = app.add_rect(5.0, 5.0);

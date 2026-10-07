@@ -8,6 +8,11 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-07-align-distribute-design.md`, with these decisions confirmed on 2026-10-07: align to the selection's own bounds, no key object yet, and distribute by equal gaps.
 
+**Revisions from gate 1** (the task bodies below stay as instructed):
+- The queue key is per axis and selection, not `align` (Task 4), so "Align top" does not replace a queued "Align left".
+- Distribute keeps the unit reaching furthest as the far end, not the last by start edge (Task 3).
+- Units are counted from the scene and exclude ids beneath another selected id (`outermost`), so an empty Group or a Group's own child is not a unit.
+
 ## Global constraints
 
 - SPDX headers. Comments explain why. `// ponytail:` carries a ceiling and an upgrade path.

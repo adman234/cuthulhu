@@ -200,6 +200,8 @@ pub fn transform_each(doc: &Document, moves: &[(Vec<NodeId>, Affine)]) -> Result
     let mut scratch = doc.clone();
     let mut ops = Vec::new();
     for (ids, m) in moves {
+        // As `transform_nodes` refuses it. Skipping it would answer Ok for a move nobody made.
+        if ids.is_empty() { return Err(CmdError::EmptySelection); }
         for &id in ids { scratch.get(id).ok_or(CmdError::NotFound)?; }
         let own: Vec<NodeId> = ids.iter().copied()
             .filter(|&id| !has_selected_ancestor(&scratch, &selected, id))
@@ -1035,6 +1037,28 @@ mod tests {
         let (ed, a, _, _, _) = batch_doc();
         let r = transform_each(&ed.doc, &[(vec![a], Affine::translate(5.0, 0.0)), (vec![NodeId(9_999)], Affine::translate(1.0, 0.0))]);
         assert!(matches!(r, Err(CmdError::NotFound)));
+    }
+
+    #[test]
+    fn transform_each_refuses_a_later_entry_the_geometry_cannot_take() {
+        // The first entry is fine on its own; the refusal still covers the batch.
+        let (mut ed, a, _, _, _) = batch_doc();
+        let outer = ed.doc.ids.next();
+        let mut collapsed = Node::container(outer, NodeKind::Group);
+        collapsed.transform = singular();
+        ed.commit(Delta(vec![NodeOp::Add { parent: ed.doc.root, node: collapsed, index: 0 }]));
+        let inner = ed.doc.ids.next();
+        ed.commit(Delta(vec![NodeOp::Add { parent: outer, node: Node::container(inner, NodeKind::Group), index: 0 }]));
+        let r = transform_each(&ed.doc, &[(vec![a], Affine::translate(5.0, 0.0)), (vec![inner], Affine::translate(1.0, 0.0))]);
+        assert!(matches!(r, Err(CmdError::Geometry(_))));
+    }
+
+    #[test]
+    fn transform_each_refuses_an_entry_with_no_ids() {
+        let (ed, a, _, _, _) = batch_doc();
+        let r = transform_each(&ed.doc, &[(vec![a], Affine::translate(5.0, 0.0)), (vec![], Affine::translate(1.0, 0.0))]);
+        assert!(matches!(r, Err(CmdError::EmptySelection)));
+        assert!(matches!(transform_each(&ed.doc, &[]), Err(CmdError::EmptySelection)));
     }
 
     #[test]

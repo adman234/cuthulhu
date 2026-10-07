@@ -11,7 +11,7 @@ import ipcInventory from "../../ipc-inventory.json" with { type: "json" };
 // can't close over anything outside itself) and mirrors the JSON shape produced by
 // crates/document's Document::snapshot_json() — see App.tsx's DocSnapshot/buildScene,
 // which is what actually parses this on the JS side.
-function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview?: boolean; dropTraceControl?: string; seedBusyHost?: boolean; seedRemoteConnected?: boolean; slowList?: boolean; failList?: boolean; noFonts?: boolean; seedMachine?: boolean; seedUserPreset?: boolean; seedEmptyPresetAssignment?: boolean; seedGroup?: boolean }) {
+function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview?: boolean; dropTraceControl?: string; seedBusyHost?: boolean; seedRemoteConnected?: boolean; slowList?: boolean; failList?: boolean; noFonts?: boolean; seedMachine?: boolean; seedUserPreset?: boolean; seedEmptyPresetAssignment?: boolean; seedGroup?: boolean; seedAlignExtras?: boolean }) {
   type Style = { stroke: number | null; fill: number | null };
   type PresetAssignment = { state: "inherit" } | { state: "unassigned" } | { state: "preset"; id: string };
   type Node = { id: number; kind: unknown; transform: number[]; style: Style; children: number[]; cut_line_type: "Cut" | "NoCut"; material_preset: PresetAssignment };
@@ -89,6 +89,21 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       material_preset: { state: "inherit" },
     };
     doc.nodes[doc.root].children.push(redId, greenId);
+  }
+
+  // After the rects: a Group of two 10 mm rects at (50, 20) and (70, 40), so its bounds are
+  // 50..80 × 20..50 and no single shape gives them, and an empty Group with nothing to line up.
+  if (opts?.seedAlignExtras) {
+    const groupId = nextId++;
+    const leftId = nextId++;
+    const rightId = nextId++;
+    const emptyId = nextId++;
+    const rect = (id: number, x: number, y: number): Node => ({ id, kind: { Shape: { Rect: { w: 10, h: 10 } } }, transform: [1, 0, 0, 1, x, y], style: { stroke: 0x0000ffff, fill: null }, children: [], cut_line_type: "Cut", material_preset: { state: "inherit" } });
+    doc.nodes[groupId] = { id: groupId, kind: "Group", transform: [1, 0, 0, 1, 0, 0], style: { stroke: null, fill: null }, children: [leftId, rightId], cut_line_type: "Cut", material_preset: { state: "inherit" } };
+    doc.nodes[leftId] = rect(leftId, 50, 20);
+    doc.nodes[rightId] = rect(rightId, 70, 40);
+    doc.nodes[emptyId] = { id: emptyId, kind: "Group", transform: [1, 0, 0, 1, 0, 0], style: { stroke: null, fill: null }, children: [], cut_line_type: "Cut", material_preset: { state: "inherit" } };
+    doc.nodes[doc.root].children.push(groupId, emptyId);
   }
 
   const unimplemented = (cmd: string): never => {
@@ -3498,4 +3513,110 @@ test("an align clicked while a drag's commit is on the wire lines up from where 
   const { ids, m } = (await batchLog(page))[1];
   expect(ids).toEqual([2]);
   expect(m[4]).toBeCloseTo(-25, 6);
+});
+
+// With seedAlignExtras beside the rects: red (id 2) and green (id 3) at 0..10, the two-rect Group
+// (id 4) spanning 50..80 × 20..50, and the empty Group (id 7). Rows run red, green, Group, its two
+// rects, the empty Group.
+async function seedAlignExtras(page: Page) {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedAlignExtras: true });
+  await page.goto("/");
+}
+
+test("a Group aligns by the bounds of all its shapes, on both axes", async ({ page }) => {
+  await seedAlignExtras(page);
+  await selectRows(page, [0, 2]);
+
+  // The Group's right edge is its second rect's, at 80; its first rect alone would say 60.
+  await page.getByRole("button", { name: "Align right edges" }).click();
+  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
+  expect((await batchLog(page))[0]).toMatchObject({ ids: [2], m: [1, 0, 0, 1, 70, 0] });
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(70, 6);
+
+  // Its bottom is 50, again from the second rect.
+  await page.getByRole("button", { name: "Align bottom edges" }).click();
+  await expect.poll(async () => (await batchLog(page)).length).toBe(2);
+  expect((await batchLog(page))[1]).toMatchObject({ ids: [2], m: [1, 0, 0, 1, 0, 40] });
+});
+
+test("distribute vertical spacing moves the middle unit on y only", async ({ page }) => {
+  await seedAlignExtras(page);
+  await selectRows(page, [0, 1, 2]);
+  // Red and green at 0..10, the Group at 20..50: span 0..50 holds 50 mm, so the gaps are 0 and
+  // green, second in document order, goes to 10.
+  await page.getByRole("button", { name: "Distribute vertical spacing" }).click();
+  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
+  expect((await batchLog(page))[0]).toMatchObject({ ids: [3], m: [1, 0, 0, 1, 0, 10] });
+});
+
+test("an empty Group is not a unit, so it does not enable distribute", async ({ page }) => {
+  await seedAlignExtras(page);
+  await selectRows(page, [0, 1, 5]);
+  await expect(page.getByRole("button", { name: "Distribute horizontal spacing" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Distribute vertical spacing" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Align left edges" })).toBeEnabled();
+});
+
+test("a refused align puts every unit back and the next click starts from there", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await selectRows(page, [2, 0]); // red and the Group: centres 5 and 35, so both move to 20
+  await page.evaluate(() => (window as unknown as { __failNextCommit: () => void }).__failNextCommit());
+  await page.getByRole("button", { name: "Align horizontal centres" }).click();
+  await expect(page.getByText("transform refused")).toBeVisible();
+
+  // A preview left in place would have both centred already, and this click would send nothing.
+  await page.getByRole("button", { name: "Align horizontal centres" }).click();
+  await expect.poll(async () => (await batchLog(page)).length).toBe(2);
+  const log = await batchLog(page);
+  expect(log.map((e) => [e.ids[0], e.m[4], e.batch])).toEqual([[2, -15, 1], [4, 15, 1]]); // document order
+});
+
+test("the fake refuses a whole batch that names a missing node", async ({ page }) => {
+  // The fake is what the frontend is tested against, so it must not half-apply what the backend
+  // refuses outright.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  const refused = await page.evaluate(() =>
+    (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> } })
+      .__TAURI_INTERNALS__.invoke("commit_transforms", { moves: [
+        { ids: [4], m: [1, 0, 0, 1, 5, 0] },
+        { ids: [999], m: [1, 0, 0, 1, 1, 0] },
+      ] }).then(() => false, () => true),
+  );
+  expect(refused).toBe(true);
+  expect(await batchLog(page)).toEqual([]);
+  expect(await nodeTransform(page, 4)).toEqual([1, 0, 0, 1, 0, 0]);
+});
+
+test("queued aligns replace each other per axis, not across axes", async ({ page }) => {
+  const v = await selectRedBesideGroup(page);
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 5 * v.scale); // red to 5..15 × 5..15
+  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
+
+  await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] });
+  await page.getByRole("button", { name: "Align left edges" }).click();
+  await page.getByRole("button", { name: "Align top edges" }).click();
+  await page.getByRole("button", { name: "Align right edges" }).click(); // replaces left, not top
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // Top takes red up to the Group's 0; right takes red to the Group's 40. Left (the Group to 5)
+  // never runs.
+  await expect.poll(async () => (await batchLog(page)).length).toBe(3);
+  const [, top, right] = await batchLog(page);
+  expect(top).toMatchObject({ ids: [4], m: [1, 0, 0, 1, 0, expect.closeTo(-5, 6)] });
+  expect(right).toMatchObject({ ids: [4], m: [1, 0, 0, 1, expect.closeTo(25, 6), 0] });
+  expect(await nodeTransform(page, 2)).toEqual([1, 0, 0, 1, 30, 0]);
+});
+
+test("an align that would move nothing sends nothing and does not hold the next one", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await selectRows(page, [2, 3]); // red and green, both already at 0
+  await page.getByRole("button", { name: "Align left edges" }).click();
+  await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] });
+  await page.getByRole("button", { name: "Align left edges" }).click();
+  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
+  expect((await batchLog(page))[0]).toMatchObject({ ids: [2], batch: 1 });
 });

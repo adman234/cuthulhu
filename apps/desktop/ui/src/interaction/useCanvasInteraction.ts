@@ -314,7 +314,9 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   }, [centre, requestFit, zoomBy]);
 
   // Every transform reaches the backend through here, so all producers share the one-in-flight
-  // rule and the pending preview that stands in for an unread commit.
+  // rule and the pending preview that stands in for an unread commit. The moves must not share a
+  // shape: the backend moves a node under another listed node only with it, and the preview would
+  // move it twice. Every caller sends one move or align's units, which `outermost` keeps disjoint.
   function send(moves: Move[]) {
     const { expand } = latest.current;
     const preview = moves.reduce((s, mv) => applyOptimistic(s, expand(mv.ids), mv.m), current().scene);

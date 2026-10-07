@@ -344,10 +344,20 @@ export function App() {
     });
     return found.sort((a, b) => a.first - b.first).map((f) => f.unit);
   };
-  // One queue key for all eight buttons: a newer click replaces a queued one, whichever it was.
-  const align = (mode: AlignMode) =>
-    interaction.transformEach("align", (s) => alignMoves(unitsIn(s), mode, doc?.artboard ?? null));
-  const distribute = (axis: Axis) => interaction.transformEach("align", (s) => distributeMoves(unitsIn(s), axis));
+  // Keyed like the fields: a newer click on the same axis and selection replaces a queued one, but
+  // "Align top" does not replace a queued "Align left", since each moves only its own axis
+  // (code-reviewer).
+  const alignKey = (axis: Axis) => `align:${axis}:${units.join(",")}`;
+  const align = (mode: AlignMode) => {
+    const axis: Axis = mode === "left" || mode === "hcenter" || mode === "right" ? "x" : "y";
+    interaction.transformEach(alignKey(axis), (s) => alignMoves(unitsIn(s), mode, doc?.artboard ?? null));
+  };
+  const distribute = (axis: Axis) =>
+    interaction.transformEach(alignKey(axis), (s) => distributeMoves(unitsIn(s), axis));
+  // Counted from the scene the moves are computed from, not from the selection: an empty Group
+  // is a selected id with nothing to line up, and counting it enabled a distribute that then had
+  // two units and did nothing, or sent a lone shape to the artboard (silent-failure-hunter).
+  const unitCount = unitsIn(interaction.effectiveScene).length;
 
   const cutLineType = doc ? selectionCutLineType(doc.nodes, selected) : null;
 
@@ -497,7 +507,7 @@ export function App() {
           onChangeY={(v) => commitAxis("y", v)}
           onChangeW={(v) => commitScale("w", v)}
           onChangeH={(v) => commitScale("h", v)}
-          unitCount={units.length}
+          unitCount={unitCount}
           onAlign={align}
           onDistribute={distribute}
           cutLineType={cutLineType}

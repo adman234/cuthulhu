@@ -28,9 +28,10 @@ function union(units: Unit[]): Bounds {
   return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 }
 
-/** Units that would not move are left out, so a click that changes nothing commits nothing. */
+/** Units that would not move are left out, so a click that changes nothing commits nothing. So is
+ *  a non-finite move: it crosses IPC as null and comes back as an unreadable error. */
 function moved(entries: [Unit, number][], axis: Axis): Move[] {
-  return entries.filter(([, d]) => d !== 0).map(([u, d]) => ({ ids: u.ids, m: along(axis, d) }));
+  return entries.filter(([, d]) => Number.isFinite(d) && d !== 0).map(([u, d]) => ({ ids: u.ids, m: along(axis, d) }));
 }
 
 /** Two or more units line up against their own bounds; a lone unit lines up against the artboard,
@@ -46,25 +47,36 @@ export function alignMoves(units: Unit[], mode: AlignMode, artboard: Bounds | nu
   return moved(units.map((u) => [u, line - (start(u.bounds, axis) + at * size(u.bounds, axis))]), axis);
 }
 
-/** Equal gaps between neighbours, because gaps are what a weeder works between. The first and
- *  last unit in start-edge order stay put; when the units are longer than that span the gaps come
- *  out negative and they overlap evenly, which is still the arithmetic answer. */
+/** Equal gaps between neighbours, because gaps are what a weeder works between. The unit that starts
+ *  first and the unit that reaches furthest stay put; the rest go between them in start-edge order.
+ *  Taking the far end from whichever unit starts last threw small pieces past each other when a
+ *  wide one started first (code-reviewer). When the units are longer than the span the gaps come
+ *  out negative and they overlap evenly, which is still the arithmetic answer. When one unit spans
+ *  the whole range there is no gap to equalise, so nothing moves. */
 export function distributeMoves(units: Unit[], axis: Axis): Move[] {
   if (units.length < 3) return [];
   // Array.prototype.sort is stable, so document order breaks ties.
   const order = [...units].sort((a, b) => start(a.bounds, axis) - start(b.bounds, axis));
-  const first = order[0].bounds;
-  const last = order[order.length - 1].bounds;
-  const span = start(last, axis) + size(last, axis) - start(first, axis);
+  const end = (u: Unit) => start(u.bounds, axis) + size(u.bounds, axis);
+  // Of the units reaching furthest, the one that starts last, so it is never the first as well
+  // unless it is the only one.
+  let li = 0;
+  order.forEach((u, i) => {
+    if (end(u) >= end(order[li])) li = i;
+  });
+  if (li === 0) return [];
+  const last = order[li];
+  const middle = order.filter((_, i) => i !== 0 && i !== li);
+  const first = order[0];
+  const span = end(last) - start(first.bounds, axis);
   const total = order.reduce((s, u) => s + size(u.bounds, axis), 0);
   const gap = (span - total) / (order.length - 1);
   const entries: [Unit, number][] = [];
-  let cursor = start(first, axis);
-  for (const u of order) {
+  let cursor = end(first) + gap;
+  for (const u of middle) {
     entries.push([u, cursor - start(u.bounds, axis)]);
     cursor += size(u.bounds, axis) + gap;
   }
-  // The outer two land where they are by construction; dropping them exactly keeps float drift
-  // from turning a no-op into a move.
-  return moved(entries.slice(1, -1), axis);
+  // The outer two are never listed, so float drift cannot turn them into a move.
+  return moved(entries, axis);
 }

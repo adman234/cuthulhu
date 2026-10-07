@@ -54,12 +54,36 @@ describe("distributeMoves", () => {
     expect(dx(moves, 2)).toBeCloseTo(3, 9);
   });
 
-  it("overlaps evenly when the units are wider than their span", () => {
-    // A 0..10, D 2..32 (30 wide), E 15..25: span 0..25, sizes 50, gaps (25 - 50) / 2 = -12.5.
+  it("overlaps evenly when the units are longer than their span", () => {
+    // A 0..10, D 2..32 (reaches furthest, so it stays), E 15..25 goes between: span 0..32, sizes
+    // 50, gaps (32 - 50) / 2 = -9, so E's left goes to 10 - 9 = 1.
     const D = unit(4, 2, 0, 30, 1);
     const E = unit(5, 15, 0, 10, 1);
     const moves = distributeMoves([A, D, E], "x");
-    expect(dx(moves, 4)).toBeCloseTo(10 - 12.5 - 2, 9); // D's left goes to -2.5
+    expect(moves.map((m) => m.ids[0])).toEqual([5]);
+    expect(dx(moves, 5)).toBeCloseTo(1 - 15, 9);
+  });
+
+  it("keeps the unit reaching furthest, not the one starting last", () => {
+    // X 0..10, Y 5..50, Z 20..30: Y is the far end, Z goes between. Span 0..50, sizes 65, gaps
+    // -7.5, so Z's left goes to 2.5 and Y stays where it is.
+    const X = unit(9, 0, 0, 10, 1);
+    const Y = unit(10, 5, 0, 45, 1);
+    const Z = unit(11, 20, 0, 10, 1);
+    const moves = distributeMoves([X, Y, Z], "x");
+    expect(moves.map((m) => m.ids[0])).toEqual([11]);
+    expect(dx(moves, 11)).toBeCloseTo(2.5 - 20, 9);
+  });
+
+  it("moves nothing when one unit spans the whole range", () => {
+    // There is no gap to equalise; a span from the last-starting unit threw B past C here.
+    const W = unit(12, 0, 0, 100, 1);
+    expect(distributeMoves([W, unit(13, 10, 0, 10, 1), unit(14, 20, 0, 10, 1)], "x")).toEqual([]);
+  });
+
+  it("leaves out a move that is not a finite number", () => {
+    const broken = unit(15, NaN, 0, 10, 1);
+    expect(alignMoves([A, broken], "left", artboard)).toEqual([]);
   });
 
   it("orders units with the same start by document order", () => {
