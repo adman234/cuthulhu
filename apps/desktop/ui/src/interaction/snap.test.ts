@@ -51,7 +51,7 @@ describe("snapMove", () => {
 
   it("draws one guide along the snapped line, spanning A and B", () => {
     const r = snapMove(boxA, { x: 5, y: 5 }, { x: 24.6, y: 5 }, t, 1, false);
-    const g = r.guides.find((s) => Math.abs(s.a.x - 30) < 1e-9 && s.a.x === s.b.x);
+    const g = r.guides.find((s) => s.axis === "x" && Math.abs(s.a.x - 30) < 1e-9);
     expect(g).toBeDefined();
     expect(Math.min(g!.a.y, g!.b.y)).toBeCloseTo(0, 9);
     expect(Math.max(g!.a.y, g!.b.y)).toBeCloseTo(10, 9);
@@ -116,14 +116,14 @@ describe("snapping, the rest of the cases", () => {
   it("a guide spans every target that shares its line", () => {
     const D = { id: 5, bounds: { x: 30, y: 50, w: 10, h: 10 } }; // shares B's left edge, far below
     const r = snapMove(boxA, { x: 5, y: 5 }, { x: 24.6, y: 5 }, snapTargets({ nodes: [A, B, D] }, [1], null), 1, false);
-    const g = r.guides.find((s) => s.a.x === s.b.x)!;
+    const g = r.guides.find((s) => s.axis === "x")!;
     expect(Math.max(g.a.y, g.b.y)).toBeCloseTo(60, 9);
   });
 });
 
 describe("keepLanded", () => {
-  const vertical = (x: number) => ({ a: { x, y: 0 }, b: { x, y: 10 } });
-  const horizontal = (y: number) => ({ a: { x: 0, y }, b: { x: 10, y } });
+  const vertical = (x: number) => ({ axis: "x" as const, a: { x, y: 0 }, b: { x, y: 10 } });
+  const horizontal = (y: number) => ({ axis: "y" as const, a: { x: 0, y }, b: { x: 10, y } });
 
   it("keeps a guide whose line the landed box touches, at an edge or a centre", () => {
     const landed = { x: 20, y: 0, w: 10, h: 10 };
@@ -140,7 +140,7 @@ describe("keepLanded spans", () => {
   it("stretches a kept guide over the landed box, not where the box would have been", () => {
     // A guide along x = 30 from a target at y 0..10; the box landed lower, at y 40..50, as a Shift
     // move or a uniform scale can leave it. The guide must reach the box it lines up.
-    const guide = { a: { x: 30, y: 0 }, b: { x: 30, y: 10 } };
+    const guide = { axis: "x" as const, a: { x: 30, y: 0 }, b: { x: 30, y: 10 } };
     const [g] = keepLanded([guide], { x: 20, y: 40, w: 10, h: 10 });
     expect([Math.min(g.a.y, g.b.y), Math.max(g.a.y, g.b.y)]).toEqual([0, 50]);
   });
@@ -148,7 +148,23 @@ describe("keepLanded spans", () => {
   it("does not stretch over a box position the matrix never produced", () => {
     // snapMove's own guide covers only the targets; the box's extent is added from the landed box.
     const r = snapMove(boxA, { x: 5, y: 5 }, { x: 24.6, y: 20 }, t, 1, true); // Shift: locked to x
-    const g = r.guides.find((s) => s.a.x === s.b.x)!;
+    const g = r.guides.find((s) => s.axis === "x")!;
     expect(Math.max(g.a.y, g.b.y)).toBeCloseTo(10, 9); // B's extent only, not the phantom y 15..25
+  });
+});
+
+describe("guide orientation", () => {
+  it("keeps a horizontal guide to a zero-width shape horizontal", () => {
+    // A vertical straight line at x = 30 (w = 0) spanning y 0..20: its middle line is y = 10.
+    // A guide spanning only that target has both ends at x = 30, which once read as vertical
+    // (gate-1 review). A moves down 9.6 mm so its top meets y = 10.
+    const line = { id: 6, bounds: { x: 30, y: 0, w: 0, h: 20 } };
+    const r = snapMove(boxA, { x: 5, y: 5 }, { x: 5, y: 14.6 }, snapTargets({ nodes: [A, line] }, [1], null), 1, false);
+    const kept = keepLanded(r.guides, { x: 0, y: 10, w: 10, h: 10 });
+    const h = kept.find((g) => g.axis === "y");
+    expect(h).toBeDefined();
+    expect(h!.a.y).toBeCloseTo(10, 9);
+    expect(h!.b.y).toBeCloseTo(10, 9);
+    expect([Math.min(h!.a.x, h!.b.x), Math.max(h!.a.x, h!.b.x)]).toEqual([0, 30]);
   });
 });

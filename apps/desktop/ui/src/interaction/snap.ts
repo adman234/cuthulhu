@@ -12,8 +12,10 @@ export const SNAP_PX = 6;
 export type Line = { v: number; lo: number; hi: number };
 /** Vertical lines (`x`) and horizontal lines (`y`), each sorted by coordinate. */
 export type Targets = { x: Line[]; y: Line[] };
-/** A guide segment, in world mm. */
-export type Guide = { a: Pt; b: Pt };
+/** A guide segment, in world mm, along a line of constant x (`axis: "x"`) or constant y. The
+ *  orientation is carried, not inferred from the ends: a guide to a zero-width target has both ends
+ *  at one x even when it runs along y (gate-1 review). */
+export type Guide = { axis: "x" | "y"; a: Pt; b: Pt };
 /** The pointer to hand to `gestureMatrix`, and the guides to draw for it. */
 export type SnapResult = { point: Pt; guides: Guide[] };
 
@@ -89,11 +91,11 @@ function snapAxis(cands: number[], lines: Line[], tol: number): AxisHit | null {
 // keepLanded from where the box actually lands, since Shift or a uniform scale can put it
 // somewhere other than the raw drag suggests.
 function guideAlongX(at: number, lines: Line[]): Guide {
-  return { a: { x: at, y: Math.min(...lines.map((l) => l.lo)) }, b: { x: at, y: Math.max(...lines.map((l) => l.hi)) } };
+  return { axis: "x", a: { x: at, y: Math.min(...lines.map((l) => l.lo)) }, b: { x: at, y: Math.max(...lines.map((l) => l.hi)) } };
 }
 
 function guideAlongY(at: number, lines: Line[]): Guide {
-  return { a: { x: Math.min(...lines.map((l) => l.lo)), y: at }, b: { x: Math.max(...lines.map((l) => l.hi)), y: at } };
+  return { axis: "y", a: { x: Math.min(...lines.map((l) => l.lo)), y: at }, b: { x: Math.max(...lines.map((l) => l.hi)), y: at } };
 }
 
 /** A move's pointer, pulled so the moved box's left/centre/right and top/middle/bottom lines land
@@ -148,10 +150,10 @@ export function keepLanded(guides: Guide[], landed: Bounds): Guide[] {
   const on = (v: number, lo: number, len: number) =>
     [lo, lo + len / 2, lo + len].some((line) => Math.abs(line - v) < 1e-6);
   return guides
-    .filter((g) => (g.a.x === g.b.x ? on(g.a.x, landed.x, landed.w) : on(g.a.y, landed.y, landed.h)))
+    .filter((g) => (g.axis === "x" ? on(g.a.x, landed.x, landed.w) : on(g.a.y, landed.y, landed.h)))
     .map((g) =>
-      g.a.x === g.b.x
-        ? { a: { x: g.a.x, y: Math.min(g.a.y, g.b.y, landed.y) }, b: { x: g.a.x, y: Math.max(g.a.y, g.b.y, landed.y + landed.h) } }
-        : { a: { x: Math.min(g.a.x, g.b.x, landed.x), y: g.a.y }, b: { x: Math.max(g.a.x, g.b.x, landed.x + landed.w), y: g.a.y } },
+      g.axis === "x"
+        ? { axis: "x" as const, a: { x: g.a.x, y: Math.min(g.a.y, g.b.y, landed.y) }, b: { x: g.a.x, y: Math.max(g.a.y, g.b.y, landed.y + landed.h) } }
+        : { axis: "y" as const, a: { x: Math.min(g.a.x, g.b.x, landed.x), y: g.a.y }, b: { x: Math.max(g.a.x, g.b.x, landed.x + landed.w), y: g.a.y } },
     );
 }
