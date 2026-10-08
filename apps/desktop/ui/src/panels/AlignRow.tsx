@@ -65,6 +65,7 @@ const BLOCKED: Record<DistributeBlock, string> = {
   // without overlapping, so the reason names the axis, not an overlap (Copilot on #301).
   stacked: "more than one piece spans the selection on this axis",
   tight: "the pieces do not fit inside the one around them",
+  crowded: "the pieces overlap too much to space out evenly",
 };
 
 /** Exported for its own test: the reason is the only thing a disabled button can tell. */

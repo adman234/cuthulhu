@@ -45,7 +45,10 @@ From `main` at `5dfde3b`:
   gate 1: taking the far end from the unit that starts last threw small pieces past each other when
   a wide one started first.) If the units together are wider than the span, the gaps come out
   negative, so they overlap evenly; that is still the arithmetic answer, and no special case hides
-  it.
+  it, as long as every piece still starts after the one before it. When a piece is shorter than
+  the overlap it would be passed by the next one, the neighbouring gaps stop being equal, and each
+  further click would pick a different first piece, so distribute is disabled with the reason
+  instead (Copilot on #301).
 - **A unit that spans all the others is a frame.** Selecting a whole design selects its weed
   border or backing plate too. That unit stays put and the others are spaced inside it, with the
   margins at its edges equal to the gaps between them. Sure Cuts A Lot 6 offers this as a separate

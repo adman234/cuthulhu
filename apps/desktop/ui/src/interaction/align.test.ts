@@ -108,8 +108,14 @@ describe("distributeMoves", () => {
   });
 
   it("works on y with the same rule", () => {
-    // Tops: A 0..10, C 2..6, B 5..25. Span 0..25, sizes 34, gaps -4.5: C's top goes to 5.5 (+3.5).
-    expect(dy(distributeMoves([A, B, C], "y"), 3)).toBeCloseTo(3.5, 9);
+    // Tops 0..10, 12..22, 40..50: span 0..50, sizes 30, gaps 10, so the middle goes to 20 (+8).
+    const p = [unit(100, 0, 0, 5, 10), unit(101, 0, 12, 5, 10), unit(102, 0, 40, 5, 10)];
+    expect(dy(distributeMoves(p, "y"), 101)).toBeCloseTo(8, 9);
+  });
+
+  it("blocks the y case where a short piece would pass a longer one", () => {
+    // Tops: A 0..10, C 2..6, B 5..25: gaps of -4.5 would put C's top at 5.5, past B's 5.
+    expect(distributeBlock([A, B, C], "y")).toBe("crowded");
   });
 });
 
@@ -159,15 +165,37 @@ describe("distributeBlock", () => {
     // Copilot on #301: each end within 1e-6 of the last pick walked the far end back to
     // 100.00000075, which made the 0..100 unit look like a frame. Against the true maximum
     // (100.0000015) nothing spans, and the three distribute between two ends.
+    // Read as two ends, these overlap too deeply to space ("crowded"); the chained far end had
+    // read them as a frame too small for its pieces ("tight").
     const units = [unit(70, 0, 0, 100, 1), unit(71, 10, 0, 90.0000015, 1), unit(72, 20, 0, 80.00000075, 1)];
-    expect(distributeBlock(units, "x")).toBeNull();
+    expect(distributeBlock(units, "x")).toBe("crowded");
   });
 
   it("keeps the unit that truly reaches furthest, not one ending just short of it", () => {
     // CodeRabbit on #301: within tolerance of the far edge is not the far edge. 20..100 stays and
-    // the 30..99.9999995 piece is the one placed between.
-    const units = [unit(80, 0, 0, 10, 1), unit(81, 20, 0, 80, 1), unit(82, 30, 0, 69.9999995, 1)];
+    // the 99.9..99.9999995 piece is the one placed between.
+    const units = [unit(80, 0, 0, 10, 1), unit(81, 20, 0, 80, 1), unit(82, 99.9, 0, 0.0999995, 1)];
     expect(distributeMoves(units, "x").map((m) => m.ids[0])).toEqual([82]);
+  });
+
+  it("blocks overlap so deep that pieces would pass each other", () => {
+    // Copilot on #301: 0..10, 1..100 and 50..70 give a gap of -14.5, which put the third piece at
+    // -4.5, ahead of the first; the next click then picked a different first anchor.
+    const units = [unit(90, 0, 0, 10, 1), unit(91, 1, 0, 99, 1), unit(92, 50, 0, 20, 1)];
+    expect(distributeBlock(units, "x")).toBe("crowded");
+    expect(distributeMoves(units, "x")).toEqual([]);
+  });
+
+  it("lands an overlapping layout in order with equal gaps between neighbours", () => {
+    // A 0..10, D 2..32, E 15..25: gap -9, shallow enough that nothing passes anything.
+    const units = [unit(1, 0, 0, 10, 1), unit(4, 2, 0, 30, 1), unit(5, 15, 0, 10, 1)];
+    const moved = new Map(distributeMoves(units, "x").map((m) => [m.ids[0], m.m[4]]));
+    const landed = units
+      .map((u) => ({ x: u.bounds.x + (moved.get(u.ids[0]) ?? 0), w: u.bounds.w }))
+      .sort((p, q) => p.x - q.x);
+    const gaps = landed.slice(1).map((u, i) => u.x - (landed[i].x + landed[i].w));
+    gaps.forEach((g) => expect(g).toBeCloseTo(-9, 9));
+    expect(landed[0].x).toBe(0); // the first anchor stayed first
   });
 
   it("blocks two units with exactly the same span as stacked", () => {

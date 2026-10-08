@@ -55,7 +55,7 @@ const EPS = 1e-6;
 
 /** Why distribute cannot act on an axis: fewer than three units, several units spanning the rest
  *  (stacked copies), or a frame too small for what is inside it. */
-export type DistributeBlock = "few" | "stacked" | "tight";
+export type DistributeBlock = "few" | "stacked" | "tight" | "crowded";
 
 /** How a distribute is anchored, or null when it has nothing to do.
  *  - "ends": the unit that starts first and the unit that reaches furthest stay put, and the rest
@@ -99,6 +99,13 @@ function anchors(units: Unit[], axis: Axis): Anchors {
     if (room(frame, inner, axis) < -EPS) return { kind: "blocked", reason: "tight" };
     return { kind: "frame", frame, inner };
   }
+  // Between two ends, gaps may be negative and the pieces overlap evenly, but only while each piece
+  // still starts after the one before it: a piece shorter than the overlap is passed by the next,
+  // the neighbours' gaps stop being equal, and the next click picks a different first anchor, so
+  // the layout drifts with every click (Copilot on #301).
+  const gap = endsGap(order, li, axis);
+  const placed = order.filter((_, i) => i !== li);
+  if (placed.some((u) => size(u.bounds, axis) + gap < -EPS)) return { kind: "blocked", reason: "crowded" };
   return { kind: "ends", order, li };
 }
 
@@ -127,12 +134,16 @@ export function distributeMoves(units: Unit[], axis: Axis): Move[] {
     return place(a.inner, start(a.frame.bounds, axis), room(a.frame, a.inner, axis) / (a.inner.length + 1), axis);
   }
   const { order, li } = a;
-  const first = order[0];
   const middle = order.filter((_, i) => i !== 0 && i !== li);
-  const span = end(order[li], axis) - start(first.bounds, axis);
+  return place(middle, end(order[0], axis), endsGap(order, li, axis), axis);
+}
+
+/** The equal gap between two ends: the span from the first unit's start to the far end, less
+ *  every unit's length, over the spaces between them. */
+function endsGap(order: Unit[], li: number, axis: Axis): number {
+  const span = end(order[li], axis) - start(order[0].bounds, axis);
   const total = order.reduce((s, u) => s + size(u.bounds, axis), 0);
-  const gap = (span - total) / (order.length - 1);
-  return place(middle, end(first, axis), gap, axis);
+  return (span - total) / (order.length - 1);
 }
 
 /** Lays `units` out in order from `from`, with `gap` before each one. */
