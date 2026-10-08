@@ -276,6 +276,7 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     redo: () => unimplemented("redo"),
     boolean_op: () => unimplemented("boolean_op"),
     import_svg: (a) => {
+      (window as unknown as { __docOrder?: string[] }).__docOrder?.push("import_svg");
       const id = nextId++;
       doc.nodes[id] = { id, kind: { Shape: { Path: { d: "" } } }, transform: [1, 0, 0, 1, 0, 0], style: DEFAULT_STYLE, children: [], cut_line_type: "Cut", material_preset: { state: "inherit" } };
       doc.nodes[a.parent as number].children.push(id);
@@ -292,6 +293,7 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       if (inFlightCommits > 0) loads.__loadDuringCommit = true;
       if (inFlightEdits > 0) loads.__loadDuringEdit = true;
       loads.__loads = (loads.__loads ?? 0) + 1;
+      (window as unknown as { __docOrder?: string[] }).__docOrder?.push("load_project");
       const load = () => {
         if (saved) doc = JSON.parse(JSON.stringify(saved));
         return JSON.stringify(doc);
@@ -4100,6 +4102,39 @@ test("Open or Reload waits for a document edit already on its way before it load
 
   await expect.poll(loads).toBe(1);
   expect(await page.evaluate(() => (window as unknown as { __loadDuringEdit?: boolean }).__loadDuringEdit)).toBeUndefined();
+});
+
+test("an import still reading its file finishes before Reload loads", async ({ page }) => {
+  // CodeRabbit on #301: the import passes the lock, then awaits its file before it sends. Paused in
+  // that read, a Reload must wait for it rather than load and take the import's old root.
+  await page.addInitScript(() => {
+    const w = window as unknown as { __docOrder: string[]; __holdFileReads: () => void; __releaseFileReads: () => void };
+    w.__docOrder = [];
+    let holding = false;
+    const held: (() => void)[] = [];
+    const read = Blob.prototype.arrayBuffer;
+    Blob.prototype.arrayBuffer = function (this: Blob) {
+      if (!holding) return read.call(this);
+      return new Promise((resolve, reject) => held.push(() => read.call(this).then(resolve, reject)));
+    };
+    w.__holdFileReads = () => { holding = true; };
+    w.__releaseFileReads = () => { holding = false; held.splice(0).forEach((f) => f()); };
+  });
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.evaluate(() => (window as unknown as { __holdFileReads: () => void }).__holdFileReads());
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "a.svg", mimeType: "image/svg+xml",
+    buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><rect width="5" height="5"/></svg>'),
+  });
+  await page.getByRole("button", { name: "Reload" }).click();
+  await page.waitForTimeout(300);
+  const order = () => page.evaluate(() => (window as unknown as { __docOrder: string[] }).__docOrder);
+  expect(await order()).toEqual([]);
+  await page.evaluate(() => (window as unknown as { __releaseFileReads: () => void }).__releaseFileReads());
+
+  await expect.poll(order).toEqual(["import_svg", "load_project"]);
 });
 
 test("Delete, Undo and the other document commands are refused while a document loads", async ({ page }) => {
