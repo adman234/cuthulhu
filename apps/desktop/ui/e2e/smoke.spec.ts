@@ -3816,3 +3816,38 @@ test("a newer align replaces a queued one on the same selection in any click ord
   expect((await batchLog(page))[1]).toMatchObject({ ids: [4], m: [1, 0, 0, 1, expect.closeTo(25, 6), 0] });
   expect(await nodeTransform(page, 2)).toEqual([1, 0, 0, 1, 30, 0]);
 });
+
+test("a queued align to the artboard uses the bed it lands on, not the one it was clicked on", async ({ page }) => {
+  // Copilot on #301: the queued click kept the render's artboard, so a machine switch in between
+  // centred the piece on the old bed.
+  const v = await selectRedBesideGroup(page);
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // red to 5..15, parked
+  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
+  await page.getByRole("button", { name: "Align horizontal centres" }).click(); // queued
+
+  const before = (await readView(page)).scale;
+  await page.getByLabel("Machine").selectOption("puma"); // 600 mm bed
+  await expect.poll(async () => (await readView(page)).scale).not.toBeCloseTo(before, 6);
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // Red's centre is 10; the Puma's is 300. The Cameo's 165 would give 155.
+  await expect.poll(async () => (await batchLog(page)).length).toBe(2);
+  expect((await batchLog(page))[1]).toMatchObject({ ids: [4], m: [1, 0, 0, 1, expect.closeTo(290, 6), 0] });
+});
+
+test("the align row follows the preview while its commit is on the wire", async ({ page }) => {
+  // Copilot on #301: the preview lived in a ref, so the buttons kept the bounds from before it.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await selectRows(page, [0, 2, 3]); // the Group, red, green: all 10 mm wide
+  const horizontal = page.getByRole("button", { name: "Distribute horizontal spacing" });
+  await expect(horizontal).toBeEnabled();
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await page.getByRole("button", { name: "Align left edges" }).click();
+  // In the preview all three sit at 0..10, so each spans the rest and distribute cannot act.
+  await expect(horizontal).toBeDisabled();
+  await expect(horizontal).toHaveAttribute("title", /spans the selection on this axis/);
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+});

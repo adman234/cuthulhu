@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction 
 import { listen } from "@tauri-apps/api/event";
 import * as ipc from "./ipc";
 import { Canvas2DRenderer } from "./render/Canvas2DRenderer";
-import type { Affine6, Scene, ShapeGeom } from "./render/hittest";
+import type { Affine6, Bounds, Scene, ShapeGeom } from "./render/hittest";
 import { pathBounds } from "./render/pathdata";
 import { IDENTITY, compose, transformBounds } from "./render/affine";
 import { outermost, shapesUnder, toggleId } from "./interaction/marquee";
@@ -347,6 +347,8 @@ export function App() {
   // Memoised: a pointer move re-renders App for the cursor readout, and rebuilding these scanned
   // every node in the document per move (CodeRabbit on #301).
   const units = useMemo(() => (doc ? outermost(doc.nodes, selected) : []), [doc, selected]);
+  const artboardNow = useRef<Bounds | null>(null);
+  artboardNow.current = doc?.artboard ?? null;
   const unitsIn = useCallback((s: Scene): Unit[] => {
     if (units.length === 0) return [];
     const at = new Map(s.nodes.map((n, i) => [n.id, i]));
@@ -375,7 +377,9 @@ export function App() {
     `${kind}:${axis}:${[...units].sort((p, q) => p - q).join(",")}`;
   const align = (mode: AlignMode) => {
     const axis: Axis = mode === "left" || mode === "hcenter" || mode === "right" ? "x" : "y";
-    interaction.transformEach(alignKey("align", axis), (s) => alignMoves(unitsIn(s), mode, doc?.artboard ?? null));
+    // The artboard is read when the click is sent, like the bounds: a queued click kept this
+    // render's bed, so a machine switch in between centred a piece on the old one (Copilot on #301).
+    interaction.transformEach(alignKey("align", axis), (s) => alignMoves(unitsIn(s), mode, artboardNow.current));
   };
   const distribute = (axis: Axis) =>
     interaction.transformEach(alignKey("distribute", axis), (s) => distributeMoves(unitsIn(s), axis));

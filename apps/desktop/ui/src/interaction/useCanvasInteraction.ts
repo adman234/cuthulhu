@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type PointerEvent, type RefObject } from "react";
 import { hitTest, type Bounds, type Scene } from "../render/hittest";
 import { compose, IDENTITY, isIdentity, type Pt } from "../render/affine";
 import type { Canvas2DRenderer } from "../render/Canvas2DRenderer";
@@ -127,6 +127,11 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   const latest = useRef({ scene, selected, expand, commit, sceneRev, artboard });
   latest.current = { scene, selected, expand, commit, sceneRev, artboard };
   const pending = useRef<PendingPreview | null>(null);
+  // `pending` is a ref so pointer handlers see it between renders, but `effectiveScene` is read by
+  // React: the panel's buttons kept the bounds from before a preview until something else
+  // re-rendered, and offered clicks that then did nothing (Copilot on #301). Bumped whenever
+  // `pending` changes.
+  const [, previewChanged] = useReducer((n: number) => n + 1, 0);
   // One transform on the wire at a time. A gesture pressed while a commit is unanswered would build
   // its matrix on that commit's preview, and if the commit were refused it would land about the
   // wrong anchor. The window is one IPC round trip, so a press in it selects but does not drag.
@@ -325,6 +330,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     const preview = applyMoves(current().scene, moves.map((mv) => ({ shapes: expand(mv.ids), m: mv.m })));
     pending.current = { preview, retireAt: Infinity };
     inFlight.current = true;
+    previewChanged();
     repaint();
     void latest.current.commit(moves, requestedAt).then((outcome) => {
       inFlight.current = false;
@@ -334,6 +340,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
       else if (pending.current) {
         pending.current = { ...pending.current, retireAt: outcome.snapshotRev ?? latest.current.sceneRev + 1 };
       }
+      previewChanged();
       repaint();
       drain();
     });
