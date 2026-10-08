@@ -3924,3 +3924,50 @@ test("the fake refuses an empty batch, or a batch with an empty entry, as transf
   expect(await nodeTransform(page, 2)).toEqual([1, 0, 0, 1, 0, 0]);
   expect(await batchLog(page)).toEqual([]);
 });
+
+test("a queued edit is dropped when Reload replaces the document", async ({ page }) => {
+  // Copilot on #301: Reload reuses ids, so an X edit queued against the old document moved a shape
+  // in the reloaded one.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click(); // gives Reload a path
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // on the wire
+  await page.getByLabel("X", { exact: true }).fill("30"); // queued behind it
+  await page.getByRole("button", { name: "Reload" }).click();
+  await expect(page.getByTestId("layer-row").first()).toBeVisible();
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // The held drag lands (the fake applies it on release); the queued X must not follow it.
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(5, 6);
+  await page.waitForTimeout(300);
+  expect(await batchLog(page)).toHaveLength(1);
+  expect((await nodeTransform(page, 2))[4]).toBeCloseTo(5, 6);
+});
+
+test("a queued align finds a Group's shapes in the tree as it stands when it is sent", async ({ page }) => {
+  // Copilot on #301: the queued click kept the tree from its render, so a shape added to the Group
+  // before it drained was left out of the Group's bounds.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedAlignExtras: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click(); // red, 0..10
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // red to 5..15, parked
+  await page.getByTestId("layer-row").nth(2).click({ modifiers: ["Shift"] }); // + the Group, 50..80
+  await page.getByRole("button", { name: "Align left edges" }).click(); // queued
+  // A 10 mm rect joins the Group at 0..10 while the align waits.
+  await page.evaluate(() =>
+    (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> } })
+      .__TAURI_INTERNALS__.invoke("add_primitive", { parent: 4, kind: { Rect: { w: 10, h: 10 } } }));
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // With the new rect the Group reaches 0, so only red moves (to 0). The old tree said 50..80,
+  // which would have sent the Group to 5 instead.
+  await expect.poll(async () => (await batchLog(page)).length).toBe(2);
+  expect((await batchLog(page))[1]).toMatchObject({ ids: [2], m: [1, 0, 0, 1, expect.closeTo(-5, 6), 0] });
+});

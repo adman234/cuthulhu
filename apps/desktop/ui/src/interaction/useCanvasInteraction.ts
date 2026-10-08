@@ -93,6 +93,10 @@ export type CanvasInteraction = {
   /** The same, for a click that moves each unit differently (align, distribute) as one commit. A
    *  newer click under the same key replaces a queued one. */
   transformEach: (key: string, make: (scene: Scene) => Move[]) => void;
+  /** Drops queued edits and the pending preview. App calls it when Open or Reload replaces the
+   *  document: ids are reused, so an edit queued against the old document would move a shape in
+   *  the new one (Copilot on #301). */
+  forgetQueued: () => void;
   handlers: Handlers;
 };
 
@@ -132,6 +136,13 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // re-rendered, and offered clicks that then did nothing (Copilot on #301). Bumped whenever
   // `pending` changes.
   const [, previewChanged] = useReducer((n: number) => n + 1, 0);
+  // Set when a commit settles; the next render's effect drains the queue.
+  const drainDue = useRef(false);
+  useEffect(() => {
+    if (!drainDue.current) return;
+    drainDue.current = false;
+    drain();
+  });
   // One transform on the wire at a time. A gesture pressed while a commit is unanswered would build
   // its matrix on that commit's preview, and if the commit were refused it would land about the
   // wrong anchor. The window is one IPC round trip, so a press in it selects but does not drag.
@@ -340,10 +351,21 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
       else if (pending.current) {
         pending.current = { ...pending.current, retireAt: outcome.snapshotRev ?? latest.current.sceneRev + 1 };
       }
+      // Drained after the render this settles into, not here: the commit's refresh has set a new
+      // document that has not rendered yet, and a queued edit built now would read the old tree
+      // and scene (Copilot on #301). The effect below runs once React has rendered it.
+      drainDue.current = true;
       previewChanged();
       repaint();
-      drain();
     });
+  }
+
+  function forgetQueued() {
+    queued.current.clear();
+    drainDue.current = false;
+    pending.current = null;
+    previewChanged();
+    repaint();
   }
 
   // Moves that would change nothing are dropped, so a no-op never holds the wire.
@@ -506,6 +528,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     effectiveScene: gestureScene(pending.current, scene, sceneRev),
     transformWith,
     transformEach,
+    forgetQueued,
     handlers: { onPointerEnter, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onPointerLeave },
   };
 }

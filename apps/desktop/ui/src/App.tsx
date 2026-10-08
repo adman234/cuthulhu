@@ -101,6 +101,27 @@ function buildScene(doc: DocSnapshot): Scene {
   return { nodes };
 }
 
+/** One align unit per id, bounded by every shape it moves (`expand`) as they stand in `scene`, in
+ *  document order (the scene's, by each unit's first shape), since that breaks a distribute tie. */
+function unitsOf(s: Scene, ids: number[], expand: (ids: number[]) => number[]): Unit[] {
+  if (ids.length === 0) return [];
+  const at = new Map(s.nodes.map((n, i) => [n.id, i]));
+  const found = ids.flatMap((id) => {
+    const shapes = expand([id]).flatMap((sid) => {
+      const i = at.get(sid);
+      return i === undefined ? [] : [s.nodes[i]];
+    });
+    if (shapes.length === 0) return [];
+    const x0 = Math.min(...shapes.map((n) => n.bounds.x));
+    const y0 = Math.min(...shapes.map((n) => n.bounds.y));
+    const x1 = Math.max(...shapes.map((n) => n.bounds.x + n.bounds.w));
+    const y1 = Math.max(...shapes.map((n) => n.bounds.y + n.bounds.h));
+    const first = Math.min(...shapes.map((n) => at.get(n.id) ?? 0));
+    return [{ first, unit: { ids: [id], bounds: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } } }];
+  });
+  return found.sort((a, b) => a.first - b.first).map((f) => f.unit);
+}
+
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<Canvas2DRenderer | null>(null);
@@ -349,24 +370,11 @@ export function App() {
   const units = useMemo(() => (doc ? outermost(doc.nodes, selected) : []), [doc, selected]);
   const artboardNow = useRef<Bounds | null>(null);
   artboardNow.current = doc?.artboard ?? null;
-  const unitsIn = useCallback((s: Scene): Unit[] => {
-    if (units.length === 0) return [];
-    const at = new Map(s.nodes.map((n, i) => [n.id, i]));
-    const found = units.flatMap((id) => {
-      const shapes = expand([id]).flatMap((sid) => {
-        const i = at.get(sid);
-        return i === undefined ? [] : [s.nodes[i]];
-      });
-      if (shapes.length === 0) return [];
-      const x0 = Math.min(...shapes.map((n) => n.bounds.x));
-      const y0 = Math.min(...shapes.map((n) => n.bounds.y));
-      const x1 = Math.max(...shapes.map((n) => n.bounds.x + n.bounds.w));
-      const y1 = Math.max(...shapes.map((n) => n.bounds.y + n.bounds.h));
-      const first = Math.min(...shapes.map((n) => at.get(n.id) ?? 0));
-      return [{ first, unit: { ids: [id], bounds: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } } }];
-    });
-    return found.sort((a, b) => a.first - b.first).map((f) => f.unit);
-  }, [expand, units]);
+  // A queued click keeps the ids it was made on but reads the tree as it stands when it is sent:
+  // the commit ahead of it may have changed the Group's shapes (Copilot on #301). The hook drains
+  // after the render that holds that commit's snapshot, so this ref is current by then.
+  const expandNow = useRef(expand);
+  expandNow.current = expand;
   // Keyed like the fields: a newer click of the same kind on the same axis and selection replaces a
   // queued one, but "Align top" does not replace a queued "Align left", and a distribute does not
   // replace an align, since each is a different request (code-reviewer).
@@ -379,14 +387,18 @@ export function App() {
     const axis: Axis = mode === "left" || mode === "hcenter" || mode === "right" ? "x" : "y";
     // The artboard is read when the click is sent, like the bounds: a queued click kept this
     // render's bed, so a machine switch in between centred a piece on the old one (Copilot on #301).
-    interaction.transformEach(alignKey("align", axis), (s) => alignMoves(unitsIn(s), mode, artboardNow.current));
+    const ids = units;
+    interaction.transformEach(alignKey("align", axis), (s) =>
+      alignMoves(unitsOf(s, ids, expandNow.current), mode, artboardNow.current));
   };
-  const distribute = (axis: Axis) =>
-    interaction.transformEach(alignKey("distribute", axis), (s) => distributeMoves(unitsIn(s), axis));
+  const distribute = (axis: Axis) => {
+    const ids = units;
+    interaction.transformEach(alignKey("distribute", axis), (s) => distributeMoves(unitsOf(s, ids, expandNow.current), axis));
+  };
   // Counted from the scene the moves are computed from, not from the selection: an empty Group
   // is a selected id with nothing to line up, and counting it enabled a distribute that then had
   // two units and did nothing, or sent a lone shape to the artboard (silent-failure-hunter).
-  const shownUnits = useMemo(() => unitsIn(interaction.effectiveScene), [interaction.effectiveScene, unitsIn]);
+  const shownUnits = useMemo(() => unitsOf(interaction.effectiveScene, units, expand), [interaction.effectiveScene, units, expand]);
   const unitCount = shownUnits.length;
   const distributeBlocked = useMemo(
     () => ({ x: distributeBlock(shownUnits, "x"), y: distributeBlock(shownUnits, "y") }),
@@ -486,6 +498,7 @@ export function App() {
               const p = await ipc.pickOpenPath();
               if (p) {
                 await ipc.loadProject({ path: p });
+                interaction.forgetQueued();
                 setLastPath(p);
                 setSelected([]); // loaded doc may not contain the old ids
                 interaction.requestFit();
@@ -495,6 +508,7 @@ export function App() {
           onReload={() =>
             run(async () => {
               await ipc.loadProject({ path: lastPath! });
+              interaction.forgetQueued();
               setSelected([]);
               interaction.requestFit();
             })
