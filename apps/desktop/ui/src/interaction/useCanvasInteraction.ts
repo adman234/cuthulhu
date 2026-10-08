@@ -156,6 +156,8 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   const inFlight = useRef(false);
   // While Open or Reload replaces the document: edits queue and nothing drains (`replaceDocument`).
   const replacing = useRef(false);
+  // The commit on the wire, settled or not, so a load can wait for it (`replaceDocument`).
+  const settling = useRef<Promise<void>>(Promise.resolve());
   // Property edits made while a commit is on the wire, in the order they were made.
   const queued = useRef(new Map<string, { make: (s: Scene, now: SendTime) => Move[]; at: number }>());
   const sendTime = (): SendTime => ({ expand: latest.current.expand, artboard: latest.current.artboard });
@@ -360,7 +362,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     inFlight.current = true;
     previewChanged();
     repaint();
-    void latest.current.commit(moves, requestedAt).then((outcome) => {
+    settling.current = latest.current.commit(moves, requestedAt).then((outcome) => {
       inFlight.current = false;
       // Applied: the preview is what the backend now holds, so it stays until the snapshot that
       // includes this commit has rendered. If that refresh failed, the next successful one will.
@@ -384,6 +386,10 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     replacing.current = true;
     let replaced = false;
     try {
+      // A commit already on the wire settles first. Today the backend runs these sync commands in
+      // the order they were sent, but that is Tauri's scheduling, not a promise of ours: made async,
+      // a load could land first and the commit's ids would meet the new document (CodeRabbit on #301).
+      await settling.current;
       await load();
       replaced = true;
     } finally {

@@ -271,6 +271,9 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       return null;
     },
     load_project: () => {
+      // The real backend runs commands one at a time, but only a frontend that waits keeps a load
+      // from landing between a commit and the document it named (CodeRabbit on #301).
+      if (inFlightCommits > 0) (window as unknown as { __loadDuringCommit?: boolean }).__loadDuringCommit = true;
       const load = () => {
         if (saved) doc = JSON.parse(JSON.stringify(saved));
         return JSON.stringify(doc);
@@ -4067,4 +4070,24 @@ test("an edit made between a commit settling and the queue draining still waits 
   const [, top, right] = await commitLog(page);
   expect(top).toMatchObject({ ids: [4], m: [1, 0, 0, 1, 0, expect.closeTo(-5, 6)] });
   expect(right).toMatchObject({ ids: [4], m: [1, 0, 0, 1, expect.closeTo(25, 6), 0] });
+});
+
+test("Reload waits for a commit already on the wire before it loads", async ({ page }) => {
+  // CodeRabbit on #301: gating new edits does not cover a commit that already went out. Open and
+  // Reload must not start load_project while one is unanswered, or a reused id could meet it.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // on the wire, held
+  await page.getByRole("button", { name: "Reload" }).click();
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  await expect(page.getByTestId("layer-row").first()).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __loadDuringCommit?: boolean }).__loadDuringCommit ?? false)).toBe(false);
+  // The reload did happen once the commit had settled: the saved copy has red back at 0.
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(0, 6);
 });
