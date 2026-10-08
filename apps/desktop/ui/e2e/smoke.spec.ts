@@ -4108,7 +4108,9 @@ test("an import still reading its file finishes before Reload loads", async ({ p
   // CodeRabbit on #301: the import passes the lock, then awaits its file before it sends. Paused in
   // that read, a Reload must wait for it rather than load and take the import's old root.
   await page.addInitScript(() => {
-    const w = window as unknown as { __docOrder: string[]; __holdFileReads: () => void; __releaseFileReads: () => void };
+    const w = window as unknown as {
+      __docOrder: string[]; __holdFileReads: () => void; __releaseFileReads: () => void; __heldFileReads: () => number;
+    };
     w.__docOrder = [];
     let holding = false;
     const held: (() => void)[] = [];
@@ -4119,15 +4121,22 @@ test("an import still reading its file finishes before Reload loads", async ({ p
     };
     w.__holdFileReads = () => { holding = true; };
     w.__releaseFileReads = () => { holding = false; held.splice(0).forEach((f) => f()); };
+    w.__heldFileReads = () => held.length;
   });
   await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Save" }).click();
   await page.evaluate(() => (window as unknown as { __holdFileReads: () => void }).__holdFileReads());
-  await page.locator('input[type="file"]').setInputFiles({
-    name: "a.svg", mimeType: "image/svg+xml",
-    buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><rect width="5" height="5"/></svg>'),
+  // Built in the page: the e2e build has no Node types, so no Buffer.
+  await page.evaluate(() => {
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const files = new DataTransfer();
+    files.items.add(new File(['<svg xmlns="http://www.w3.org/2000/svg"><rect width="5" height="5"/></svg>'], "a.svg", { type: "image/svg+xml" }));
+    input.files = files.files;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
   });
+  // In the read, past the lock check, before Reload is asked for.
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __heldFileReads: () => number }).__heldFileReads())).toBe(1);
   await page.getByRole("button", { name: "Reload" }).click();
   await page.waitForTimeout(300);
   const order = () => page.evaluate(() => (window as unknown as { __docOrder: string[] }).__docOrder);
