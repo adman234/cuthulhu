@@ -163,6 +163,13 @@ describe("distributeBlock", () => {
     expect(distributeBlock(units, "x")).toBeNull();
   });
 
+  it("keeps the unit that truly reaches furthest, not one ending just short of it", () => {
+    // CodeRabbit on #301: within tolerance of the far edge is not the far edge. 20..100 stays and
+    // the 30..99.9999995 piece is the one placed between.
+    const units = [unit(80, 0, 0, 10, 1), unit(81, 20, 0, 80, 1), unit(82, 30, 0, 69.9999995, 1)];
+    expect(distributeMoves(units, "x").map((m) => m.ids[0])).toEqual([82]);
+  });
+
   it("blocks two units with exactly the same span as stacked", () => {
     expect(distributeBlock([unit(60, 0, 0, 100, 1), unit(61, 0, 0, 100, 1), unit(62, 40, 0, 10, 1)], "x")).toBe("stacked");
   });

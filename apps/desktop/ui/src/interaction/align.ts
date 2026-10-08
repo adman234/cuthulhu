@@ -80,11 +80,13 @@ function anchors(units: Unit[], axis: Axis): Anchors {
   // The true far edge, taken once: comparing each unit with the last pick let the tolerance chain,
   // walking the far end back until a unit that spans nothing looked like a frame (Copilot on #301).
   const hi = Math.max(...order.map((u) => end(u, axis)));
-  // Of the units reaching it, the one that starts last, so it is never the first as well unless it
-  // spans the rest.
+  // Of the units reaching it exactly, the one that starts last. Exactly, not within EPS: a piece
+  // ending just short is not the far end, and taking it moved the one that is (CodeRabbit on #301).
+  // The tolerance belongs to the frame test below, which also catches the first unit reaching the
+  // far edge, so the far end in "ends" mode is never the first unit.
   let li = 0;
   order.forEach((u, i) => {
-    if (end(u, axis) >= hi - EPS) li = i;
+    if (end(u, axis) === hi) li = i;
   });
   // Spanning is asked of every unit, not read off the ends: a plate sharing its start with a piece
   // earlier in the document sorts second, and was taken as the far end (code-reviewer).
