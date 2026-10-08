@@ -153,8 +153,15 @@ export function App() {
   // queued commits can render an earlier one's snapshot while a later one is still on the wire.
   const revCounter = useRef(0);
   const [docRev, setDocRev] = useState(0);
-  const refresh = useCallback(async () => {
+  // Bumped when a load replaces the document. A snapshot asked for before that answers with the
+  // document that left; rendered after the load, it showed that one under the next revision, which
+  // also lifted the edit lock over the loaded document (Copilot on #301). So it is dropped, and
+  // null says nothing rendered.
+  const docGen = useRef(0);
+  const refresh = useCallback(async (): Promise<number | null> => {
+    const gen = docGen.current;
     const json = (await ipc.snapshot()) as string;
+    if (gen !== docGen.current) return null;
     const parsed = JSON.parse(json) as DocSnapshot;
     const rev = ++revCounter.current;
     setDoc(parsed);
@@ -291,6 +298,12 @@ export function App() {
     },
     sceneRev: docRev,
   });
+
+  const loadDocument = (path: string) =>
+    interaction.replaceDocument(async () => {
+      await ipc.loadProject({ path });
+      docGen.current++;
+    });
 
   const { repaint } = interaction;
   useEffect(() => {
@@ -497,7 +510,7 @@ export function App() {
                 // Held for the whole load, not cleared before it: the backend has replaced the
                 // document by the time loadProject resolves, and a commit settling in between would
                 // drain into it (CodeRabbit on #301), as would an edit made while it loads.
-                await interaction.replaceDocument(() => ipc.loadProject({ path: p }));
+                await loadDocument(p);
                 setLastPath(p);
                 setSelected([]); // loaded doc may not contain the old ids
                 interaction.requestFit();
@@ -506,7 +519,7 @@ export function App() {
           }
           onReload={() =>
             run(async () => {
-              await interaction.replaceDocument(() => ipc.loadProject({ path: lastPath! }));
+              await loadDocument(lastPath!);
               setSelected([]);
               interaction.requestFit();
             })

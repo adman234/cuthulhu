@@ -133,7 +133,11 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
         failNextSnapshot = false;
         throw new Error("snapshot unavailable");
       }
-      return JSON.stringify(doc);
+      // Read when the command runs, as the backend does, so a held answer still shows the document
+      // as it stood then, even if a load has replaced it before the answer arrives.
+      const json = JSON.stringify(doc);
+      if (holdingSnapshots) return new Promise((resolve) => heldSnapshots.push(() => resolve(json)));
+      return json;
     },
     add_primitive: (a) => {
       const id = nextId++;
@@ -479,7 +483,12 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
   let holdingLoads = false;
   const heldLoads: (() => void)[] = [];
   let failNextSnapshot = false;
+  let holdingSnapshots = false;
+  const heldSnapshots: (() => void)[] = [];
   Object.assign(window, {
+    __holdSnapshots: () => { holdingSnapshots = true; },
+    // Oldest first, one at a time: the race is which document's answer renders last.
+    __releaseSnapshot: () => release(heldSnapshots.splice(0, 1)),
     __failNextCommit: () => { failNextCommit = true; },
     __failNextSnapshot: () => { failNextSnapshot = true; },
     __holdCommits: () => { holdingCommits = true; },
@@ -4018,12 +4027,47 @@ test("an edit made while Reload loads is held, and dropped once the document is 
   await page.evaluate(() => (window as unknown as { __holdLoad: () => void }).__holdLoad());
   await page.getByTestId("layer-row").first().click(); // red
   await page.getByRole("button", { name: "Reload" }).click(); // parked
-  await page.getByRole("button", { name: "Align horizontal centres" }).click(); // during the load
+  // Locked while it loads, and saying why: the panel used to take these, and the load then dropped
+  // them without a word (Copilot on #301).
+  const centre = page.getByRole("button", { name: "Align horizontal centres" });
+  await expect(centre).toBeDisabled();
+  await expect(centre).toHaveAttribute("title", /waiting for the document to load/);
+  await expect(page.getByLabel("X", { exact: true })).toBeDisabled();
   await page.evaluate(() => (window as unknown as { __releaseLoad: () => Promise<void> }).__releaseLoad());
 
   await page.waitForTimeout(300);
   expect(await commitLog(page)).toEqual([]);
   expect(await nodeTransform(page, 2)).toEqual([1, 0, 0, 1, 0, 0]);
+  await page.getByTestId("layer-row").first().click();
+  await expect(centre).toBeEnabled();
+  await expect(page.getByLabel("X", { exact: true })).toBeEnabled();
+});
+
+test("a snapshot asked for before a later load never renders over it or lifts its lock", async ({ page }) => {
+  // Copilot on #301: the lock lifted on any newer snapshot, so a first Reload's snapshot answering
+  // after a second Reload had loaded showed the first document and unlocked edits on it, while the
+  // backend held the second; an align there sent the first one's bounds into the second.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  const loads = () => page.evaluate(() => (window as unknown as { __loads?: number }).__loads ?? 0);
+  await page.evaluate(() => (window as unknown as { __holdSnapshots: () => void }).__holdSnapshots());
+  await page.getByRole("button", { name: "Reload" }).click(); // loads; its snapshot is held
+  await expect.poll(loads).toBe(1);
+  await page.getByRole("button", { name: "Reload" }).click(); // loads again; held too
+  await expect.poll(loads).toBe(2);
+
+  const release = () =>
+    page.evaluate(() => (window as unknown as { __releaseSnapshot: () => Promise<void> }).__releaseSnapshot());
+  const centre = page.getByRole("button", { name: "Align horizontal centres" });
+  await release(); // the first Reload's answer, read before the second load
+  await page.getByTestId("layer-row").first().click();
+  await expect(centre).toHaveAttribute("title", /waiting for the document to load/);
+  await expect(centre).toBeDisabled();
+
+  await release(); // the second's, read after its load
+  await page.getByTestId("layer-row").first().click();
+  await expect(centre).toBeEnabled();
 });
 
 test("a queued align finds a Group's shapes in the tree as it stands when it is sent", async ({ page }) => {
@@ -4112,7 +4156,7 @@ test("after a load whose snapshot failed, edits on the old view are not sent", a
   // Locked, and saying why, rather than taking the click and dropping it (silent-failure-hunter).
   const centre = page.getByRole("button", { name: "Align horizontal centres" });
   await expect(centre).toBeDisabled();
-  await expect(centre).toHaveAttribute("title", /waiting for the loaded document to be read/);
+  await expect(centre).toHaveAttribute("title", /waiting for the document to load/);
   await expect(page.getByLabel("X", { exact: true })).toBeDisabled();
   expect(await commitLog(page)).toEqual([]);
 });

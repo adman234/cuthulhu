@@ -65,7 +65,7 @@ export function PropertiesPanel({ bounds, cutLineType, materialPreset, effective
       ) : null}
       {/* Also outside it, since aligning is mostly for multi-node selections. Always shown, disabled
           when it cannot act, so the buttons do not jump the rows below them in and out. */}
-      <AlignRow unitCount={unitCount} locked={editsLocked ? "waiting for the loaded document to be read" : null} distributeBlocked={distributeBlocked} onAlign={onAlign} onDistribute={onDistribute} />
+      <AlignRow unitCount={unitCount} locked={editsLocked ? "waiting for the document to load" : null} distributeBlocked={distributeBlocked} onAlign={onAlign} onDistribute={onDistribute} />
       {/* Outside the `bounds` branch: `selectedBounds` is null for every multi-node selection
           and for a selected container (App.tsx), both of which do have a cuttability. */}
       {cutLineType !== null ? (

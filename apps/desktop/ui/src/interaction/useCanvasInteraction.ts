@@ -64,7 +64,8 @@ export type CanvasInteractionArgs = {
 export type SendTime = { expand: (ids: number[]) => number[]; artboard: Bounds | null };
 
 /** "applied" carries the revision of the snapshot its refresh rendered, or null if that refresh
- *  failed: the commit's preview stands in until a snapshot at least that new has rendered. */
+ *  failed or rendered nothing: the commit's preview stands in until a snapshot at least that new has
+ *  rendered. */
 export type CommitOutcome = { kind: "refused" } | { kind: "applied"; snapshotRev: number | null };
 
 /** Which property field a queued edit came from: edits to one field supersede each other. */
@@ -87,9 +88,10 @@ export type CanvasInteraction = {
   /** Draws the scene, selection and any live gesture. App calls it whenever the view, size, scene
    *  or selection changes, so those redraws cannot paint the committed scene over a gesture. */
   repaint: () => void;
-  /** True from a successful Open or Reload until the loaded document's snapshot renders: the canvas
-   *  still shows the old one, and edits are dropped. The panel disables its controls on it, so a
-   *  click there does not vanish without a word (silent-failure-hunter on #301). */
+  /** True while Open or Reload loads, and after a successful one until the loaded document's
+   *  snapshot renders: an edit made meanwhile would be dropped, and after the load the canvas still
+   *  shows the old document. The panel disables its controls on it, so a click there does not vanish
+   *  without a word (silent-failure-hunter and Copilot on #301). */
   editsLocked: boolean;
   /** The geometry the canvas shows: an unread or in-flight commit's preview, else the committed
    *  scene. Anything that computes a transform from current positions must read this one. */
@@ -402,11 +404,13 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
 
   async function replaceDocument(load: () => Promise<unknown>) {
     // One at a time. A second, overlapping replacement cleared the shared flag when the first ended
-    // while it was still loading, and old-document edits could reach it (Copilot on #301). Queuing
-    // it behind the first is no better: the first's snapshot can render after the second has loaded
-    // and lift `stale()` over the wrong document. Refused before anything changes, so run() shows it.
+    // while it was still loading, and old-document edits could reach it (Copilot on #301). Refused
+    // before anything changes, so run() shows it. A load after this one has returned is fine: App
+    // drops a snapshot asked for before it, so the first load's cannot lift `stale()` over it.
     if (replacing.current) throw new Error("another document is still loading");
     replacing.current = true;
+    // Rendered now, so the panel locks for the load (`editsLocked`) rather than when it ends.
+    previewChanged();
     // A drag still under the pointer is not a commit yet, so nothing below waits for it, and its
     // pointer-up would send the old ids and matrix into the loaded document (Copilot on #301).
     // Dropped here, before the first await, so its release has nothing to send.
@@ -617,7 +621,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     cursor: cursorScreen ? screenToWorld(view, cursorScreen) : null,
     requestFit,
     repaint,
-    editsLocked: stale(),
+    editsLocked: replacing.current || stale(),
     effectiveScene: gestureScene(pending.current, scene, sceneRev),
     transformWith,
     transformEach,
