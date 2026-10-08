@@ -158,10 +158,17 @@ export function App() {
   // also lifted the edit lock over the loaded document (Copilot on #301). So it is dropped, and
   // null says nothing rendered.
   const docGen = useRef(0);
+  // Snapshots in the order they were asked for, and the latest that rendered. One answering after a
+  // newer one rendered is older than what is on screen: shown under the next revision, it put the
+  // canvas back to before an edit the newer one already showed (CodeRabbit on #301).
+  const snapshotsAsked = useRef(0);
+  const snapshotShown = useRef(0);
   const refresh = useCallback(async (): Promise<number | null> => {
     const gen = docGen.current;
+    const asked = ++snapshotsAsked.current;
     const json = (await ipc.snapshot()) as string;
-    if (gen !== docGen.current) return null;
+    if (gen !== docGen.current || asked < snapshotShown.current) return null;
+    snapshotShown.current = asked;
     const parsed = JSON.parse(json) as DocSnapshot;
     const rev = ++revCounter.current;
     setDoc(parsed);
@@ -299,6 +306,20 @@ export function App() {
     sceneRev: docRev,
   });
 
+  // Every other command that changes the document, refused while Open or Reload replaces it and
+  // until the loaded one renders: each names ids or the root of the document on screen, which the
+  // loaded one reuses, so a Delete pressed during a Reload removed what it gave those ids
+  // (CodeRabbit on #301). Refused with a word, like the panel's locked controls.
+  const { editsLockedNow } = interaction;
+  const edit = useCallback(
+    (fn: () => Promise<unknown>) => {
+      if (!editsLockedNow()) return run(fn);
+      setError("Not applied: the document is still loading");
+      return Promise.resolve(false);
+    },
+    [run, setError, editsLockedNow],
+  );
+
   const loadDocument = (path: string) =>
     interaction.replaceDocument(async () => {
       await ipc.loadProject({ path });
@@ -321,10 +342,10 @@ export function App() {
   // (still valid) selection in place, and a successful one can't leave stale ids around to
   // error out a later transform.
   const deleteSelected = useCallback(() => {
-    run(() => ipc.deleteNodes({ ids: selected })).then((ok) => {
+    edit(() => ipc.deleteNodes({ ids: selected })).then((ok) => {
       if (ok) setSelected([]);
     });
-  }, [run, selected]);
+  }, [edit, selected]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -336,12 +357,12 @@ export function App() {
         deleteSelected();
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z" && !typing) {
         e.preventDefault();
-        run(() => (e.shiftKey ? ipc.redo() : ipc.undo()));
+        edit(() => (e.shiftKey ? ipc.redo() : ipc.undo()));
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected, run, deleteSelected]);
+  }, [selected, edit, deleteSelected]);
 
   const root = doc?.root ?? 0;
   // Bounds of a single selection in a given scene. The fields read the effective scene, which holds
@@ -419,7 +440,7 @@ export function App() {
 
   const setCutLineType = (value: CutLineTypeJson) => {
     if (selected.length === 0) return;
-    run(() => ipc.setCutLineType({ ids: selected, value }));
+    edit(() => ipc.setCutLineType({ ids: selected, value }));
   };
 
   // The selection's own assignment, and what it resolves to. Both, because `Inherit` alone
@@ -439,7 +460,7 @@ export function App() {
 
   const setMaterialPreset = (value: ipc.PresetAssignmentJson) => {
     if (selected.length === 0) return;
-    run(() => ipc.setMaterialPreset({ ids: selected, value }));
+    edit(() => ipc.setMaterialPreset({ ids: selected, value }));
   };
 
   // A successful boolean op removes the source nodes and adds a result node — selecting
@@ -448,17 +469,17 @@ export function App() {
   // selection if the shape ever comes back without one).
   const onBooleanOp = useCallback(
     (op: BoolOp) => {
-      run(async () => {
+      edit(async () => {
         const delta = (await ipc.booleanOp({ ids: selected, op })) as NodeOpJson[];
         const added = delta.find((o): o is Extract<NodeOpJson, { Add: unknown }> => "Add" in o);
         setSelected(added ? [added.Add.node.id] : []);
       });
     },
-    [run, selected],
+    [edit, selected],
   );
 
   const onImportFile = (file: File) => {
-    run(async () => {
+    edit(async () => {
       const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
       const [, skipped] = (await ipc.importSvg({ bytes, parent: root })) as [unknown, string[]];
       if (skipped.length > 0) setError(`Imported with ${skipped.length} element(s) skipped: ${skipped.join(", ")}`);
@@ -472,7 +493,7 @@ export function App() {
     });
 
   const onTraceInsert = (svg: string) => {
-    run(async () => {
+    edit(async () => {
       const bytes = Array.from(new TextEncoder().encode(svg));
       const [, skipped] = (await ipc.importSvg({ bytes, parent: root })) as [unknown, string[]];
       if (skipped.length > 0) setError(`Inserted with ${skipped.length} element(s) skipped: ${skipped.join(", ")}`);
@@ -493,7 +514,7 @@ export function App() {
         <TopBar
           machines={machines}
           currentMachineId={doc?.machine?.id ?? null}
-          onSelectMachine={(id) => run(() => ipc.setMachine({ machineId: id }))}
+          onSelectMachine={(id) => edit(() => ipc.setMachine({ machineId: id }))}
           onSave={() =>
             run(async () => {
               const p = await ipc.pickSavePath();
@@ -525,8 +546,8 @@ export function App() {
             })
           }
           canReload={lastPath !== null}
-          onUndo={() => run(() => ipc.undo())}
-          onRedo={() => run(() => ipc.redo())}
+          onUndo={() => edit(() => ipc.undo())}
+          onRedo={() => edit(() => ipc.redo())}
           onImportFile={onImportFile}
           onCut={() => setCutOpen(true)}
           onTrace={onTrace}
@@ -536,8 +557,8 @@ export function App() {
         tool={tool}
         selectionCount={selected.length}
         onSelectTool={setTool}
-        onAddRect={() => run(() => ipc.addPrimitive({ parent: root, kind: { Rect: { w: 20, h: 20 } } }))}
-        onAddEllipse={() => run(() => ipc.addPrimitive({ parent: root, kind: { Ellipse: { rx: 10, ry: 10 } } }))}
+        onAddRect={() => edit(() => ipc.addPrimitive({ parent: root, kind: { Rect: { w: 20, h: 20 } } }))}
+        onAddEllipse={() => edit(() => ipc.addPrimitive({ parent: root, kind: { Ellipse: { rx: 10, ry: 10 } } }))}
         onAddText={() => setTextOpen(true)}
         onBoolean={onBooleanOp}
         onDelete={deleteSelected}
@@ -596,7 +617,7 @@ export function App() {
           docMachineId={doc.machine?.id ?? null}
           status={status}
           refreshDeviceState={refreshDeviceState}
-          onConvertMachine={(machineId) => run(() => ipc.setMachine({ machineId }))}
+          onConvertMachine={(machineId) => edit(() => ipc.setMachine({ machineId }))}
           onError={setError}
           onClose={() => setCutOpen(false)}
         />
@@ -610,7 +631,7 @@ export function App() {
             setTextOpen(false);
             // ponytail: content and size are fixed until #33 grows this dialog into real
             // text editing; the family is the only choice the backend can act on today.
-            run(() => ipc.addText({ parent: root, family, sizeMm: 10, text: "Text" }));
+            edit(() => ipc.addText({ parent: root, family, sizeMm: 10, text: "Text" }));
           }}
           onClose={() => setTextOpen(false)}
         />

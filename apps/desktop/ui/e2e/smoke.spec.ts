@@ -489,6 +489,7 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     __holdSnapshots: () => { holdingSnapshots = true; },
     // Oldest first, one at a time: the race is which document's answer renders last.
     __releaseSnapshot: () => release(heldSnapshots.splice(0, 1)),
+    __releaseLatestSnapshot: () => release(heldSnapshots.splice(-1, 1)),
     __failNextCommit: () => { failNextCommit = true; },
     __failNextSnapshot: () => { failNextSnapshot = true; },
     __holdCommits: () => { holdingCommits = true; },
@@ -4041,6 +4042,44 @@ test("an edit made while Reload loads is held, and dropped once the document is 
   await page.getByTestId("layer-row").first().click();
   await expect(centre).toBeEnabled();
   await expect(page.getByLabel("X", { exact: true })).toBeEnabled();
+});
+
+test("a snapshot answering after a newer one has rendered is dropped", async ({ page }) => {
+  // CodeRabbit on #301: an older snapshot answering last rendered under a newer revision, so the
+  // canvas went back to geometry from before the align that the newer one already showed.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click(); // red
+  const x = page.getByLabel("X", { exact: true });
+  const before = await x.inputValue();
+  await page.evaluate(() => (window as unknown as { __holdSnapshots: () => void }).__holdSnapshots());
+  await page.getByRole("checkbox", { name: "Cut this shape" }).click(); // its snapshot is held
+  await page.getByRole("button", { name: "Align horizontal centres" }).click(); // to the bed; held too
+  await expect.poll(() => commitLog(page).then((l) => l.length)).toBe(1);
+
+  await page.evaluate(() => (window as unknown as { __releaseLatestSnapshot: () => Promise<void> }).__releaseLatestSnapshot());
+  await expect(x).not.toHaveValue(before);
+  const aligned = await x.inputValue();
+  await page.evaluate(() => (window as unknown as { __releaseSnapshot: () => Promise<void> }).__releaseSnapshot());
+  await page.waitForTimeout(300);
+  await expect(x).toHaveValue(aligned);
+});
+
+test("Delete, Undo and the other document commands are refused while a document loads", async ({ page }) => {
+  // CodeRabbit on #301: only transforms waited for a load. A Delete pressed during a Reload named ids
+  // from the document on screen, and the loaded one reuses them.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.evaluate(() => (window as unknown as { __holdLoad: () => void }).__holdLoad());
+  await page.getByTestId("layer-row").first().click(); // red
+  await page.getByRole("button", { name: "Reload" }).click(); // held
+  await page.keyboard.press("Delete");
+  await expect(page.getByText("the document is still loading")).toBeVisible();
+  await page.evaluate(() => (window as unknown as { __releaseLoad: () => Promise<void> }).__releaseLoad());
+
+  await page.waitForTimeout(300);
+  await expect(page.getByTestId("layer-row")).toHaveCount(2);
 });
 
 test("a snapshot asked for before a later load never renders over it or lifts its lock", async ({ page }) => {

@@ -93,6 +93,9 @@ export type CanvasInteraction = {
    *  shows the old document. The panel disables its controls on it, so a click there does not vanish
    *  without a word (silent-failure-hunter and Copilot on #301). */
   editsLocked: boolean;
+  /** The same, read when called: a keypress or click handler runs between renders, and a load
+   *  started since the last one has already locked edits. */
+  editsLockedNow: () => boolean;
   /** The geometry the canvas shows: an unread or in-flight commit's preview, else the committed
    *  scene. Anything that computes a transform from current positions must read this one. */
   effectiveScene: Scene;
@@ -170,6 +173,9 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // new one may reuse (Copilot on #301); `stale()` holds until then, even if that refresh failed.
   const loadedAtRev = useRef<number | null>(null);
   const stale = () => loadedAtRev.current !== null && latest.current.sceneRev <= loadedAtRev.current;
+  // Stable, since it reads only refs: App's key handler depends on it and would otherwise re-bind on
+  // every render, which a pointer move causes.
+  const editsLockedNow = useCallback(() => replacing.current || stale(), []);
   // Property edits made while a commit is on the wire, in the order they were made.
   const queued = useRef(new Map<string, { make: (s: Scene, now: SendTime) => Move[]; at: number }>());
   const sendTime = (): SendTime => ({ expand: latest.current.expand, artboard: latest.current.artboard });
@@ -622,6 +628,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     requestFit,
     repaint,
     editsLocked: replacing.current || stale(),
+    editsLockedNow,
     effectiveScene: gestureScene(pending.current, scene, sceneRev),
     transformWith,
     transformEach,
