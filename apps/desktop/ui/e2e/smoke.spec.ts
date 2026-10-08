@@ -11,7 +11,7 @@ import ipcInventory from "../../ipc-inventory.json" with { type: "json" };
 // can't close over anything outside itself) and mirrors the JSON shape produced by
 // crates/document's Document::snapshot_json() — see App.tsx's DocSnapshot/buildScene,
 // which is what actually parses this on the JS side.
-function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview?: boolean; dropTraceControl?: string; seedBusyHost?: boolean; seedRemoteConnected?: boolean; slowList?: boolean; failList?: boolean; noFonts?: boolean; seedMachine?: boolean; seedUserPreset?: boolean; seedEmptyPresetAssignment?: boolean; seedGroup?: boolean; seedAlignExtras?: boolean }) {
+function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview?: boolean; dropTraceControl?: string; seedBusyHost?: boolean; seedRemoteConnected?: boolean; slowList?: boolean; failList?: boolean; noFonts?: boolean; seedMachine?: boolean; seedUserPreset?: boolean; seedEmptyPresetAssignment?: boolean; seedGroup?: boolean; seedAlignExtras?: boolean; seedCollapsedGroup?: boolean }) {
   type Style = { stroke: number | null; fill: number | null };
   type PresetAssignment = { state: "inherit" } | { state: "unassigned" } | { state: "preset"; id: string };
   type Node = { id: number; kind: unknown; transform: number[]; style: Style; children: number[]; cut_line_type: "Cut" | "NoCut"; material_preset: PresetAssignment };
@@ -104,6 +104,16 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     doc.nodes[rightId] = rect(rightId, 70, 40);
     doc.nodes[emptyId] = { id: emptyId, kind: "Group", transform: [1, 0, 0, 1, 0, 0], style: { stroke: null, fill: null }, children: [], cut_line_type: "Cut", material_preset: { state: "inherit" } };
     doc.nodes[doc.root].children.push(groupId, emptyId);
+  }
+
+  // A Group scaled to nothing, holding one rect: a move beneath it cannot be put into its space,
+  // which is the geometry refusal `transform_nodes` makes after earlier entries already succeeded.
+  if (opts?.seedCollapsedGroup) {
+    const groupId = nextId++;
+    const childId = nextId++;
+    doc.nodes[groupId] = { id: groupId, kind: "Group", transform: [0, 0, 0, 0, 0, 0], style: { stroke: null, fill: null }, children: [childId], cut_line_type: "Cut", material_preset: { state: "inherit" } };
+    doc.nodes[childId] = { id: childId, kind: { Shape: { Rect: { w: 10, h: 10 } } }, transform: [1, 0, 0, 1, 0, 0], style: { stroke: 0xff0000ff, fill: null }, children: [], cut_line_type: "Cut", material_preset: { state: "inherit" } };
+    doc.nodes[doc.root].children.push(groupId);
   }
 
   const unimplemented = (cmd: string): never => {
@@ -458,12 +468,19 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     ];
     const inv = (p: number[]) => {
       const det = p[0] * p[3] - p[1] * p[2];
+      // As Rust's `pw.inverse()` refusing: the whole batch goes, not just this entry.
+      if (Math.abs(det) < 1e-12) throw new Error("something in the selection sits under a transform that cannot be reversed");
       const [ia, ib, ic, id] = [p[3] / det, -p[1] / det, -p[2] / det, p[0] / det];
       return [ia, ib, ic, id, -(ia * p[4] + ic * p[5]), -(ib * p[4] + id * p[5])];
     };
+    // Staged, then published only if every entry succeeds: Rust works on a scratch document and
+    // discards it on any refusal, so a later entry's failure must leave the earlier ones unwritten
+    // (Copilot on #301). Later entries read the staged transforms, as Rust's read the scratch.
+    const staged = new Map<number, number[]>();
+    const transformOf = (id: number) => staged.get(id) ?? doc.nodes[id].transform;
     const parentOf = (id: number) => Object.values(doc.nodes).find((n) => n.children.includes(id))?.id;
     const worldOf = (id: number | undefined): number[] =>
-      id === undefined ? [1, 0, 0, 1, 0, 0] : cmp(doc.nodes[id].transform, worldOf(parentOf(id)));
+      id === undefined ? [1, 0, 0, 1, 0, 0] : cmp(transformOf(id), worldOf(parentOf(id)));
     const selectedIds = new Set(moves.flatMap((mv) => mv.ids));
     const hasSelectedAncestor = (id: number) => {
       for (let p = parentOf(id); p !== undefined; p = parentOf(p)) if (selectedIds.has(p)) return true;
@@ -474,9 +491,10 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
         const node = doc.nodes[id];
         if (!node || hasSelectedAncestor(id)) continue;
         const pw = worldOf(parentOf(id));
-        node.transform = cmp(cmp(cmp(node.transform, pw), m), inv(pw));
+        staged.set(id, cmp(cmp(cmp(transformOf(id), pw), m), inv(pw)));
       }
     }
+    for (const [id, t] of staged) doc.nodes[id].transform = t;
     return {};
   }
 
@@ -3850,4 +3868,21 @@ test("the align row follows the preview while its commit is on the wire", async 
   await expect(horizontal).toBeDisabled();
   await expect(horizontal).toHaveAttribute("title", /spans the selection on this axis/);
   await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+});
+
+test("the fake refuses a whole batch when a later entry's geometry cannot be reversed", async ({ page }) => {
+  // Copilot on #301: the first entry is fine and the second sits under a Group scaled to nothing.
+  // Rust refuses the batch and keeps neither; the fake must too, or a test can pass on a half-commit.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedCollapsedGroup: true });
+  await page.goto("/");
+  const refused = await page.evaluate(() =>
+    (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> } })
+      .__TAURI_INTERNALS__.invoke("commit_transforms", { moves: [
+        { ids: [2], m: [1, 0, 0, 1, 5, 0] },
+        { ids: [5], m: [1, 0, 0, 1, 1, 0] },
+      ] }).then(() => false, () => true),
+  );
+  expect(refused).toBe(true);
+  expect(await nodeTransform(page, 2)).toEqual([1, 0, 0, 1, 0, 0]);
+  expect(await nodeTransform(page, 5)).toEqual([1, 0, 0, 1, 0, 0]);
 });

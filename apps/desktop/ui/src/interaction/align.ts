@@ -99,13 +99,14 @@ function anchors(units: Unit[], axis: Axis): Anchors {
     if (room(frame, inner, axis) < -EPS) return { kind: "blocked", reason: "tight" };
     return { kind: "frame", frame, inner };
   }
-  // Between two ends, gaps may be negative and the pieces overlap evenly, but only while each piece
-  // still starts after the one before it: a piece shorter than the overlap is passed by the next,
-  // the neighbours' gaps stop being equal, and the next click picks a different first anchor, so
-  // the layout drifts with every click (Copilot on #301).
+  // Between two ends, gaps may be negative and the pieces overlap evenly, but only while every
+  // piece, the far end included, is longer than the overlap. Then the landed starts and ends both
+  // strictly increase, so the next click finds the same first unit, far end and order, and moves
+  // nothing. A piece no longer than the overlap is passed by the next or left level with it, and the
+  // tie or reversal hands the next click a different anchor, so the layout drifts with every click
+  // (Copilot on #301).
   const gap = endsGap(order, li, axis);
-  const placed = order.filter((_, i) => i !== li);
-  if (placed.some((u) => size(u.bounds, axis) + gap < -EPS)) return { kind: "blocked", reason: "crowded" };
+  if (order.some((u) => size(u.bounds, axis) + gap <= EPS)) return { kind: "blocked", reason: "crowded" };
   return { kind: "ends", order, li };
 }
 

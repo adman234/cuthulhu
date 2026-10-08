@@ -198,6 +198,33 @@ describe("distributeBlock", () => {
     expect(landed[0].x).toBe(0); // the first anchor stayed first
   });
 
+  it("blocks overlap that leaves two pieces starting on the same edge", () => {
+    // Copilot on #301: in document order B 5..25, A 0..10, C 10..30. The gap is -10, so B lands on
+    // 0, level with A; the tie then goes to B by document order and the next click moves A.
+    const units = [unit(110, 5, 0, 20, 1), unit(111, 0, 0, 10, 1), unit(112, 10, 0, 20, 1)];
+    expect(distributeBlock(units, "x")).toBe("crowded");
+  });
+
+  it("blocks overlap that would carry a middle piece past the far end", () => {
+    // A 0..10, B 1..30, C 25..32 (the far end, 7 long): the gap is -7, as long as C, so B would end
+    // level with C; any deeper and it would pass C and become the far end on the next click.
+    const units = [unit(120, 0, 0, 10, 1), unit(121, 1, 0, 29, 1), unit(122, 25, 0, 7, 1)];
+    expect(distributeBlock(units, "x")).toBe("crowded");
+  });
+
+  it("lands every allowed layout so that a second click moves nothing", () => {
+    const land = (us: Unit[]) => {
+      const by = new Map(distributeMoves(us, "x").map((m) => [m.ids[0], m.m[4]]));
+      return us.map((u) => ({ ...u, bounds: { ...u.bounds, x: u.bounds.x + (by.get(u.ids[0]) ?? 0) } }));
+    };
+    const layouts = [
+      [unit(1, 0, 0, 10, 1), unit(4, 2, 0, 30, 1), unit(5, 15, 0, 10, 1)], // overlapping
+      [unit(130, 0, 0, 1, 1), unit(131, 10, 0, 90, 1), unit(132, 11, 0, 1, 1)], // inside the far end
+      [A, B, C],
+    ];
+    for (const us of layouts) expect(distributeMoves(land(us), "x")).toEqual([]);
+  });
+
   it("blocks two units with exactly the same span as stacked", () => {
     expect(distributeBlock([unit(60, 0, 0, 100, 1), unit(61, 0, 0, 100, 1), unit(62, 40, 0, 10, 1)], "x")).toBe("stacked");
   });

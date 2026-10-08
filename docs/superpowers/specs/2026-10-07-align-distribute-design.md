@@ -45,8 +45,9 @@ From `main` at `5dfde3b`:
   gate 1: taking the far end from the unit that starts last threw small pieces past each other when
   a wide one started first.) If the units together are wider than the span, the gaps come out
   negative, so they overlap evenly; that is still the arithmetic answer, and no special case hides
-  it, as long as every piece still starts after the one before it. When a piece is shorter than
-  the overlap it would be passed by the next one, the neighbouring gaps stop being equal, and each
+  it, as long as every piece, the far end included, is longer than the overlap, so the landed
+  starts and ends keep strictly increasing. When a piece is no longer than the overlap it would
+  be passed by the next one or left level with it, the neighbouring gaps stop being equal, and each
   further click would pick a different first piece, so distribute is disabled with the reason
   instead (Copilot on #301).
 - **A unit that spans all the others is a frame.** Selecting a whole design selects its weed
