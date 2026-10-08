@@ -183,6 +183,10 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       // Checked before anything is recorded (all or nothing), and answered in turn like every
       // other outcome: the real backend serialises commands, so a refusal never overtakes a held
       // commit ahead of it (CodeRabbit on #301).
+      // An empty batch or entry is EmptySelection in transform_each, refused whole (Copilot on #301).
+      if (moves.length === 0 || moves.some((mv) => mv.ids.length === 0)) {
+        return answer(() => { throw new Error("the selection has nothing this command can act on"); });
+      }
       if (moves.some((mv) => mv.ids.some((id) => !doc.nodes[id]))) {
         return answer(() => { throw new Error("the node or machine this command names is not there"); });
       }
@@ -3905,4 +3909,18 @@ test("the fake accepts a batch under a tiny but invertible parent, as Rust does"
   expect((await nodeTransform(page, 2))[4]).toBeCloseTo(5, 6);
   // A 1 mm world move beneath a 1e-7 scale is 1e7 in the rect's own space (CodeRabbit on #301).
   expect((await nodeTransform(page, 5))[4] / 1e7).toBeCloseTo(1, 6);
+});
+
+test("the fake refuses an empty batch, or a batch with an empty entry, as transform_each does", async ({ page }) => {
+  // Copilot on #301: Rust answers EmptySelection for both and keeps nothing; the fake applied the
+  // valid first move and recorded the batch.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const send = (moves: unknown[]) => page.evaluate((mv) =>
+    (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> } })
+      .__TAURI_INTERNALS__.invoke("commit_transforms", { moves: mv }).then(() => false, () => true), moves);
+  expect(await send([{ ids: [2], m: [1, 0, 0, 1, 5, 0] }, { ids: [], m: [1, 0, 0, 1, 1, 0] }])).toBe(true);
+  expect(await send([])).toBe(true);
+  expect(await nodeTransform(page, 2)).toEqual([1, 0, 0, 1, 0, 0]);
+  expect(await batchLog(page)).toEqual([]);
 });
