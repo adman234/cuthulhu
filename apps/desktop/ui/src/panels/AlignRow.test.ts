@@ -7,7 +7,7 @@ describe("distributeTitle", () => {
     const label = "Distribute horizontal spacing";
     expect(distributeTitle(label, null)).toBe(label);
     expect(distributeTitle(label, "few")).toBe(`${label}: select three or more pieces`);
-    expect(distributeTitle(label, "stacked")).toBe(`${label}: selected pieces lie on top of each other`);
+    expect(distributeTitle(label, "stacked")).toBe(`${label}: more than one piece spans the selection on this axis`);
     expect(distributeTitle(label, "tight")).toBe(`${label}: the pieces do not fit inside the one around them`);
   });
 });

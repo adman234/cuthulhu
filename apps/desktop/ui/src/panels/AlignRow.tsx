@@ -61,7 +61,9 @@ function DistributeIcon({ vertical }: { vertical: boolean }) {
 
 const BLOCKED: Record<DistributeBlock, string> = {
   few: "select three or more pieces",
-  stacked: "selected pieces lie on top of each other",
+  // Per axis: pieces in a column with one shared width are "stacked" for horizontal distribute
+  // without overlapping, so the reason names the axis, not an overlap (Copilot on #301).
+  stacked: "more than one piece spans the selection on this axis",
   tight: "the pieces do not fit inside the one around them",
 };
 
