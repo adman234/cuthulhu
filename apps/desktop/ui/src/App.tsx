@@ -3,11 +3,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction 
 import { listen } from "@tauri-apps/api/event";
 import * as ipc from "./ipc";
 import { Canvas2DRenderer } from "./render/Canvas2DRenderer";
-import type { Affine6, Bounds, Scene, ShapeGeom } from "./render/hittest";
+import type { Affine6, Scene, ShapeGeom } from "./render/hittest";
 import { pathBounds } from "./render/pathdata";
 import { IDENTITY, compose, transformBounds } from "./render/affine";
 import { outermost, shapesUnder, toggleId } from "./interaction/marquee";
-import { alignMoves, distributeBlock, distributeMoves, type AlignMode, type Axis, type Unit } from "./interaction/align";
+import { AXIS, alignMoves, distributeBlock, distributeMoves, unionBounds, type AlignMode, type Axis, type Unit } from "./interaction/align";
 import type { Matrix } from "./interaction/transform";
 import { useCanvasInteraction, type CommitOutcome } from "./interaction/useCanvasInteraction";
 import { viewMatrix, zoomPercent } from "./interaction/viewport";
@@ -107,17 +107,13 @@ function unitsOf(s: Scene, ids: number[], expand: (ids: number[]) => number[]): 
   if (ids.length === 0) return [];
   const at = new Map(s.nodes.map((n, i) => [n.id, i]));
   const found = ids.flatMap((id) => {
-    const shapes = expand([id]).flatMap((sid) => {
+    const idx = expand([id]).flatMap((sid) => {
       const i = at.get(sid);
-      return i === undefined ? [] : [s.nodes[i]];
+      return i === undefined ? [] : [i];
     });
-    if (shapes.length === 0) return [];
-    const x0 = Math.min(...shapes.map((n) => n.bounds.x));
-    const y0 = Math.min(...shapes.map((n) => n.bounds.y));
-    const x1 = Math.max(...shapes.map((n) => n.bounds.x + n.bounds.w));
-    const y1 = Math.max(...shapes.map((n) => n.bounds.y + n.bounds.h));
-    const first = Math.min(...shapes.map((n) => at.get(n.id) ?? 0));
-    return [{ first, unit: { ids: [id], bounds: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } } }];
+    if (idx.length === 0) return [];
+    const first = idx.reduce((a, b) => Math.min(a, b));
+    return [{ first, unit: { ids: [id], bounds: unionBounds(idx.map((i) => s.nodes[i].bounds)) } }];
   });
   return found.sort((a, b) => a.first - b.first).map((f) => f.unit);
 }
@@ -271,7 +267,9 @@ export function App() {
     // otherwise vanish the moment the edit went out, before anyone saw it (silent-failure-hunter,
     // from #298).
     commit: async (moves, requestedAt): Promise<CommitOutcome> => {
-      if (errorAt.current <= requestedAt) setError(null);
+      // Strictly older: WebKit's clock is coarse, and a refusal stamped in the same tick as a click
+      // queued behind its commit was raised after that click, not before.
+      if (errorAt.current < requestedAt) setError(null);
       try {
         await ipc.commitTransforms({ moves });
       } catch (e) {
@@ -339,7 +337,7 @@ export function App() {
     selected.length === 1 ? (s.nodes.find((n) => n.id === selected[0])?.bounds ?? null) : null;
   const selectedBounds = boundsIn(interaction.effectiveScene);
 
-  // Through the hook rather than straight to commitTransform: a field edit then waits behind a
+  // Through the hook rather than straight to the backend: a field edit then waits behind a
   // commit on the wire and builds its matrix from the geometry as it stands when it is sent, not
   // from a position the shape has already left (Copilot on #298).
   const commitAxis = (axis: "x" | "y", v: number) =>
@@ -368,13 +366,6 @@ export function App() {
   // Memoised: a pointer move re-renders App for the cursor readout, and rebuilding these scanned
   // every node in the document per move (CodeRabbit on #301).
   const units = useMemo(() => (doc ? outermost(doc.nodes, selected) : []), [doc, selected]);
-  const artboardNow = useRef<Bounds | null>(null);
-  artboardNow.current = doc?.artboard ?? null;
-  // A queued click keeps the ids it was made on but reads the tree as it stands when it is sent:
-  // the commit ahead of it may have changed the Group's shapes (Copilot on #301). The hook drains
-  // after the render that holds that commit's snapshot, so this ref is current by then.
-  const expandNow = useRef(expand);
-  expandNow.current = expand;
   // Keyed like the fields: a newer click of the same kind on the same axis and selection replaces a
   // queued one, but "Align top" does not replace a queued "Align left", and a distribute does not
   // replace an align, since each is a different request (code-reviewer).
@@ -383,17 +374,23 @@ export function App() {
   // replacing it (Copilot on #301).
   const alignKey = (kind: "align" | "distribute", axis: Axis) =>
     `${kind}:${axis}:${[...units].sort((p, q) => p - q).join(",")}`;
+  // A queued click keeps the ids it was made on but reads the tree and the bed as they stand when it
+  // is sent (`SendTime`): the commit ahead of it may have changed a Group's shapes, and a machine
+  // switch in between centred a piece on the old bed (Copilot on #301).
   const align = (mode: AlignMode) => {
-    const axis: Axis = mode === "left" || mode === "hcenter" || mode === "right" ? "x" : "y";
-    // The artboard is read when the click is sent, like the bounds: a queued click kept this
-    // render's bed, so a machine switch in between centred a piece on the old one (Copilot on #301).
     const ids = units;
-    interaction.transformEach(alignKey("align", axis), (s) =>
-      alignMoves(unitsOf(s, ids, expandNow.current), mode, artboardNow.current));
+    // What the click meant, kept for when it is sent: lining the pieces up with each other, or one
+    // piece with the bed. A unit deleted while the click waited would otherwise turn the first into
+    // the second, and send the piece left over to the edge of the mat.
+    const toEachOther = unitCount >= 2;
+    interaction.transformEach(alignKey("align", AXIS[mode]), (s, now) => {
+      const sent = unitsOf(s, ids, now.expand);
+      return sent.length >= 2 === toEachOther ? alignMoves(sent, mode, now.artboard) : [];
+    });
   };
   const distribute = (axis: Axis) => {
     const ids = units;
-    interaction.transformEach(alignKey("distribute", axis), (s) => distributeMoves(unitsOf(s, ids, expandNow.current), axis));
+    interaction.transformEach(alignKey("distribute", axis), (s, now) => distributeMoves(unitsOf(s, ids, now.expand), axis));
   };
   // Counted from the scene the moves are computed from, not from the selection: an empty Group
   // is a selected id with nothing to line up, and counting it enabled a distribute that then had
@@ -497,11 +494,10 @@ export function App() {
             run(async () => {
               const p = await ipc.pickOpenPath();
               if (p) {
-                // Before the load, not after: the backend has replaced the document by the time
-                // loadProject resolves, and a commit settling in between would drain into it
-                // (CodeRabbit on #301).
-                interaction.forgetQueued();
-                await ipc.loadProject({ path: p });
+                // Held for the whole load, not cleared before it: the backend has replaced the
+                // document by the time loadProject resolves, and a commit settling in between would
+                // drain into it (CodeRabbit on #301), as would an edit made while it loads.
+                await interaction.replaceDocument(() => ipc.loadProject({ path: p }));
                 setLastPath(p);
                 setSelected([]); // loaded doc may not contain the old ids
                 interaction.requestFit();
@@ -510,8 +506,7 @@ export function App() {
           }
           onReload={() =>
             run(async () => {
-              interaction.forgetQueued();
-              await ipc.loadProject({ path: lastPath! });
+              await interaction.replaceDocument(() => ipc.loadProject({ path: lastPath! }));
               setSelected([]);
               interaction.requestFit();
             })

@@ -10,5 +10,6 @@ describe("distributeTitle", () => {
     expect(distributeTitle(label, "stacked")).toBe(`${label}: more than one piece spans the selection on this axis`);
     expect(distributeTitle(label, "tight")).toBe(`${label}: the pieces do not fit inside the one around them`);
     expect(distributeTitle(label, "crowded")).toBe(`${label}: the pieces overlap too much to space out evenly`);
+    expect(distributeTitle(label, "nested")).toBe(`${label}: a piece inside the one around them spans the rest too`);
   });
 });

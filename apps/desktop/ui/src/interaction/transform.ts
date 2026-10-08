@@ -7,9 +7,7 @@ export type Matrix = Affine6; // a b c d e f
 /** Previews `m` on the selected nodes with no round trip. Any affine, not only a translation:
  *  handles scale and rotate through here, and the preview has to be the matrix the commit sends. */
 export function applyOptimistic(scene: Scene, ids: number[], m: Matrix): Scene {
-  // A Set, because this runs every drag frame and a marquee can select thousands.
-  const moving = new Set(ids);
-  return { nodes: scene.nodes.map((n) => (moving.has(n.id) ? transformNode(n, m) : n)) };
+  return applyMoves(scene, [{ shapes: ids, m }]);
 }
 
 /** Several previews at once, in one pass over the scene: one matrix per entry's shapes. Folding
@@ -17,6 +15,7 @@ export function applyOptimistic(scene: Scene, ids: number[], m: Matrix): Scene {
  *  thousand separate pieces blocked the UI before anything was sent (Copilot on #301). The
  *  entries must not share a shape; align's units are disjoint, as `outermost` keeps them. */
 export function applyMoves(scene: Scene, entries: { shapes: number[]; m: Matrix }[]): Scene {
+  // A Map, because this runs every drag frame and a marquee can select thousands.
   const by = new Map<number, Matrix>();
   for (const { shapes, m } of entries) for (const id of shapes) by.set(id, m);
   return {

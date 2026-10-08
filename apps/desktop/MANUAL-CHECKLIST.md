@@ -147,4 +147,4 @@ real network can confirm the swap end to end.
 - [ ] Letters distributed with their weed border selected sit inside it with even margins, and the
       border cuts where it was.
 - [ ] One ⌘Z (Ctrl+Z) after an align puts every moved piece back at once.
-- [ ] The eight icons read as what they do at the panel's size, in light and dark themes.
+- [ ] The eight icons read as what they do at the panel's size, in the dark theme (light is deferred).

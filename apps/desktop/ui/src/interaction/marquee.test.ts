@@ -75,4 +75,9 @@ describe("outermost", () => {
   it("keeps siblings and unrelated ids", () => {
     expect(outermost(nodes, [3, 4, 6])).toEqual([3, 4, 6]);
   });
+
+  it("lists an id once even when the selection names it twice", () => {
+    // transform_each applies an id listed in two entries twice; the preview would show it once.
+    expect(outermost(nodes, [6, 3, 6])).toEqual([6, 3]);
+  });
 });

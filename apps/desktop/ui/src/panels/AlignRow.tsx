@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import type { CSSProperties } from "react";
-import type { AlignMode, Axis, DistributeBlock } from "../interaction/align";
+import { AT, AXIS, type AlignMode, type Axis, type DistributeBlock } from "../interaction/align";
 
 type Props = {
   /** Selected ids that move as a piece; see `outermost`. */
@@ -66,6 +66,7 @@ const BLOCKED: Record<DistributeBlock, string> = {
   stacked: "more than one piece spans the selection on this axis",
   tight: "the pieces do not fit inside the one around them",
   crowded: "the pieces overlap too much to space out evenly",
+  nested: "a piece inside the one around them spans the rest too",
 };
 
 /** Exported for its own test: the reason is the only thing a disabled button can tell. */
@@ -73,26 +74,30 @@ export function distributeTitle(label: string, block: DistributeBlock | null): s
   return block ? `${label}: ${BLOCKED[block]}` : label;
 }
 
-const AT: Record<AlignMode, number> = { left: 0, hcenter: 0.5, right: 1, top: 0, vmiddle: 0.5, bottom: 1 };
-
 export function AlignRow({ unitCount, distributeBlocked, onAlign, onDistribute }: Props) {
   // One unit aligns to the artboard, so align needs one. Distribute's reasons come from
   // `distributeBlock`, per axis, and the tooltip names the one that disabled it.
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-      {ALIGNS.map(({ mode, label }) => (
-        <button key={mode} aria-label={label} title={label} disabled={unitCount === 0} style={btn}
-                onClick={() => onAlign(mode)}>
-          <AlignIcon at={AT[mode]} vertical={mode === "top" || mode === "vmiddle" || mode === "bottom"} />
-        </button>
-      ))}
-      {DISTRIBUTES.map(({ axis, label }) => (
-        <button key={axis} aria-label={label} disabled={distributeBlocked[axis] !== null} style={btn}
-                title={distributeTitle(label, distributeBlocked[axis])}
-                onClick={() => onDistribute(axis)}>
-          <DistributeIcon vertical={axis === "y"} />
-        </button>
-      ))}
+    // Two rows, as the spec draws them: run together, the rotated distribute icon read as one more
+    // align beside "Align bottom edges".
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+        {ALIGNS.map(({ mode, label }) => (
+          <button key={mode} aria-label={label} title={label} disabled={unitCount === 0} style={btn}
+                  onClick={() => onAlign(mode)}>
+            <AlignIcon at={AT[mode]} vertical={AXIS[mode] === "y"} />
+          </button>
+        ))}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+        {DISTRIBUTES.map(({ axis, label }) => (
+          <button key={axis} aria-label={label} disabled={distributeBlocked[axis] !== null} style={btn}
+                  title={distributeTitle(label, distributeBlocked[axis])}
+                  onClick={() => onDistribute(axis)}>
+            <DistributeIcon vertical={axis === "y"} />
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

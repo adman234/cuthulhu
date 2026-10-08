@@ -196,6 +196,14 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       if (moves.some((mv) => mv.ids.some((id) => !doc.nodes[id]))) {
         return answer(() => { throw new Error("the node or machine this command names is not there"); });
       }
+      // So is a transform that cannot be reversed, against the document as it stands, as the missing
+      // node is: a batch Rust refuses whole must not reach the log and take a batch number. It is
+      // staged again when answered, since a held commit ahead of it can still change the document.
+      try {
+        stageTransforms(moves);
+      } catch (e) {
+        return answer(() => { throw e; });
+      }
       const hooks = window as unknown as { __commitTransforms?: { ids: number[]; m: number[]; batch?: number }[]; __batches?: number };
       hooks.__commitTransforms ??= [];
       hooks.__batches = (hooks.__batches ?? 0) + 1;
@@ -263,8 +271,13 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       return null;
     },
     load_project: () => {
-      if (saved) doc = JSON.parse(JSON.stringify(saved));
-      return JSON.stringify(doc);
+      const load = () => {
+        if (saved) doc = JSON.parse(JSON.stringify(saved));
+        return JSON.stringify(doc);
+      };
+      // A real load takes as long as the project is big; held, a test can act while it runs.
+      if (holdingLoads) return new Promise((resolve) => heldLoads.push(() => resolve(load())));
+      return load();
     },
     set_machine: (a) => {
       const m = machines.find((p) => p.id === a.machineId);
@@ -458,24 +471,33 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
   const heldCommits: (() => void)[] = [];
   let failNextCommit = false;
   let inFlightCommits = 0;
+  let holdingLoads = false;
+  const heldLoads: (() => void)[] = [];
   let failNextSnapshot = false;
   Object.assign(window, {
     __failNextCommit: () => { failNextCommit = true; },
-    __releaseCommitsNoWait: () => { holdingCommits = false; heldCommits.splice(0).forEach((f) => f()); },
     __failNextSnapshot: () => { failNextSnapshot = true; },
     __holdCommits: () => { holdingCommits = true; },
+    __holdLoad: () => { holdingLoads = true; },
+    __releaseLoad: () => { holdingLoads = false; return release(heldLoads); },
     __releaseCommits: () => { holdingCommits = false; return release(heldCommits); },
     __armHold: () => { holding = true; },
     __releasePlans: () => release(heldPlans),
     __releaseTravel: () => release(heldTravel),
   });
 
-  // Mirrors crates/document/src/commands.rs transform_nodes (L53-77) and transform_each: `m` is
-  // world-space, so each node's local transform becomes local · parentWorld · m · parentWorld⁻¹,
-  // and a node whose ancestor any entry selects is skipped, since the ancestor already carries it.
-  // Composing `m` straight onto a nested node's local transform lands it where the real backend
-  // never would (Copilot on #298).
+  // Mirrors crates/document/src/commands.rs transform_nodes_in, which transform_nodes and
+  // transform_each share: `m` is world-space, so each node's local transform becomes
+  // local · parentWorld · m · parentWorld⁻¹, and a node whose ancestor any entry selects is skipped,
+  // since the ancestor already carries it. Composing `m` straight onto a nested node's local
+  // transform lands it where the real backend never would (Copilot on #298).
   function applyTransforms(moves: { ids: number[]; m: number[] }[]) {
+    for (const [id, t] of stageTransforms(moves)) doc.nodes[id].transform = t;
+    return {};
+  }
+
+  // Every entry's result, or a throw for the whole batch. Nothing is written here.
+  function stageTransforms(moves: { ids: number[]; m: number[] }[]) {
     const cmp = (p: number[], q: number[]) => [
       q[0] * p[0] + q[2] * p[1], q[1] * p[0] + q[3] * p[1],
       q[0] * p[2] + q[2] * p[3], q[1] * p[2] + q[3] * p[3],
@@ -489,9 +511,10 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       const [ia, ib, ic, id] = [p[3] / det, -p[1] / det, -p[2] / det, p[0] / det];
       return [ia, ib, ic, id, -(ia * p[4] + ic * p[5]), -(ib * p[4] + id * p[5])];
     };
-    // Staged, then published only if every entry succeeds: Rust works on a scratch document and
-    // discards it on any refusal, so a later entry's failure must leave the earlier ones unwritten
-    // (Copilot on #301). Later entries read the staged transforms, as Rust's read the scratch.
+    // Staged, then published only if every entry succeeds: Rust collects every entry's update and
+    // commits none on any refusal, so a later entry's failure must leave the earlier ones unwritten
+    // (Copilot on #301). Later entries read the staged transforms, as Rust's read the transforms
+    // the earlier ones wrote.
     const staged = new Map<number, number[]>();
     const transformOf = (id: number) => staged.get(id) ?? doc.nodes[id].transform;
     const parentOf = (id: number) => Object.values(doc.nodes).find((n) => n.children.includes(id))?.id;
@@ -510,8 +533,7 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
         staged.set(id, cmp(cmp(cmp(transformOf(id), pw), m), inv(pw)));
       }
     }
-    for (const [id, t] of staged) doc.nodes[id].transform = t;
-    return {};
+    return staged;
   }
 
   // Answered on a later task, as a real IPC round trip is: resolving in the same microtask burst
@@ -2305,8 +2327,9 @@ test("a doc edited after planning refuses the cut until replan", async ({ page }
   await page.getByRole("button", { name: "Connect", exact: true }).first().click();
   await expect(page.getByTestId("cut-pass-row")).toHaveCount(2);
 
-  // Reaches past the UI on purpose: the canvas drag that issues this command is behind
-  // the open dialog, and the backend contract under test is the same either way.
+  // Reaches past the UI on purpose: the canvas drag that would edit the document (through
+  // commit_transforms) is behind the open dialog, and the backend contract under test, geometry
+  // that changes with no node added or removed, is the same either way.
   await page.evaluate(() =>
     (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> } }).__TAURI_INTERNALS__.invoke(
       "commit_transform",
@@ -3064,7 +3087,7 @@ test("a drag pressed while the previous commit is in flight does not commit", as
   await expect.poll(commits).toBe(2);
 });
 
-type CommitRecord = { ids: number[]; m: number[] };
+type CommitRecord = { ids: number[]; m: number[]; batch?: number };
 
 async function commitLog(page: Page): Promise<CommitRecord[]> {
   return page.evaluate(() => (window as unknown as { __commitTransforms?: CommitRecord[] }).__commitTransforms ?? []);
@@ -3356,9 +3379,10 @@ test("scaling a shape inside a moved Group keeps it where the real backend would
   await expect.poll(async () => nodeTransform(page, 3)).toEqual([2, 0, 0, 1.5, 0, 0].map((x) => expect.closeTo(x, 1)));
 });
 
-// Queued edits drain one per settled commit, and the snapshot of one can render while the next is
-// on the wire. That intermediate snapshot must not retire the in-flight preview, or the edit after
-// it is computed from geometry the backend has already left (Copilot on #298).
+// Queued edits drain one per settled commit, each built from the geometry the one before it left:
+// W scales about where X put the shape, not where the drag did (Copilot on #298). They drain after
+// the snapshot before them has rendered, so this no longer shows a snapshot rendering while a commit
+// is on the wire; the test after it does.
 test("queued X then W behind a move scale about where X put the shape", async ({ page }) => {
   await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
   await page.goto("/");
@@ -3378,6 +3402,26 @@ test("queued X then W behind a move scale about where X put the shape", async ({
     const [a, , , , e] = await nodeTransform(page, 2);
     return [a, e];
   }).toEqual([expect.closeTo(2, 1), expect.closeTo(5, 1)]);
+});
+
+// A snapshot can render while a commit is on the wire, one the backend answered before the commit
+// arrived: a run() command's refresh. It must not retire that commit's preview, or the canvas and
+// fields jump back and the next edit is built from geometry the backend has left (Copilot on #298).
+// The fake runs a held commit on release, so the machine switch's snapshot here is that older one.
+test("a snapshot rendered while a commit is on the wire keeps that commit's preview", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click(); // red, at 0
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await page.getByLabel("X", { exact: true }).fill("20"); // on the wire
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+
+  const before = (await readView(page)).scale;
+  await page.getByLabel("Machine").selectOption("puma"); // its refresh renders a new document now
+  await expect.poll(async () => (await readView(page)).scale).not.toBeCloseTo(before, 6);
+  await expect(page.getByLabel("X", { exact: true })).toHaveValue("20");
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(20, 6);
 });
 
 // Snapping (spec 2026-10-07). With both seeds: the Group's rect at 30..40 mm (id 3) and the red
@@ -3470,12 +3514,6 @@ test("an Alt edge scale snaps the dragged edge and mirrors the other", async ({ 
 // Align and distribute (spec 2026-10-07). With both seeds: the Group (id 2) holds a rect at 30..40
 // mm, and the red (id 4) and green (id 5) rects sit at 0..10 mm. Layer rows run Group, its rect,
 // red, green.
-type BatchRecord = CommitRecord & { batch?: number };
-
-async function batchLog(page: Page): Promise<BatchRecord[]> {
-  return page.evaluate(() => (window as unknown as { __commitTransforms?: BatchRecord[] }).__commitTransforms ?? []);
-}
-
 async function selectRows(page: Page, rows: number[]) {
   const [first, ...rest] = rows;
   await page.getByTestId("layer-row").nth(first).click();
@@ -3488,8 +3526,8 @@ test("align left on two rects and a Group commits one batch that moves only the 
   await selectRows(page, [2, 3, 0]);
   await page.getByRole("button", { name: "Align left edges" }).click();
 
-  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
-  const [{ ids, m, batch }] = await batchLog(page);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  const [{ ids, m, batch }] = await commitLog(page);
   expect(ids).toEqual([2]);
   expect(m).toEqual([1, 0, 0, 1, -30, 0]);
   expect(batch).toBe(1);
@@ -3503,8 +3541,8 @@ test("align on a single rect centres it on the artboard", async ({ page }) => {
   await page.getByRole("button", { name: "Align horizontal centres" }).click();
 
   // The 330 mm bed is centred at 165; the rect's centre is at 5.
-  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
-  const [{ ids, m }] = await batchLog(page);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  const [{ ids, m }] = await commitLog(page);
   expect(ids).toEqual([4]);
   expect(m[4]).toBeCloseTo(160, 6);
   expect(m[5]).toBe(0);
@@ -3518,8 +3556,8 @@ test("distribute equalises the gaps and breaks a tie by document order, not clic
 
   // Span 0..40 holding 30 mm of shapes leaves two 5 mm gaps. Red and green both start at 0, so
   // document order makes red first and green the one that moves, to 15.
-  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
-  const [{ ids, m }] = await batchLog(page);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  const [{ ids, m }] = await commitLog(page);
   expect(ids).toEqual([5]);
   expect(m[4]).toBeCloseTo(15, 6);
 });
@@ -3546,16 +3584,16 @@ test("an align clicked while a drag's commit is on the wire lines up from where 
   const v = await selectRedBesideGroup(page);
   await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
   await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // red to 5..15, parked
-  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
 
   await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] });
   await page.getByRole("button", { name: "Align left edges" }).click();
-  expect((await batchLog(page)).length).toBe(1); // queued behind the drag, not sent
+  expect((await commitLog(page)).length).toBe(1); // queued behind the drag, not sent
   await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
 
   // From the stale scene the Group would go to 0 (−30); from the drag's result it goes to 5.
-  await expect.poll(async () => (await batchLog(page)).length).toBe(2);
-  const { ids, m } = (await batchLog(page))[1];
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  const { ids, m } = (await commitLog(page))[1];
   expect(ids).toEqual([2]);
   expect(m[4]).toBeCloseTo(-25, 6);
 });
@@ -3574,14 +3612,14 @@ test("a Group aligns by the bounds of all its shapes, on both axes", async ({ pa
 
   // The Group's right edge is its second rect's, at 80; its first rect alone would say 60.
   await page.getByRole("button", { name: "Align right edges" }).click();
-  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
-  expect((await batchLog(page))[0]).toMatchObject({ ids: [2], m: [1, 0, 0, 1, 70, 0] });
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  expect((await commitLog(page))[0]).toMatchObject({ ids: [2], m: [1, 0, 0, 1, 70, 0] });
   await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(70, 6);
 
   // Its bottom is 50, again from the second rect.
   await page.getByRole("button", { name: "Align bottom edges" }).click();
-  await expect.poll(async () => (await batchLog(page)).length).toBe(2);
-  expect((await batchLog(page))[1]).toMatchObject({ ids: [2], m: [1, 0, 0, 1, 0, 40] });
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  expect((await commitLog(page))[1]).toMatchObject({ ids: [2], m: [1, 0, 0, 1, 0, 40] });
 });
 
 test("distribute vertical spacing moves the middle unit on y only", async ({ page }) => {
@@ -3590,8 +3628,8 @@ test("distribute vertical spacing moves the middle unit on y only", async ({ pag
   // Red and green at 0..10, the Group at 20..50: span 0..50 holds 50 mm, so the gaps are 0 and
   // green, second in document order, goes to 10.
   await page.getByRole("button", { name: "Distribute vertical spacing" }).click();
-  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
-  expect((await batchLog(page))[0]).toMatchObject({ ids: [3], m: [1, 0, 0, 1, 0, 10] });
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  expect((await commitLog(page))[0]).toMatchObject({ ids: [3], m: [1, 0, 0, 1, 0, 10] });
 });
 
 test("an empty Group is not a unit, so it does not enable distribute", async ({ page }) => {
@@ -3612,8 +3650,8 @@ test("a refused align puts every unit back and the next click starts from there"
 
   // A preview left in place would have both centred already, and this click would send nothing.
   await page.getByRole("button", { name: "Align horizontal centres" }).click();
-  await expect.poll(async () => (await batchLog(page)).length).toBe(2);
-  const log = await batchLog(page);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  const log = await commitLog(page);
   expect(log.map((e) => [e.ids[0], e.m[4], e.batch])).toEqual([[2, -15, 1], [4, 15, 1]]); // document order
 });
 
@@ -3630,7 +3668,7 @@ test("the fake refuses a whole batch that names a missing node", async ({ page }
       ] }).then(() => false, () => true),
   );
   expect(refused).toBe(true);
-  expect(await batchLog(page)).toEqual([]);
+  expect(await commitLog(page)).toEqual([]);
   expect(await nodeTransform(page, 4)).toEqual([1, 0, 0, 1, 0, 0]);
 });
 
@@ -3638,7 +3676,7 @@ test("queued aligns replace each other per axis, not across axes", async ({ page
   const v = await selectRedBesideGroup(page);
   await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
   await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 5 * v.scale); // red to 5..15 × 5..15
-  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
 
   await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] });
   await page.getByRole("button", { name: "Align left edges" }).click();
@@ -3648,8 +3686,8 @@ test("queued aligns replace each other per axis, not across axes", async ({ page
 
   // Top takes red up to the Group's 0; right takes red to the Group's 40. Left (the Group to 5)
   // never runs.
-  await expect.poll(async () => (await batchLog(page)).length).toBe(3);
-  const [, top, right] = await batchLog(page);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(3);
+  const [, top, right] = await commitLog(page);
   expect(top).toMatchObject({ ids: [4], m: [1, 0, 0, 1, 0, expect.closeTo(-5, 6)] });
   expect(right).toMatchObject({ ids: [4], m: [1, 0, 0, 1, expect.closeTo(25, 6), 0] });
   expect(await nodeTransform(page, 2)).toEqual([1, 0, 0, 1, 30, 0]);
@@ -3660,17 +3698,20 @@ test("an align that would move nothing sends nothing and does not hold the next 
   await page.goto("/");
   await selectRows(page, [2, 3]); // red and green, both already at 0
   await page.getByRole("button", { name: "Align left edges" }).click();
+  // Never invoked, not just never logged: the fake refuses an empty batch before it logs anything,
+  // so an empty send would pass the log check below and put a refusal on screen.
+  expect(await page.evaluate(() => (window as unknown as { __maxInFlightCommits?: number }).__maxInFlightCommits)).toBeUndefined();
   await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] });
   await page.getByRole("button", { name: "Align left edges" }).click();
-  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
-  expect((await batchLog(page))[0]).toMatchObject({ ids: [2], batch: 1 });
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  expect((await commitLog(page))[0]).toMatchObject({ ids: [2], batch: 1 });
 });
 
 test("a queued distribute does not replace a queued align on the same axis", async ({ page }) => {
   const v = await selectRedBesideGroup(page);
   await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
   await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // red to 5..15
-  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
 
   await page.getByTestId("layer-row").nth(3).click({ modifiers: ["Shift"] }); // green
   await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] }); // the Group
@@ -3680,8 +3721,8 @@ test("a queued distribute does not replace a queued align on the same axis", asy
 
   // Distribute first: green 0..10 and the Group 30..40 stay, red goes to 15 (+10). Then align left
   // from there: red −15, the Group −30. Align alone would have sent red −5.
-  await expect.poll(async () => (await batchLog(page)).length).toBe(4);
-  const log = await batchLog(page);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(4);
+  const log = await commitLog(page);
   expect(log.slice(1).map((e) => [e.ids[0], Math.round(e.m[4] * 1e6) / 1e6, e.batch])).toEqual([[4, 10, 2], [2, -30, 3], [4, -15, 3]]);
 });
 
@@ -3691,7 +3732,7 @@ test("an align's preview moves every unit while its commit is on the wire", asyn
   await selectRows(page, [0, 2, 3]); // the Group, red, green: the centre of 0..40 is 20
   await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
   await page.getByRole("button", { name: "Align horizontal centres" }).click();
-  await expect.poll(async () => (await batchLog(page)).length).toBe(3);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(3);
 
   // The fields read the effective scene, so they show the preview: red and green both at 15. A
   // preview that applied only the first move (the Group's) would leave them at 0.
@@ -3718,8 +3759,8 @@ test("distribute spaces the pieces inside a border selected with them", async ({
   // 100 mm less 40 mm of pieces leaves 60 over three spaces: green to 20, the Group already at 50.
   await page.getByTestId("layer-row").nth(1).click({ modifiers: ["Shift"] });
   await horizontal.click();
-  await expect.poll(async () => (await batchLog(page)).length).toBe(2); // the W edit, then this
-  expect((await batchLog(page))[1]).toMatchObject({ ids: [3], m: [1, 0, 0, 1, 20, 0] });
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2); // the W edit, then this
+  expect((await commitLog(page))[1]).toMatchObject({ ids: [3], m: [1, 0, 0, 1, 20, 0] });
 });
 
 test("a border too small for its pieces blocks distribute on that axis only, and says why", async ({ page }) => {
@@ -3836,7 +3877,7 @@ test("a newer align replaces a queued one on the same selection in any click ord
   const v = await selectRedBesideGroup(page);
   await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
   await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // red to 5..15, parked
-  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
 
   await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] }); // [red, Group]
   await page.getByRole("button", { name: "Align left edges" }).click();
@@ -3846,8 +3887,8 @@ test("a newer align replaces a queued one on the same selection in any click ord
   await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
 
   // Right alone: red to the Group's 40 (+25). Left first would have moved the Group to 5.
-  await expect.poll(async () => (await batchLog(page)).length).toBe(2);
-  expect((await batchLog(page))[1]).toMatchObject({ ids: [4], m: [1, 0, 0, 1, expect.closeTo(25, 6), 0] });
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  expect((await commitLog(page))[1]).toMatchObject({ ids: [4], m: [1, 0, 0, 1, expect.closeTo(25, 6), 0] });
   expect(await nodeTransform(page, 2)).toEqual([1, 0, 0, 1, 30, 0]);
 });
 
@@ -3857,7 +3898,7 @@ test("a queued align to the artboard uses the bed it lands on, not the one it wa
   const v = await selectRedBesideGroup(page);
   await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
   await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // red to 5..15, parked
-  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
   await page.getByRole("button", { name: "Align horizontal centres" }).click(); // queued
 
   const before = (await readView(page)).scale;
@@ -3866,8 +3907,8 @@ test("a queued align to the artboard uses the bed it lands on, not the one it wa
   await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
 
   // Red's centre is 10; the Puma's is 300. The Cameo's 165 would give 155.
-  await expect.poll(async () => (await batchLog(page)).length).toBe(2);
-  expect((await batchLog(page))[1]).toMatchObject({ ids: [4], m: [1, 0, 0, 1, expect.closeTo(290, 6), 0] });
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  expect((await commitLog(page))[1]).toMatchObject({ ids: [4], m: [1, 0, 0, 1, expect.closeTo(290, 6), 0] });
 });
 
 test("the align row follows the preview while its commit is on the wire", async ({ page }) => {
@@ -3901,6 +3942,8 @@ test("the fake refuses a whole batch when a later entry's geometry cannot be rev
   expect(refused).toBe(true);
   expect(await nodeTransform(page, 2)).toEqual([1, 0, 0, 1, 0, 0]);
   expect(await nodeTransform(page, 5)).toEqual([1, 0, 0, 1, 0, 0]);
+  // Nor logged: a refused batch that took a batch number would shift every later one.
+  expect(await commitLog(page)).toEqual([]);
 });
 
 test("the fake accepts a batch under a tiny but invertible parent, as Rust does", async ({ page }) => {
@@ -3932,7 +3975,7 @@ test("the fake refuses an empty batch, or a batch with an empty entry, as transf
   expect(await send([{ ids: [2], m: [1, 0, 0, 1, 5, 0] }, { ids: [], m: [1, 0, 0, 1, 1, 0] }])).toBe(true);
   expect(await send([])).toBe(true);
   expect(await nodeTransform(page, 2)).toEqual([1, 0, 0, 1, 0, 0]);
-  expect(await batchLog(page)).toEqual([]);
+  expect(await commitLog(page)).toEqual([]);
 });
 
 test("a queued edit is dropped when Reload replaces the document", async ({ page }) => {
@@ -3951,11 +3994,29 @@ test("a queued edit is dropped when Reload replaces the document", async ({ page
   await expect(page.getByTestId("layer-row").first()).toBeVisible();
   await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
 
-  // The held drag lands (the fake applies it on release); the queued X must not follow it.
-  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(5, 6);
+  // The queued X must not follow the held drag into the reloaded document. Where the drag itself
+  // ends up is not this test's to say: the backend runs it before the load, which then replaces it,
+  // while the fake runs a held commit on release, after the load.
   await page.waitForTimeout(300);
-  expect(await batchLog(page)).toHaveLength(1);
-  expect((await nodeTransform(page, 2))[4]).toBeCloseTo(5, 6);
+  expect(await commitLog(page)).toHaveLength(1);
+  expect((await nodeTransform(page, 2))[4]).not.toBeCloseTo(30, 6);
+});
+
+test("an edit made while Reload loads is held, and dropped once the document is replaced", async ({ page }) => {
+  // An edit made during the load used to go straight out, with ids from the document on screen, and
+  // land on whatever the reloaded one gives those ids.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click(); // gives Reload a path
+  await page.evaluate(() => (window as unknown as { __holdLoad: () => void }).__holdLoad());
+  await page.getByTestId("layer-row").first().click(); // red
+  await page.getByRole("button", { name: "Reload" }).click(); // parked
+  await page.getByRole("button", { name: "Align horizontal centres" }).click(); // during the load
+  await page.evaluate(() => (window as unknown as { __releaseLoad: () => Promise<void> }).__releaseLoad());
+
+  await page.waitForTimeout(300);
+  expect(await commitLog(page)).toEqual([]);
+  expect(await nodeTransform(page, 2)).toEqual([1, 0, 0, 1, 0, 0]);
 });
 
 test("a queued align finds a Group's shapes in the tree as it stands when it is sent", async ({ page }) => {
@@ -3978,8 +4039,8 @@ test("a queued align finds a Group's shapes in the tree as it stands when it is 
 
   // With the new rect the Group reaches 0, so only red moves (to 0). The old tree said 50..80,
   // which would have sent the Group to 5 instead.
-  await expect.poll(async () => (await batchLog(page)).length).toBe(2);
-  expect((await batchLog(page))[1]).toMatchObject({ ids: [2], m: [1, 0, 0, 1, expect.closeTo(-5, 6), 0] });
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  expect((await commitLog(page))[1]).toMatchObject({ ids: [2], m: [1, 0, 0, 1, expect.closeTo(-5, 6), 0] });
 });
 
 test("an edit made between a commit settling and the queue draining still waits its turn", async ({ page }) => {
@@ -3994,11 +4055,16 @@ test("an edit made between a commit settling and the queue draining still waits 
   // Release without yielding a task, let the settled chain run its microtasks, then click: React
   // has not rendered yet, so this lands in the gap before the drain.
   await page.evaluate(async () => {
-    (window as unknown as { __releaseCommitsNoWait: () => void }).__releaseCommitsNoWait();
+    void (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits();
     for (let i = 0; i < 50; i++) await Promise.resolve();
     (document.querySelector('[aria-label="Align right edges"]') as HTMLButtonElement).click();
   });
 
-  await expect.poll(async () => (await batchLog(page)).length).toBe(3);
+  await expect.poll(async () => (await commitLog(page)).length).toBe(3);
   expect(await page.evaluate(() => (window as unknown as { __maxInFlightCommits?: number }).__maxInFlightCommits)).toBe(1);
+  // In the order they were made: top was queued first. One on the wire at a time is not enough on
+  // its own; a click in the gap that went out at once would still land before the queued top.
+  const [, top, right] = await commitLog(page);
+  expect(top).toMatchObject({ ids: [4], m: [1, 0, 0, 1, 0, expect.closeTo(-5, 6)] });
+  expect(right).toMatchObject({ ids: [4], m: [1, 0, 0, 1, expect.closeTo(25, 6), 0] });
 });

@@ -10,21 +10,27 @@ export type Move = { ids: number[]; m: Affine6 };
 export type AlignMode = "left" | "hcenter" | "right" | "top" | "vmiddle" | "bottom";
 export type Axis = "x" | "y";
 
-const AXIS: Record<AlignMode, Axis> = {
+/** Exported so the panel's icons and the queue key read the same tables the moves do. */
+export const AXIS: Record<AlignMode, Axis> = {
   left: "x", hcenter: "x", right: "x", top: "y", vmiddle: "y", bottom: "y",
 };
 /** Where on the unit's span the mode lines up: 0 at the start edge, 1 at the far edge. */
-const AT: Record<AlignMode, number> = { left: 0, hcenter: 0.5, right: 1, top: 0, vmiddle: 0.5, bottom: 1 };
+export const AT: Record<AlignMode, number> = { left: 0, hcenter: 0.5, right: 1, top: 0, vmiddle: 0.5, bottom: 1 };
 
 const start = (b: Bounds, a: Axis) => (a === "x" ? b.x : b.y);
 const size = (b: Bounds, a: Axis) => (a === "x" ? b.w : b.h);
 const along = (a: Axis, d: number): Affine6 => (a === "x" ? translate(d, 0) : translate(0, d));
 
-function union(units: Unit[]): Bounds {
-  const x0 = Math.min(...units.map((u) => u.bounds.x));
-  const y0 = Math.min(...units.map((u) => u.bounds.y));
-  const x1 = Math.max(...units.map((u) => u.bounds.x + u.bounds.w));
-  const y1 = Math.max(...units.map((u) => u.bounds.y + u.bounds.h));
+/** The box around every one of `boxes`, which must not be empty. A unit's bounds and the
+ *  selection's both come from here, so the two cannot disagree about an edge. */
+export function unionBounds(boxes: Bounds[]): Bounds {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const b of boxes) {
+    x0 = Math.min(x0, b.x);
+    y0 = Math.min(y0, b.y);
+    x1 = Math.max(x1, b.x + b.w);
+    y1 = Math.max(y1, b.y + b.h);
+  }
   return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 }
 
@@ -36,10 +42,13 @@ function moved(entries: [Unit, number][], axis: Axis): Move[] {
 
 /** Two or more units line up against their own bounds; a lone unit lines up against the artboard,
  *  since aligning one thing to itself would do nothing.
- *  // ponytail: no key object, so five pieces cannot be aligned to a sixth that stays put.
- *  Upgrade: a key object picked by clicking a selected unit again, as in Illustrator. */
+ *  // ponytail: no key unit (Illustrator's "key object"), so five pieces cannot be aligned to a
+ *  sixth that stays put. Upgrade: a key unit picked by clicking a selected unit again.
+ *  // ponytail: a unit lines up by its axis-aligned bounds, as snapping does, so a rotated piece's
+ *  outline sits off the line by however far its box overhangs it. Upgrade: line up each unit's
+ *  outline extreme along the axis. */
 export function alignMoves(units: Unit[], mode: AlignMode, artboard: Bounds | null): Move[] {
-  const target = units.length >= 2 ? union(units) : artboard;
+  const target = units.length >= 2 ? unionBounds(units.map((u) => u.bounds)) : artboard;
   if (units.length === 0 || !target) return [];
   const axis = AXIS[mode];
   const at = AT[mode];
@@ -54,8 +63,9 @@ const end = (u: Unit, a: Axis) => start(u.bounds, a) + size(u.bounds, a);
 const EPS = 1e-6;
 
 /** Why distribute cannot act on an axis: fewer than three units, several units spanning the rest
- *  (stacked copies), or a frame too small for what is inside it. */
-export type DistributeBlock = "few" | "stacked" | "tight" | "crowded";
+ *  (stacked copies), a frame too small for what is inside it, pieces that would pass each other,
+ *  or a second frame inside the first. */
+export type DistributeBlock = "few" | "stacked" | "tight" | "crowded" | "nested";
 
 /** How a distribute is anchored, or null when it has nothing to do.
  *  - "ends": the unit that starts first and the unit that reaches furthest stay put, and the rest
@@ -67,7 +77,10 @@ export type DistributeBlock = "few" | "stacked" | "tight" | "crowded";
  *    mode to set.
  *  Blocked when more than one unit spans the rest, since no one of them is the frame, and when the
  *  pieces inside a frame are longer than it: spacing them evenly would push the outer ones through
- *  the border that was meant to hold them (silent-failure-hunter). */
+ *  the border that was meant to hold them (silent-failure-hunter). Also blocked when a piece inside
+ *  the frame spans the others in turn, as a weed border on a backing plate does with both selected:
+ *  spaced as one more piece, the border left its letters behind. Spacing them inside the innermost
+ *  frame instead is a choice of layout this rule does not make. */
 type Anchors =
   | { kind: "ends"; order: Unit[]; li: number }
   | { kind: "frame"; frame: Unit; inner: Unit[] }
@@ -90,13 +103,19 @@ function anchors(units: Unit[], axis: Axis): Anchors {
   });
   // Spanning is asked of every unit, not read off the ends: a plate sharing its start with a piece
   // earlier in the document sorts second, and was taken as the far end (code-reviewer).
-  const lo = start(order[0].bounds, axis);
-  const spanning = order.filter((u) => start(u.bounds, axis) <= lo + EPS && end(u, axis) >= hi - EPS);
+  const spanning = spanningAll(order, axis);
   if (spanning.length > 1) return { kind: "blocked", reason: "stacked" };
   if (spanning.length === 1) {
     const frame = spanning[0];
     const inner = order.filter((u) => u !== frame);
-    if (room(frame, inner, axis) < -EPS) return { kind: "blocked", reason: "tight" };
+    if (spanningAll(inner, axis).length > 0) return { kind: "blocked", reason: "nested" };
+    const left = room(frame, inner, axis);
+    if (left < -EPS) return { kind: "blocked", reason: "tight" };
+    // The margin is the gap here, so the rule for two ends below holds inside a frame too: with the
+    // pieces filling it, a line of no width lands level with a neighbour and swaps with it on the
+    // next click.
+    const gap = left / (inner.length + 1);
+    if (inner.some((u) => size(u.bounds, axis) + gap <= EPS)) return { kind: "blocked", reason: "crowded" };
     return { kind: "frame", frame, inner };
   }
   // Between two ends, gaps may be negative and the pieces overlap evenly, but only while every
@@ -108,6 +127,16 @@ function anchors(units: Unit[], axis: Axis): Anchors {
   const gap = endsGap(order, li, axis);
   if (order.some((u) => size(u.bounds, axis) + gap <= EPS)) return { kind: "blocked", reason: "crowded" };
   return { kind: "ends", order, li };
+}
+
+/** The units reaching both ends of the span `units` cover, each end within EPS. */
+function spanningAll(units: Unit[], axis: Axis): Unit[] {
+  let lo = Infinity, hi = -Infinity;
+  for (const u of units) {
+    lo = Math.min(lo, start(u.bounds, axis));
+    hi = Math.max(hi, end(u, axis));
+  }
+  return units.filter((u) => start(u.bounds, axis) <= lo + EPS && end(u, axis) >= hi - EPS);
 }
 
 /** What the frame has left once its pieces are laid end to end. */

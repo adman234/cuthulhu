@@ -229,6 +229,32 @@ describe("distributeBlock", () => {
     expect(distributeBlock([unit(60, 0, 0, 100, 1), unit(61, 0, 0, 100, 1), unit(62, 40, 0, 10, 1)], "x")).toBe("stacked");
   });
 
+  it("blocks a frame inside the frame rather than spacing it as one more piece", () => {
+    // A backing plate around a weed border around three letters, all selected: spaced as a piece,
+    // the border went to 14..114 and the letters to 128..186, outside it.
+    const plate = unit(140, 0, 0, 200, 200);
+    const border = unit(141, 50, 50, 100, 100);
+    const letters = [unit(142, 60, 70, 10, 10), unit(143, 90, 70, 10, 10), unit(144, 120, 70, 10, 10)];
+    for (const axis of ["x", "y"] as const) {
+      expect(distributeBlock([plate, border, ...letters], axis)).toBe("nested");
+      expect(distributeMoves([plate, border, ...letters], axis)).toEqual([]);
+    }
+    // Without the plate the border is the frame, as before.
+    expect(distributeBlock([border, ...letters], "x")).toBeNull();
+  });
+
+  it("blocks a line of no width that fills a frame level with a neighbour", () => {
+    // The pieces fill the frame, so the margin is 0 and the line lands on a neighbour's start; the
+    // next click took document order from there and moved it again, three clicks in all.
+    const units = [unit(150, 0, 0, 20, 1), unit(151, 5, 0, 10, 1), unit(152, 10, 0, 10, 1), unit(153, 2, 0, 0, 1)];
+    expect(distributeBlock(units, "x")).toBe("crowded");
+    // With room to spare the line has a margin of its own and lands once.
+    const roomy = [unit(160, 0, 0, 40, 1), unit(161, 5, 0, 10, 1), unit(162, 10, 0, 10, 1), unit(163, 2, 0, 0, 1)];
+    const by = new Map(distributeMoves(roomy, "x").map((m) => [m.ids[0], m.m[4]]));
+    const landed = roomy.map((u) => ({ ...u, bounds: { ...u.bounds, x: u.bounds.x + (by.get(u.ids[0]) ?? 0) } }));
+    expect(distributeMoves(landed, "x")).toEqual([]);
+  });
+
   it("finds a frame that shares its start with another unit, in either document order", () => {
     // 100 - 15 = 85 mm of room over three spaces: the narrow piece goes to 85/3, the other after it.
     const narrow = unit(23, 0, 0, 5, 1);

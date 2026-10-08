@@ -51,29 +51,34 @@ pub fn add_primitive(ids: &mut IdGen, parent: NodeId, kind: ShapeKind) -> Result
 /// Converts the world-space matrix into the node's parent space so that new_world = old_world.then(m)
 /// holds under transformed ancestors.
 pub fn transform_nodes(doc: &Document, ids: &[NodeId], m: Affine) -> Result<Delta, CmdError> {
-    transform_nodes_in(doc, &parent_index(doc), ids, m)
+    let selected: HashSet<NodeId> = ids.iter().copied().collect();
+    transform_nodes_in(doc, &parent_index(doc), &selected, &HashMap::new(), ids, m).map(Delta)
 }
 
 /// `transform_nodes` against a parent index built once by the caller. `parent_of` scans the whole
 /// document, and a transform asks it once per ancestor of every node, so a batch of thousands of
 /// units did quadratic work under the state lock (Copilot on #301). Moves never change the tree, so
-/// one index serves every entry of a batch.
+/// one index serves every entry of a batch. `selected` is every id the command moves, which a node
+/// beneath any of them is left to; `moved` holds the transforms earlier entries of a batch gave.
 fn transform_nodes_in(
-    doc: &Document, parents: &HashMap<NodeId, NodeId>, ids: &[NodeId], m: Affine,
-) -> Result<Delta, CmdError> {
+    doc: &Document, parents: &HashMap<NodeId, NodeId>, selected: &HashSet<NodeId>,
+    moved: &HashMap<NodeId, Affine>, ids: &[NodeId], m: Affine,
+) -> Result<Vec<NodeOp>, CmdError> {
     if ids.is_empty() { return Err(CmdError::EmptySelection); }
-    let selected: HashSet<NodeId> = ids.iter().copied().collect();
     let mut ops = vec![];
     let mut seen = HashSet::new();
     for &id in ids {
         let node = doc.get(id).ok_or(CmdError::NotFound)?;
         // A selected ancestor already carries this node along; updating it too
         // would move its world position by `m` twice.
-        if !seen.insert(id) || ancestor_selected(parents, &selected, id) { continue; }
-        let before = node.clone();
+        if !seen.insert(id) || ancestor_selected(parents, selected, id) { continue; }
+        let mut before = node.clone();
+        if let Some(&t) = moved.get(&id) { before.transform = t; }
         // Convert the world-space matrix into this node's parent space so that
         // new_world = old_world.then(m) holds under transformed ancestors:
         // new_local = old_local.then(pw).then(m).then(pw⁻¹)
+        // Read from `doc` even mid-batch: an ancestor in `selected` would have skipped this node,
+        // so no entry has moved one.
         let pw = match parents.get(&id) {
             Some(&pid) => world_via(doc, parents, pid).ok_or(CmdError::NotFound)?,
             None => Affine::identity(),
@@ -86,7 +91,7 @@ fn transform_nodes_in(
         after.transform = before.transform.then(&pw).then(&m).then(&pw_inv);
         ops.push(NodeOp::Update { id, before, after });
     }
-    Ok(Delta(ops))
+    Ok(ops)
 }
 
 /// Mark every shape in `ids` — and every shape beneath a container in `ids` — with `value`.
@@ -208,19 +213,18 @@ pub fn transform_each(doc: &Document, moves: &[(Vec<NodeId>, Affine)]) -> Result
     if moves.is_empty() { return Err(CmdError::EmptySelection); }
     let selected: HashSet<NodeId> = moves.iter().flat_map(|(ids, _)| ids.iter().copied()).collect();
     let parents = parent_index(doc);
-    let mut scratch = doc.clone();
+    // What the earlier entries left, kept as the transforms they wrote rather than a copy of the
+    // whole document: a move changes only the moved node's transform, and the ancestors a later
+    // entry reads are never moved (one in `selected` would have skipped the node beneath it). A copy
+    // cloned every path's data on every drag and field edit, since all of them come through here.
+    let mut moved: HashMap<NodeId, Affine> = HashMap::new();
     let mut ops = Vec::new();
     for (ids, m) in moves {
-        // As `transform_nodes` refuses it. Skipping it would answer Ok for a move nobody made.
-        if ids.is_empty() { return Err(CmdError::EmptySelection); }
-        for &id in ids { scratch.get(id).ok_or(CmdError::NotFound)?; }
-        let own: Vec<NodeId> = ids.iter().copied()
-            .filter(|&id| !ancestor_selected(&parents, &selected, id))
-            .collect();
-        if own.is_empty() { continue; }
-        let d = transform_nodes_in(&scratch, &parents, &own, *m)?;
-        ops.extend(d.0.iter().cloned());
-        scratch.apply(d);
+        // An empty entry or a missing id is refused inside, as `transform_nodes` refuses it.
+        for op in transform_nodes_in(doc, &parents, &selected, &moved, ids, *m)? {
+            if let NodeOp::Update { id, after, .. } = &op { moved.insert(*id, after.transform); }
+            ops.push(op);
+        }
     }
     if ops.is_empty() { return Err(CmdError::EmptySelection); }
     Ok(Delta(ops))
@@ -1041,7 +1045,7 @@ mod tests {
     fn batch_doc() -> (Editor, NodeId, NodeId, NodeId, NodeId) {
         let mut ed = Editor::new();
         let root = ed.doc.root;
-        let mut add = |ed: &mut Editor, parent: NodeId, node: crate::Node| {
+        let add = |ed: &mut Editor, parent: NodeId, node: crate::Node| {
             ed.commit(crate::Delta(vec![crate::NodeOp::Add { parent, node, index: usize::MAX }]));
         };
         let a = ed.doc.ids.next();

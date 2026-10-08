@@ -51,12 +51,17 @@ export type CanvasInteractionArgs = {
   /** Revision of the snapshot `scene` was built from; it rises with every successful refresh. */
   sceneRev: number;
   /** A refusal puts the preview back. An applied commit keeps it until its own snapshot has
-   *  rendered, even if that refresh failed, because the backend then holds the new geometry. */
-  /** `requestedAt` is when the operator asked for it (`performance.now()`), not when it went
+   *  rendered, even if that refresh failed, because the backend then holds the new geometry.
+   *  `requestedAt` is when the operator asked for it (`performance.now()`), not when it went
    *  out: an edit queued before a refusal must leave that refusal on screen, and one made after it
    *  must clear it, though both go out from the queue (Copilot on #301). */
   commit: (moves: Move[], requestedAt: number) => Promise<CommitOutcome>;
 };
+
+/** What a deferred edit reads when it is sent rather than when it was made: the tree that turns a
+ *  Group into its shapes, and the bed. The commit ahead of a queued click can change either
+ *  (Copilot on #301), and both are this render's, so they come from the hook's own latest values. */
+export type SendTime = { expand: (ids: number[]) => number[]; artboard: Bounds | null };
 
 /** "applied" carries the revision of the snapshot its refresh rendered, or null if that refresh
  *  failed: the commit's preview stands in until a snapshot at least that new has rendered. */
@@ -92,11 +97,13 @@ export type CanvasInteraction = {
   transformWith: (field: PropertyField, ids: number[], make: (scene: Scene) => Matrix | null) => void;
   /** The same, for a click that moves each unit differently (align, distribute) as one commit. A
    *  newer click under the same key replaces a queued one. */
-  transformEach: (key: string, make: (scene: Scene) => Move[]) => void;
-  /** Drops queued edits and the pending preview. App calls it when Open or Reload replaces the
-   *  document: ids are reused, so an edit queued against the old document would move a shape in
-   *  the new one (Copilot on #301). */
-  forgetQueued: () => void;
+  transformEach: (key: string, make: (scene: Scene, now: SendTime) => Move[]) => void;
+  /** Runs `load`, which replaces the document (Open, Reload), with every edit held until it
+   *  settles. Ids are reused, so an edit made against the old document would move a shape in the
+   *  new one (Copilot on #301): one queued before the load, or one made while it runs, which used
+   *  to go out at once. If the load succeeds those are dropped; if it is refused the document is
+   *  still the one they were made on, so they go out as usual. */
+  replaceDocument: (load: () => Promise<unknown>) => Promise<void>;
   handlers: Handlers;
 };
 
@@ -136,7 +143,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // re-rendered, and offered clicks that then did nothing (Copilot on #301). Bumped whenever
   // `pending` changes.
   const [, previewChanged] = useReducer((n: number) => n + 1, 0);
-  // Set when a commit settles; the next render's effect drains the queue.
+  // Set when a commit settles with edits queued behind it; the next render's effect drains them.
   const drainDue = useRef(false);
   useEffect(() => {
     if (!drainDue.current) return;
@@ -147,8 +154,11 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // its matrix on that commit's preview, and if the commit were refused it would land about the
   // wrong anchor. The window is one IPC round trip, so a press in it selects but does not drag.
   const inFlight = useRef(false);
+  // While Open or Reload replaces the document: edits queue and nothing drains (`replaceDocument`).
+  const replacing = useRef(false);
   // Property edits made while a commit is on the wire, in the order they were made.
-  const queued = useRef(new Map<string, { make: (s: Scene) => Move[]; at: number }>());
+  const queued = useRef(new Map<string, { make: (s: Scene, now: SendTime) => Move[]; at: number }>());
+  const sendTime = (): SendTime => ({ expand: latest.current.expand, artboard: latest.current.artboard });
   // What gestures start from and what the renderer is put back to: the in-flight preview until a
   // snapshot replaces the scene it was built on, then the committed scene. CodeRabbit on #298.
   const current = () => ({
@@ -334,12 +344,19 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
 
   // Every transform reaches the backend through here, so all producers share the one-in-flight
   // rule and the pending preview that stands in for an unread commit. The moves must not share a
-  // shape: the backend moves a node under another listed node only with it, and the preview would
-  // move it twice. Every caller sends one move or align's units, which `outermost` keeps disjoint.
+  // shape: the backend moves a node under another listed node only with that node, and applies an
+  // id listed twice twice, while the preview keeps one matrix per shape, the last. Every caller
+  // sends one move or align's units, which `outermost` keeps disjoint.
   function send(moves: Move[], requestedAt: number) {
     const { expand } = latest.current;
-    const preview = applyMoves(current().scene, moves.map((mv) => ({ shapes: expand(mv.ids), m: mv.m })));
-    pending.current = { preview, retireAt: Infinity };
+    // What a refusal puts back. Not always nothing: a commit that landed but could not be re-read
+    // leaves its preview standing for the geometry the backend holds, and this one was built on it.
+    const base = pending.current;
+    const mine: PendingPreview = {
+      preview: applyMoves(current().scene, moves.map((mv) => ({ shapes: expand(mv.ids), m: mv.m }))),
+      retireAt: Infinity,
+    };
+    pending.current = mine;
     inFlight.current = true;
     previewChanged();
     repaint();
@@ -347,43 +364,56 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
       inFlight.current = false;
       // Applied: the preview is what the backend now holds, so it stays until the snapshot that
       // includes this commit has rendered. If that refresh failed, the next successful one will.
-      if (outcome.kind === "refused") pending.current = null;
-      else if (pending.current) {
+      // Refused: back to what stood before it, which retires by revision like any preview.
+      if (outcome.kind === "refused") {
+        if (pending.current === mine) pending.current = base;
+      } else if (pending.current) {
         pending.current = { ...pending.current, retireAt: outcome.snapshotRev ?? latest.current.sceneRev + 1 };
       }
       // Drained after the render this settles into, not here: the commit's refresh has set a new
       // document that has not rendered yet, and a queued edit built now would read the old tree
-      // and scene (Copilot on #301). The effect below runs once React has rendered it.
-      drainDue.current = true;
+      // and scene (Copilot on #301). The effect below runs once React has rendered it. With nothing
+      // queued there is nothing to wait for, and staying busy only swallowed the next press.
+      drainDue.current = queued.current.size > 0;
       previewChanged();
       repaint();
     });
   }
 
-  function forgetQueued() {
-    queued.current.clear();
-    drainDue.current = false;
-    pending.current = null;
-    previewChanged();
-    repaint();
+  async function replaceDocument(load: () => Promise<unknown>) {
+    replacing.current = true;
+    let replaced = false;
+    try {
+      await load();
+      replaced = true;
+    } finally {
+      replacing.current = false;
+      // Before anything can drain: every queued edit names ids from the document that just left.
+      if (replaced) queued.current.clear();
+      drainDue.current = queued.current.size > 0;
+      previewChanged();
+    }
   }
 
-  // Moves that would change nothing are dropped, so a no-op never holds the wire.
-  const effective = (moves: Move[]) => moves.filter((mv) => !isIdentity(mv.m));
+  // Moves that would change nothing are dropped, so a no-op never holds the wire. So is a move that
+  // is not a finite number, from any producer: it crosses IPC as null and comes back as an error
+  // that names nothing the operator did (a field typed as 1e400 is Infinity).
+  const effective = (moves: Move[]) => moves.filter((mv) => mv.m.every(Number.isFinite) && !isIdentity(mv.m));
 
   // Busy from send until the queue has drained after that commit settles. inFlight alone cleared on
   // settle, a render before the drain, and an edit or drag in that gap went out at once and
-  // overlapped the drained one on the wire (CodeRabbit on #301).
-  const busy = () => inFlight.current || drainDue.current;
+  // overlapped the drained one on the wire (CodeRabbit on #301). And while a load replaces the
+  // document, which nothing should edit until it is there.
+  const busy = () => inFlight.current || drainDue.current || replacing.current;
 
-  function transformEach(key: string, make: (s: Scene) => Move[]) {
+  function transformEach(key: string, make: (s: Scene, now: SendTime) => Move[]) {
     const at = performance.now();
     if (busy()) {
       queued.current.delete(key);
       queued.current.set(key, { make, at });
       return;
     }
-    const moves = effective(make(current().scene));
+    const moves = effective(make(current().scene, sendTime()));
     if (moves.length > 0) send(moves, at);
   }
 
@@ -399,11 +429,12 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // Sends queued edits in the order they were made, one per settled commit. An edit that comes out
   // as no change (its field already says that) is dropped so it cannot stall the rest.
   function drain() {
-    // A send in flight drains on its own settle; draining now would put a second on the wire.
-    if (inFlight.current) return;
+    // A send in flight drains on its own settle; draining now would put a second on the wire. A load
+    // in progress decides whether the queue is still meant for this document.
+    if (inFlight.current || replacing.current) return;
     for (const [key, { make, at }] of queued.current) {
       queued.current.delete(key);
-      const moves = effective(make(current().scene));
+      const moves = effective(make(current().scene, sendTime()));
       if (moves.length > 0) {
         send(moves, at);
         return;
@@ -535,7 +566,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     effectiveScene: gestureScene(pending.current, scene, sceneRev),
     transformWith,
     transformEach,
-    forgetQueued,
+    replaceDocument,
     handlers: { onPointerEnter, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onPointerLeave },
   };
 }

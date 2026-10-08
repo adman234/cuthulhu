@@ -11,7 +11,7 @@
 **Revisions from gate 1** (the task bodies below stay as instructed):
 - The queue key is per kind, axis and selection, not `align` (Task 4), so "Align top" does not replace a queued "Align left", nor a distribute an align.
 - Distribute keeps the unit reaching furthest as the far end, not the last by start edge (Task 3).
-- Units are counted from the scene and exclude ids beneath another selected id (`outermost`), so an empty Group or a Group's own child is not a unit. A unit spanning all the others is a frame that the rest are spaced inside, with margins equal to the gaps; distribute is disabled per axis only when several units span the rest (`canDistribute`).
+- Units are counted from the scene and exclude ids beneath another selected id (`outermost`), so an empty Group or a Group's own child is not a unit. A unit spanning all the others is a frame that the rest are spaced inside, with margins equal to the gaps; distribute is disabled per axis, with the reason, when several units span the rest, the pieces do not fit the frame, they would pass each other, or a second frame sits inside the first (`distributeBlock`).
 
 ## Global constraints
 
