@@ -12,6 +12,21 @@ export function applyOptimistic(scene: Scene, ids: number[], m: Matrix): Scene {
   return { nodes: scene.nodes.map((n) => (moving.has(n.id) ? transformNode(n, m) : n)) };
 }
 
+/** Several previews at once, in one pass over the scene: one matrix per entry's shapes. Folding
+ *  `applyOptimistic` over the entries copied the whole scene once per entry, so aligning a few
+ *  thousand separate pieces blocked the UI before anything was sent (Copilot on #301). The
+ *  entries must not share a shape; align's units are disjoint, as `outermost` keeps them. */
+export function applyMoves(scene: Scene, entries: { shapes: number[]; m: Matrix }[]): Scene {
+  const by = new Map<number, Matrix>();
+  for (const { shapes, m } of entries) for (const id of shapes) by.set(id, m);
+  return {
+    nodes: scene.nodes.map((n) => {
+      const m = by.get(n.id);
+      return m ? transformNode(n, m) : n;
+    }),
+  };
+}
+
 /** A commit's preview, standing in for the committed scene until the snapshot that includes the
  *  commit has rendered: `retireAt` is that snapshot's revision, `Infinity` while the commit is
  *  still on the wire. */

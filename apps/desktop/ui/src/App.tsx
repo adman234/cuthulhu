@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { listen } from "@tauri-apps/api/event";
 import * as ipc from "./ipc";
 import { Canvas2DRenderer } from "./render/Canvas2DRenderer";
@@ -109,7 +109,14 @@ export function App() {
   const [selected, setSelected] = useState<number[]>([]);
   const [machines, setMachines] = useState<MachineProfile[]>([]);
   const [tool, setTool] = useState("select");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setErrorState] = useState<string | null>(null);
+  // When the message on screen was raised, on the clock the canvas stamps its requests with: a
+  // commit clears only a message older than the request it carries (Copilot on #301).
+  const errorAt = useRef(0);
+  const setError = useCallback((next: SetStateAction<string | null>) => {
+    if (typeof next === "string") errorAt.current = performance.now();
+    setErrorState(next);
+  }, []);
   const [lastPath, setLastPath] = useState<string | null>(null);
   const [cutOpen, setCutOpen] = useState(false);
   const [textOpen, setTextOpen] = useState(false);
@@ -239,10 +246,11 @@ export function App() {
     // Not `run`: it reports one `false` for two failures that need opposite repairs. A refused
     // transform must put the shape back; one that landed but could not be re-read must keep it,
     // because the backend already holds the new geometry (silent-failure-hunter on #298).
-    // A queued commit leaves the message alone: a refusal ahead of it would otherwise vanish the
-    // moment the edit behind it went out, before anyone saw it (silent-failure-hunter, from #298).
-    commit: async (moves, fromQueue): Promise<CommitOutcome> => {
-      if (!fromQueue) setError(null);
+    // A message raised after this edit was asked for stays: a refusal ahead of a queued edit would
+    // otherwise vanish the moment the edit went out, before anyone saw it (silent-failure-hunter,
+    // from #298).
+    commit: async (moves, requestedAt): Promise<CommitOutcome> => {
+      if (errorAt.current <= requestedAt) setError(null);
       try {
         await ipc.commitTransforms({ moves });
       } catch (e) {

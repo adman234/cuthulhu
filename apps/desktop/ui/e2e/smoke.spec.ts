@@ -3765,3 +3765,33 @@ test("a fresh edit after a refusal clears its message", async ({ page }) => {
   await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(30, 6);
   await expect(page.getByText("transform refused")).toBeHidden();
 });
+
+// Copilot on #301: going out from the queue is not the same as being made before the refusal. An
+// align clicked once the refusal is on screen, while an edit queued earlier is still on the wire,
+// is the operator's next act and must clear it when it lands.
+test("an edit made after a refusal was shown clears it, even when it waits in the queue", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => {
+    const w = window as unknown as { __holdCommits: () => void; __failNextCommit: () => void };
+    w.__holdCommits();
+    w.__failNextCommit();
+  });
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // will be refused
+  await page.getByLabel("X", { exact: true }).fill("30"); // queued before the refusal
+  // Let the refusal through and hold again at once, so the X edit it drains stays on the wire.
+  await page.evaluate(() => {
+    const w = window as unknown as { __holdCommits: () => void; __releaseCommits: () => Promise<void> };
+    void w.__releaseCommits();
+    w.__holdCommits();
+  });
+  await expect(page.getByText("transform refused")).toBeVisible();
+
+  await page.getByRole("button", { name: "Align horizontal centres" }).click(); // queued behind X
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(160, 6);
+  await expect(page.getByText("transform refused")).toBeHidden();
+});
