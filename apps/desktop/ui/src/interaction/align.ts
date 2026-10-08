@@ -77,16 +77,18 @@ function anchors(units: Unit[], axis: Axis): Anchors {
   if (units.length < 3) return { kind: "blocked", reason: "few" };
   // Array.prototype.sort is stable, so document order breaks ties.
   const order = [...units].sort((a, b) => start(a.bounds, axis) - start(b.bounds, axis));
-  // Of the units reaching furthest, the one that starts last, so it is never the first as well
-  // unless it spans the rest.
+  // The true far edge, taken once: comparing each unit with the last pick let the tolerance chain,
+  // walking the far end back until a unit that spans nothing looked like a frame (Copilot on #301).
+  const hi = Math.max(...order.map((u) => end(u, axis)));
+  // Of the units reaching it, the one that starts last, so it is never the first as well unless it
+  // spans the rest.
   let li = 0;
   order.forEach((u, i) => {
-    if (end(u, axis) >= end(order[li], axis) - EPS) li = i;
+    if (end(u, axis) >= hi - EPS) li = i;
   });
   // Spanning is asked of every unit, not read off the ends: a plate sharing its start with a piece
   // earlier in the document sorts second, and was taken as the far end (code-reviewer).
   const lo = start(order[0].bounds, axis);
-  const hi = end(order[li], axis);
   const spanning = order.filter((u) => start(u.bounds, axis) <= lo + EPS && end(u, axis) >= hi - EPS);
   if (spanning.length > 1) return { kind: "blocked", reason: "stacked" };
   if (spanning.length === 1) {

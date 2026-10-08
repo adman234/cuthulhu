@@ -155,6 +155,14 @@ describe("distributeBlock", () => {
     expect(distributeMoves([plate, inner, flush], "x").map((m) => m.ids[0])).toEqual([51, 52]);
   });
 
+  it("measures the far end against the true maximum, so tolerances cannot chain", () => {
+    // Copilot on #301: each end within 1e-6 of the last pick walked the far end back to
+    // 100.00000075, which made the 0..100 unit look like a frame. Against the true maximum
+    // (100.0000015) nothing spans, and the three distribute between two ends.
+    const units = [unit(70, 0, 0, 100, 1), unit(71, 10, 0, 90.0000015, 1), unit(72, 20, 0, 80.00000075, 1)];
+    expect(distributeBlock(units, "x")).toBeNull();
+  });
+
   it("blocks two units with exactly the same span as stacked", () => {
     expect(distributeBlock([unit(60, 0, 0, 100, 1), unit(61, 0, 0, 100, 1), unit(62, 40, 0, 10, 1)], "x")).toBe("stacked");
   });
