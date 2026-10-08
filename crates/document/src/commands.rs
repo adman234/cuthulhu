@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use geometry::{boolean, ellipse_path, rect_path, text_to_path, Affine, BoolOp, Path};
 use crate::{node::*, delta::*};
 
@@ -51,6 +51,16 @@ pub fn add_primitive(ids: &mut IdGen, parent: NodeId, kind: ShapeKind) -> Result
 /// Converts the world-space matrix into the node's parent space so that new_world = old_world.then(m)
 /// holds under transformed ancestors.
 pub fn transform_nodes(doc: &Document, ids: &[NodeId], m: Affine) -> Result<Delta, CmdError> {
+    transform_nodes_in(doc, &parent_index(doc), ids, m)
+}
+
+/// `transform_nodes` against a parent index built once by the caller. `parent_of` scans the whole
+/// document, and a transform asks it once per ancestor of every node, so a batch of thousands of
+/// units did quadratic work under the state lock (Copilot on #301). Moves never change the tree, so
+/// one index serves every entry of a batch.
+fn transform_nodes_in(
+    doc: &Document, parents: &HashMap<NodeId, NodeId>, ids: &[NodeId], m: Affine,
+) -> Result<Delta, CmdError> {
     if ids.is_empty() { return Err(CmdError::EmptySelection); }
     let selected: HashSet<NodeId> = ids.iter().copied().collect();
     let mut ops = vec![];
@@ -59,13 +69,13 @@ pub fn transform_nodes(doc: &Document, ids: &[NodeId], m: Affine) -> Result<Delt
         let node = doc.get(id).ok_or(CmdError::NotFound)?;
         // A selected ancestor already carries this node along; updating it too
         // would move its world position by `m` twice.
-        if !seen.insert(id) || has_selected_ancestor(doc, &selected, id) { continue; }
+        if !seen.insert(id) || ancestor_selected(parents, &selected, id) { continue; }
         let before = node.clone();
         // Convert the world-space matrix into this node's parent space so that
         // new_world = old_world.then(m) holds under transformed ancestors:
         // new_local = old_local.then(pw).then(m).then(pw⁻¹)
-        let pw = match parent_of(doc, id) {
-            Some(pid) => world_transform(doc, pid).ok_or(CmdError::NotFound)?,
+        let pw = match parents.get(&id) {
+            Some(&pid) => world_via(doc, parents, pid).ok_or(CmdError::NotFound)?,
             None => Affine::identity(),
         };
         // "something in the selection", not "this shape": `transform_nodes` acts on whole
@@ -197,6 +207,7 @@ pub fn reorder(doc: &Document, id: NodeId, new_index: usize) -> Result<Delta, Cm
 pub fn transform_each(doc: &Document, moves: &[(Vec<NodeId>, Affine)]) -> Result<Delta, CmdError> {
     if moves.is_empty() { return Err(CmdError::EmptySelection); }
     let selected: HashSet<NodeId> = moves.iter().flat_map(|(ids, _)| ids.iter().copied()).collect();
+    let parents = parent_index(doc);
     let mut scratch = doc.clone();
     let mut ops = Vec::new();
     for (ids, m) in moves {
@@ -204,15 +215,41 @@ pub fn transform_each(doc: &Document, moves: &[(Vec<NodeId>, Affine)]) -> Result
         if ids.is_empty() { return Err(CmdError::EmptySelection); }
         for &id in ids { scratch.get(id).ok_or(CmdError::NotFound)?; }
         let own: Vec<NodeId> = ids.iter().copied()
-            .filter(|&id| !has_selected_ancestor(&scratch, &selected, id))
+            .filter(|&id| !ancestor_selected(&parents, &selected, id))
             .collect();
         if own.is_empty() { continue; }
-        let d = transform_nodes(&scratch, &own, *m)?;
+        let d = transform_nodes_in(&scratch, &parents, &own, *m)?;
         ops.extend(d.0.iter().cloned());
         scratch.apply(d);
     }
     if ops.is_empty() { return Err(CmdError::EmptySelection); }
     Ok(Delta(ops))
+}
+
+/// Child → parent for every node, in one pass over the document.
+fn parent_index(doc: &Document) -> HashMap<NodeId, NodeId> {
+    doc.nodes.iter().flat_map(|(&pid, n)| n.children.iter().map(move |&c| (c, pid))).collect()
+}
+
+/// `has_selected_ancestor` against a parent index.
+fn ancestor_selected(parents: &HashMap<NodeId, NodeId>, selected: &HashSet<NodeId>, id: NodeId) -> bool {
+    let mut cur = id;
+    while let Some(&pid) = parents.get(&cur) {
+        if selected.contains(&pid) { return true; }
+        cur = pid;
+    }
+    false
+}
+
+/// `world_transform` against a parent index; transforms are read from `doc` as it stands.
+fn world_via(doc: &Document, parents: &HashMap<NodeId, NodeId>, id: NodeId) -> Option<Affine> {
+    let mut m = doc.get(id)?.transform.clone();
+    let mut cur = id;
+    while let Some(&pid) = parents.get(&cur) {
+        m = m.then(&doc.get(pid)?.transform);
+        cur = pid;
+    }
+    Some(m)
 }
 
 fn parent_of(doc: &Document, id: NodeId) -> Option<NodeId> {
@@ -1051,6 +1088,24 @@ mod tests {
         ed.commit(Delta(vec![NodeOp::Add { parent: outer, node: Node::container(inner, NodeKind::Group), index: 0 }]));
         let r = transform_each(&ed.doc, &[(vec![a], Affine::translate(5.0, 0.0)), (vec![inner], Affine::translate(1.0, 0.0))]);
         assert!(matches!(r, Err(CmdError::Geometry(_))));
+    }
+
+    #[test]
+    fn transform_each_moves_in_world_space_under_a_scaled_parent() {
+        // The parent index stands in for `parent_of`; a node under a 2x Group must still move by
+        // the world-space translation, not twice it.
+        let mut ed = Editor::new();
+        let g = ed.doc.ids.next();
+        let mut group = Node::container(g, NodeKind::Group);
+        group.transform = Affine([2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
+        ed.commit(Delta(vec![NodeOp::Add { parent: ed.doc.root, node: group, index: 0 }]));
+        let c = ed.doc.ids.next();
+        ed.commit(Delta(vec![NodeOp::Add { parent: g, node: Node::shape(c, ShapeKind::Rect { w: 10.0, h: 10.0 }), index: 0 }]));
+        let a = ed.doc.ids.next();
+        ed.commit(Delta(vec![NodeOp::Add { parent: ed.doc.root, node: Node::shape(a, ShapeKind::Rect { w: 10.0, h: 10.0 }), index: 1 }]));
+        ed.commit(transform_each(&ed.doc, &[(vec![c], Affine::translate(4.0, 0.0)), (vec![a], Affine::translate(0.0, 3.0))]).unwrap());
+        assert_eq!(world_transform(&ed.doc, c).unwrap().apply(0.0, 0.0), (4.0, 0.0));
+        assert_eq!(world_transform(&ed.doc, a).unwrap().apply(0.0, 0.0), (0.0, 3.0));
     }
 
     #[test]

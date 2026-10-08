@@ -3795,3 +3795,24 @@ test("an edit made after a refusal was shown clears it, even when it waits in th
   await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(160, 6);
   await expect(page.getByText("transform refused")).toBeHidden();
 });
+
+test("a newer align replaces a queued one on the same selection in any click order", async ({ page }) => {
+  // Copilot on #301: the key followed click order, so reselecting a piece made a second request
+  // that ran after the first instead of replacing it.
+  const v = await selectRedBesideGroup(page);
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // red to 5..15, parked
+  await expect.poll(async () => (await batchLog(page)).length).toBe(1);
+
+  await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] }); // [red, Group]
+  await page.getByRole("button", { name: "Align left edges" }).click();
+  await page.getByTestId("layer-row").nth(2).click({ modifiers: ["Shift"] }); // [Group]
+  await page.getByTestId("layer-row").nth(2).click({ modifiers: ["Shift"] }); // [Group, red]
+  await page.getByRole("button", { name: "Align right edges" }).click();
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // Right alone: red to the Group's 40 (+25). Left first would have moved the Group to 5.
+  await expect.poll(async () => (await batchLog(page)).length).toBe(2);
+  expect((await batchLog(page))[1]).toMatchObject({ ids: [4], m: [1, 0, 0, 1, expect.closeTo(25, 6), 0] });
+  expect(await nodeTransform(page, 2)).toEqual([1, 0, 0, 1, 30, 0]);
+});

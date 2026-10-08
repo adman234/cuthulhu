@@ -368,7 +368,11 @@ export function App() {
   // Keyed like the fields: a newer click of the same kind on the same axis and selection replaces a
   // queued one, but "Align top" does not replace a queued "Align left", and a distribute does not
   // replace an align, since each is a different request (code-reviewer).
-  const alignKey = (kind: "align" | "distribute", axis: Axis) => `${kind}:${axis}:${units.join(",")}`;
+  // Sorted, because `outermost` keeps click order and reselecting a piece reorders it: the same
+  // selection must make the same key, or a newer click runs after the older one instead of
+  // replacing it (Copilot on #301).
+  const alignKey = (kind: "align" | "distribute", axis: Axis) =>
+    `${kind}:${axis}:${[...units].sort((p, q) => p - q).join(",")}`;
   const align = (mode: AlignMode) => {
     const axis: Axis = mode === "left" || mode === "hcenter" || mode === "right" ? "x" : "y";
     interaction.transformEach(alignKey("align", axis), (s) => alignMoves(unitsIn(s), mode, doc?.artboard ?? null));
