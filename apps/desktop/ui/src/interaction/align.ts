@@ -79,7 +79,10 @@ function anchors(units: Unit[], axis: Axis): Anchors {
   const order = [...units].sort((a, b) => start(a.bounds, axis) - start(b.bounds, axis));
   // The true far edge, taken once: comparing each unit with the last pick let the tolerance chain,
   // walking the far end back until a unit that spans nothing looked like a frame (Copilot on #301).
-  const hi = Math.max(...order.map((u) => end(u, axis)));
+  // A loop, not Math.max(...): one argument per unit overflows the engine's limit on a selection
+  // of a few hundred thousand, and the panel runs this as it renders (Copilot on #301).
+  let hi = -Infinity;
+  for (const u of order) hi = Math.max(hi, end(u, axis));
   // Of the units reaching it exactly, the one that starts last. Exactly, not within EPS: a piece
   // ending just short is not the far end, and taking it moved the one that is (CodeRabbit on #301).
   // The tolerance belongs to the frame test below, which also catches the first unit reaching the

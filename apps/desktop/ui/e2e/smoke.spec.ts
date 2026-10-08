@@ -4242,3 +4242,21 @@ test("an align pressed from the keyboard during a drag waits for the drag's comm
   expect(align.m[4]).toBeCloseTo(165 - 10, 6);
   expect(await page.evaluate(() => (window as unknown as { __maxInFlightCommits?: number }).__maxInFlightCommits)).toBe(1);
 });
+
+test("a second Open or Reload while one is still loading is refused, and edits stay held", async ({ page }) => {
+  // Copilot on #301: two replacements could overlap, and the first to finish cleared the shared
+  // lock while the other was still loading, letting old-document edits reach it.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.evaluate(() => (window as unknown as { __holdLoad: () => void }).__holdLoad());
+  await page.getByRole("button", { name: "Reload" }).click(); // held
+  await page.getByRole("button", { name: "Reload" }).click(); // refused while the first loads
+  await expect(page.getByText("another document is still loading")).toBeVisible();
+  await page.evaluate(() => (window as unknown as { __releaseLoad: () => Promise<void> }).__releaseLoad());
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __loads?: number }).__loads ?? 0)).toBe(1);
+
+  // Once the first load's snapshot renders, editing works.
+  await page.getByTestId("layer-row").first().click();
+  await expect(page.getByRole("button", { name: "Align horizontal centres" })).toBeEnabled();
+});

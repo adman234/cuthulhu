@@ -401,6 +401,11 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   }
 
   async function replaceDocument(load: () => Promise<unknown>) {
+    // One at a time. A second, overlapping replacement cleared the shared flag when the first ended
+    // while it was still loading, and old-document edits could reach it (Copilot on #301). Queuing
+    // it behind the first is no better: the first's snapshot can render after the second has loaded
+    // and lift `stale()` over the wrong document. Refused before anything changes, so run() shows it.
+    if (replacing.current) throw new Error("another document is still loading");
     replacing.current = true;
     // A drag still under the pointer is not a commit yet, so nothing below waits for it, and its
     // pointer-up would send the old ids and matrix into the loaded document (Copilot on #301).

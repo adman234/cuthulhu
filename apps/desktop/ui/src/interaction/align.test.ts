@@ -268,3 +268,12 @@ describe("distributeBlock", () => {
     }
   });
 });
+
+describe("distribute on a very large selection", () => {
+  it("does not overflow the engine's argument limit", () => {
+    // Copilot on #301: Math.max(...ends) passed one argument per unit, which throws RangeError
+    // past the engine's limit, and the panel computes this while it renders.
+    const many = Array.from({ length: 300_000 }, (_, i) => unit(i, i * 2, 0, 1, 1));
+    expect(() => distributeBlock(many, "x")).not.toThrow();
+  });
+});
