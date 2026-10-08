@@ -344,8 +344,11 @@ export function App() {
   // so a Group lines up as a drag would move it. Read from the scene the hook passes in, which holds
   // any unread commit's preview. Listed in document order (the scene's, by each unit's first shape)
   // rather than the order they were clicked, since that is what breaks a distribute tie.
-  const units = doc ? outermost(doc.nodes, selected) : [];
-  const unitsIn = (s: Scene): Unit[] => {
+  // Memoised: a pointer move re-renders App for the cursor readout, and rebuilding these scanned
+  // every node in the document per move (CodeRabbit on #301).
+  const units = useMemo(() => (doc ? outermost(doc.nodes, selected) : []), [doc, selected]);
+  const unitsIn = useCallback((s: Scene): Unit[] => {
+    if (units.length === 0) return [];
     const at = new Map(s.nodes.map((n, i) => [n.id, i]));
     const found = units.flatMap((id) => {
       const shapes = expand([id]).flatMap((sid) => {
@@ -361,7 +364,7 @@ export function App() {
       return [{ first, unit: { ids: [id], bounds: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } } }];
     });
     return found.sort((a, b) => a.first - b.first).map((f) => f.unit);
-  };
+  }, [expand, units]);
   // Keyed like the fields: a newer click of the same kind on the same axis and selection replaces a
   // queued one, but "Align top" does not replace a queued "Align left", and a distribute does not
   // replace an align, since each is a different request (code-reviewer).
@@ -375,9 +378,12 @@ export function App() {
   // Counted from the scene the moves are computed from, not from the selection: an empty Group
   // is a selected id with nothing to line up, and counting it enabled a distribute that then had
   // two units and did nothing, or sent a lone shape to the artboard (silent-failure-hunter).
-  const shownUnits = unitsIn(interaction.effectiveScene);
+  const shownUnits = useMemo(() => unitsIn(interaction.effectiveScene), [interaction.effectiveScene, unitsIn]);
   const unitCount = shownUnits.length;
-  const distributeBlocked = { x: distributeBlock(shownUnits, "x"), y: distributeBlock(shownUnits, "y") };
+  const distributeBlocked = useMemo(
+    () => ({ x: distributeBlock(shownUnits, "x"), y: distributeBlock(shownUnits, "y") }),
+    [shownUnits],
+  );
 
   const cutLineType = doc ? selectionCutLineType(doc.nodes, selected) : null;
 
