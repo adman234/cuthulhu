@@ -226,21 +226,32 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     // Mirrors commands::set_cut_line_type: descends into containers, because the attribute is
     // read only on the shape that carries it — setting it on a Group alone would do nothing.
     set_cut_line_type: (a) => {
-      const value = a.value as "Cut" | "NoCut";
-      const ids = a.ids as number[];
-      if (ids.length === 0) throw new Error("set_cut_line_type: EmptySelection");
-      const seen = new Set<number>();
-      const stack = [...ids];
-      while (stack.length > 0) {
-        const id = stack.pop()!;
-        if (seen.has(id)) continue;
-        seen.add(id);
-        const n = doc.nodes[id];
-        if (!n) throw new Error("set_cut_line_type: NotFound");
-        if (typeof n.kind === "object" && n.kind !== null && "Shape" in (n.kind as object)) n.cut_line_type = value;
-        else stack.push(...n.children);
-      }
-      return {};
+      const apply = () => {
+        const value = a.value as "Cut" | "NoCut";
+        const ids = a.ids as number[];
+        if (ids.length === 0) throw new Error("set_cut_line_type: EmptySelection");
+        const seen = new Set<number>();
+        const stack = [...ids];
+        while (stack.length > 0) {
+          const id = stack.pop()!;
+          if (seen.has(id)) continue;
+          seen.add(id);
+          const n = doc.nodes[id];
+          if (!n) throw new Error("set_cut_line_type: NotFound");
+          if (typeof n.kind === "object" && n.kind !== null && "Shape" in (n.kind as object)) n.cut_line_type = value;
+          else stack.push(...n.children);
+        }
+        return {};
+      };
+      // Held, it stands for any edit still on its way when a load is asked for (an import reading
+      // its file): applied on release, so a load that did not wait for it lands first.
+      if (!holdingEdits) return apply();
+      inFlightEdits++;
+      return new Promise((resolve, reject) =>
+        heldEdits.push(() => {
+          inFlightEdits--;
+          try { resolve(apply()); } catch (e) { reject(e); }
+        }));
     },
     // Mirrors commands::set_material_preset: writes the selection and nothing else, because a
     // material inherits and the planner resolves it. Descending here would be the bug the real
@@ -277,8 +288,9 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     load_project: () => {
       // The real backend runs commands one at a time, but only a frontend that waits keeps a load
       // from landing between a commit and the document it named (CodeRabbit on #301).
-      const loads = window as unknown as { __loadDuringCommit?: boolean; __loads?: number };
+      const loads = window as unknown as { __loadDuringCommit?: boolean; __loadDuringEdit?: boolean; __loads?: number };
       if (inFlightCommits > 0) loads.__loadDuringCommit = true;
+      if (inFlightEdits > 0) loads.__loadDuringEdit = true;
       loads.__loads = (loads.__loads ?? 0) + 1;
       const load = () => {
         if (saved) doc = JSON.parse(JSON.stringify(saved));
@@ -483,10 +495,15 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
   let holdingLoads = false;
   const heldLoads: (() => void)[] = [];
   let failNextSnapshot = false;
+  let holdingEdits = false;
+  const heldEdits: (() => void)[] = [];
+  let inFlightEdits = 0;
   let holdingSnapshots = false;
   const heldSnapshots: (() => void)[] = [];
   Object.assign(window, {
     __holdSnapshots: () => { holdingSnapshots = true; },
+    __holdEdits: () => { holdingEdits = true; },
+    __releaseEdits: () => { holdingEdits = false; return release(heldEdits); },
     // Oldest first, one at a time: the race is which document's answer renders last.
     __releaseSnapshot: () => release(heldSnapshots.splice(0, 1)),
     __releaseLatestSnapshot: () => release(heldSnapshots.splice(-1, 1)),
@@ -4063,6 +4080,26 @@ test("a snapshot answering after a newer one has rendered is dropped", async ({ 
   await page.evaluate(() => (window as unknown as { __releaseSnapshot: () => Promise<void> }).__releaseSnapshot());
   await page.waitForTimeout(300);
   await expect(x).toHaveValue(aligned);
+});
+
+test("Open or Reload waits for a document edit already on its way before it loads", async ({ page }) => {
+  // CodeRabbit on #301: the lock is checked when an edit starts, and an import then reads its file
+  // before it sends. A Reload in that gap loaded first, and the import's old root met the new
+  // document. A load now waits for edits already started, as it does for a transform commit.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  const loads = () => page.evaluate(() => (window as unknown as { __loads?: number }).__loads ?? 0);
+  await page.evaluate(() => (window as unknown as { __holdEdits: () => void }).__holdEdits());
+  await page.getByTestId("layer-row").first().click(); // red
+  await page.getByRole("checkbox", { name: "Cut this shape" }).click(); // on its way, held
+  await page.getByRole("button", { name: "Reload" }).click();
+  await page.waitForTimeout(300);
+  expect(await loads()).toBe(0);
+  await page.evaluate(() => (window as unknown as { __releaseEdits: () => Promise<void> }).__releaseEdits());
+
+  await expect.poll(loads).toBe(1);
+  expect(await page.evaluate(() => (window as unknown as { __loadDuringEdit?: boolean }).__loadDuringEdit)).toBeUndefined();
 });
 
 test("Delete, Undo and the other document commands are refused while a document loads", async ({ page }) => {

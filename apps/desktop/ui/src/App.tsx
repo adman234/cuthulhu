@@ -310,18 +310,29 @@ export function App() {
   // until the loaded one renders: each names ids or the root of the document on screen, which the
   // loaded one reuses, so a Delete pressed during a Reload removed what it gave those ids
   // (CodeRabbit on #301). Refused with a word, like the panel's locked controls.
+  // The lock is read when an edit starts, and some then wait before they send (an import reads its
+  // file first): a load waits for every edit started before it, or one could name the old root in
+  // the new document (CodeRabbit on #301). `run` never rejects, so neither does the wait.
+  const editsStarted = useRef(new Set<Promise<boolean>>());
   const { editsLockedNow } = interaction;
   const edit = useCallback(
     (fn: () => Promise<unknown>) => {
-      if (!editsLockedNow()) return run(fn);
-      setError("Not applied: the document is still loading");
-      return Promise.resolve(false);
+      if (editsLockedNow()) {
+        setError("Not applied: the document is still loading");
+        return Promise.resolve(false);
+      }
+      const started = run(fn);
+      editsStarted.current.add(started);
+      void started.finally(() => editsStarted.current.delete(started));
+      return started;
     },
     [run, setError, editsLockedNow],
   );
 
+  // Inside `replaceDocument`, which has locked edits by then, so nothing joins the set while it waits.
   const loadDocument = (path: string) =>
     interaction.replaceDocument(async () => {
+      await Promise.all(editsStarted.current);
       await ipc.loadProject({ path });
       docGen.current++;
     });
