@@ -181,8 +181,9 @@ pub fn delete_nodes(doc: &Document, ids: &[NodeId]) -> Result<Delta, CmdError> {
     }
     let mut ops = vec![];
     let mut seen = HashSet::new();
+    let parents = parent_index(doc);
     for &id in ids {
-        if !seen.insert(id) || has_selected_ancestor(doc, &selected, id) { continue; }
+        if !seen.insert(id) || ancestor_selected(&parents, &selected, id) { continue; }
         // Existence first: an id that names nothing has no parent either, so asking `parent_of`
         // about it would answer `NoParent` for what is really a stale selection.
         doc.get(id).ok_or(CmdError::NotFound)?;
@@ -206,9 +207,11 @@ pub fn reorder(doc: &Document, id: NodeId, new_index: usize) -> Result<Delta, Cm
 /// Several moves, each with its own world-space matrix, committed as one Delta and so one undo.
 /// Align and distribute need a translation per unit, which `transform_nodes`' single matrix cannot
 /// express. All or nothing: one refused entry refuses the batch, so a half-aligned selection is
-/// never saved. Each entry runs against the document as the earlier ones left it, and a node whose
-/// ancestor any entry selects is skipped, as within one `transform_nodes` call, so nothing moves
-/// twice.
+/// never saved. Each entry runs against the document as the earlier ones left it, so an id listed
+/// in two entries moves by both, in order. A node whose ancestor any entry selects is skipped, as
+/// within one `transform_nodes` call: it moves only with that ancestor, by the ancestor's matrix,
+/// not by its own entry's too. Align's units never overlap (`outermost`), so neither case arises
+/// from it; the frontend's preview composes repeated ids the same way.
 pub fn transform_each(doc: &Document, moves: &[(Vec<NodeId>, Affine)]) -> Result<Delta, CmdError> {
     if moves.is_empty() { return Err(CmdError::EmptySelection); }
     let selected: HashSet<NodeId> = moves.iter().flat_map(|(ids, _)| ids.iter().copied()).collect();
@@ -235,7 +238,10 @@ fn parent_index(doc: &Document) -> HashMap<NodeId, NodeId> {
     doc.nodes.iter().flat_map(|(&pid, n)| n.children.iter().map(move |&c| (c, pid))).collect()
 }
 
-/// `has_selected_ancestor` against a parent index.
+/// True when any ancestor of `id` is also in `selected`. Commands that act on a selection
+/// per-subtree (transform, delete) skip such nodes so that exactly one operation applies per
+/// selected subtree: the ancestor carries them along. Takes an index built once by the caller,
+/// since `parent_of` scans the whole document per level.
 fn ancestor_selected(parents: &HashMap<NodeId, NodeId>, selected: &HashSet<NodeId>, id: NodeId) -> bool {
     let mut cur = id;
     while let Some(&pid) = parents.get(&cur) {
@@ -245,7 +251,8 @@ fn ancestor_selected(parents: &HashMap<NodeId, NodeId>, selected: &HashSet<NodeI
     false
 }
 
-/// `world_transform` against a parent index; transforms are read from `doc` as it stands.
+/// `world_transform` against a parent index built once by the caller; transforms are read from
+/// `doc` as it stands.
 fn world_via(doc: &Document, parents: &HashMap<NodeId, NodeId>, id: NodeId) -> Option<Affine> {
     let mut m = doc.get(id)?.transform.clone();
     let mut cur = id;
@@ -260,28 +267,10 @@ fn parent_of(doc: &Document, id: NodeId) -> Option<NodeId> {
     doc.nodes.iter().find(|(_, n)| n.children.contains(&id)).map(|(pid, _)| *pid)
 }
 
-/// True when any ancestor of `id` is also in `selected`. Commands that act on a
-/// selection per-subtree (transform, delete) skip such nodes so that exactly one
-/// operation applies per selected subtree — the ancestor carries them along.
-fn has_selected_ancestor(doc: &Document, selected: &HashSet<NodeId>, id: NodeId) -> bool {
-    let mut cur = id;
-    while let Some(pid) = parent_of(doc, cur) {
-        if selected.contains(&pid) { return true; }
-        cur = pid;
-    }
-    false
-}
-
 /// World transform of `id`: its local transform composed through every ancestor
 /// (node world = local.then(parent world)). None if `id` is not in the document.
 pub fn world_transform(doc: &Document, id: NodeId) -> Option<Affine> {
-    let mut m = doc.get(id)?.transform.clone();
-    let mut cur = id;
-    while let Some(pid) = parent_of(doc, cur) {
-        m = m.then(&doc.get(pid)?.transform);
-        cur = pid;
-    }
-    Some(m)
+    world_via(doc, &parent_index(doc), id)
 }
 
 /// Shape's outline in its own local space (node's own transform NOT applied), in mm,

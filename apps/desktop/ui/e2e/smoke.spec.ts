@@ -273,7 +273,9 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     load_project: () => {
       // The real backend runs commands one at a time, but only a frontend that waits keeps a load
       // from landing between a commit and the document it named (CodeRabbit on #301).
-      if (inFlightCommits > 0) (window as unknown as { __loadDuringCommit?: boolean }).__loadDuringCommit = true;
+      const loads = window as unknown as { __loadDuringCommit?: boolean; __loads?: number };
+      if (inFlightCommits > 0) loads.__loadDuringCommit = true;
+      loads.__loads = (loads.__loads ?? 0) + 1;
       const load = () => {
         if (saved) doc = JSON.parse(JSON.stringify(saved));
         return JSON.stringify(doc);
@@ -4088,8 +4090,9 @@ test("Reload waits for a commit already on the wire before it loads", async ({ p
   await page.getByRole("button", { name: "Reload" }).click();
   await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
 
-  await expect(page.getByTestId("layer-row").first()).toBeVisible();
-  await expect.poll(() => page.evaluate(() => (window as unknown as { __loadDuringCommit?: boolean }).__loadDuringCommit ?? false)).toBe(false);
+  // The load ran (a never-run Reload would pass a no-overlap check), and did not overlap the commit.
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __loads?: number }).__loads ?? 0)).toBe(1);
+  expect(await page.evaluate(() => (window as unknown as { __loadDuringCommit?: boolean }).__loadDuringCommit ?? false)).toBe(false);
   // The reload did happen once the commit had settled: the saved copy has red back at 0.
   await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(0, 6);
 });
@@ -4106,8 +4109,11 @@ test("after a load whose snapshot failed, edits on the old view are not sent", a
   await expect(page.getByText("snapshot unavailable")).toBeVisible(); // loaded, but not re-read
 
   await page.getByTestId("layer-row").first().click(); // red, from the old view
-  await page.getByRole("button", { name: "Align horizontal centres" }).click();
-  await page.waitForTimeout(300);
+  // Locked, and saying why, rather than taking the click and dropping it (silent-failure-hunter).
+  const centre = page.getByRole("button", { name: "Align horizontal centres" });
+  await expect(centre).toBeDisabled();
+  await expect(centre).toHaveAttribute("title", /waiting for the loaded document to be read/);
+  await expect(page.getByLabel("X", { exact: true })).toBeDisabled();
   expect(await commitLog(page)).toEqual([]);
 });
 
@@ -4155,4 +4161,84 @@ test("the fake refuses a held batch whose node was deleted before it was answere
   });
   expect(refused).toBe(true);
   expect(await nodeTransform(page, 3)).toEqual([1, 0, 0, 1, 0, 0]);
+});
+
+test("edits work again once a successful Reload's snapshot has rendered", async ({ page }) => {
+  // pr-test-analyzer on #301: the lock after a load was tested only while held. Were its release
+  // broken, every edit after any Open or Reload would be dead and nothing else would notice.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: "Reload" }).click();
+  await page.getByTestId("layer-row").first().click(); // red
+  const centre = page.getByRole("button", { name: "Align horizontal centres" });
+  await expect(centre).toBeEnabled();
+  await centre.click();
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  expect((await commitLog(page))[0]).toMatchObject({ ids: [2], m: [1, 0, 0, 1, expect.closeTo(160, 6), 0] });
+});
+
+test("a queued align on two pieces sends nothing if one is deleted before it goes", async ({ page }) => {
+  // pr-test-analyzer on #301: an align clicked on two pieces must not turn into "send the survivor
+  // to the mat" because the other went while it waited.
+  const v = await selectRedBesideGroup(page);
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // red to 5..15, parked
+  await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] }); // + the Group
+  await page.getByRole("button", { name: "Align left edges" }).click(); // queued on [red, Group]
+  await page.evaluate(() =>
+    (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> } })
+      .__TAURI_INTERNALS__.invoke("delete", { ids: [2] })); // the Group goes
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // The drag lands and its refresh drops the Group; the align, now on red alone, sends nothing.
+  await expect.poll(async () => (await nodeTransform(page, 4))[4]).toBeCloseTo(5, 6);
+  await page.waitForTimeout(300);
+  expect(await commitLog(page)).toHaveLength(1);
+});
+
+test("a refused edit puts back the preview of an unread commit beneath it", async ({ page }) => {
+  // pr-test-analyzer on #301: every refusal test started with no preview standing. Here the first
+  // drag lands but cannot be re-read, so its preview stands for what the backend holds; a refused
+  // edit on top must return to that, not to the stale committed scene.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __failNextSnapshot: () => void }).__failNextSnapshot());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // lands at 5, unread
+  await expect(page.getByText("the canvas could not be refreshed")).toBeVisible();
+  await expect(page.getByLabel("X", { exact: true })).toHaveValue("5");
+
+  await page.evaluate(() => (window as unknown as { __failNextCommit: () => void }).__failNextCommit());
+  await page.getByLabel("X", { exact: true }).fill("30");
+  await expect(page.getByText("transform refused")).toBeVisible();
+  await expect(page.getByLabel("X", { exact: true })).toHaveValue("5");
+});
+
+test("an align pressed from the keyboard during a drag waits for the drag's commit", async ({ page }) => {
+  // Copilot and CodeRabbit on #301: busy() ignored a drag under the pointer, so the align went out
+  // at once and the release sent a second batch on top of it.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click(); // red
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  const from = await toPage(page, v, { x: 5, y: 5 });
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(from.x + 5 * v.scale, from.y, { steps: 4 }); // dragging
+  await page.getByRole("button", { name: "Align horizontal centres" }).focus();
+  await page.keyboard.press("Enter");
+  await page.mouse.up();
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // The drag first, then the align computed from where it left red; never two on the wire.
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  const [drag, align] = await commitLog(page);
+  expect(drag.m[4]).toBeCloseTo(5, 6);
+  expect(align.m[4]).toBeCloseTo(165 - 10, 6);
+  expect(await page.evaluate(() => (window as unknown as { __maxInFlightCommits?: number }).__maxInFlightCommits)).toBe(1);
 });

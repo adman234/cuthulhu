@@ -80,3 +80,18 @@ describe("applyMoves", () => {
     expect(applyMoves(scene, moves)).toEqual(oneByOne);
   });
 });
+
+describe("applyMoves with a shape listed twice", () => {
+  it("composes the entries in order, as transform_each moves an id listed twice by both", () => {
+    // Type-design review on #301: the preview kept only the last matrix, so it disagreed with the
+    // backend until the snapshot replaced it. Translate then scale about the origin: 1 → 6 → 12.
+    const scene = { nodes: [{ id: 1, bounds: { x: 1, y: 0, w: 2, h: 2 } }] };
+    const moves = [
+      { shapes: [1], m: [1, 0, 0, 1, 5, 0] as Affine6 },
+      { shapes: [1], m: [2, 0, 0, 2, 0, 0] as Affine6 },
+    ];
+    const oneByOne = moves.reduce((s, mv) => applyOptimistic(s, mv.shapes, mv.m), scene);
+    expect(applyMoves(scene, moves)).toEqual(oneByOne);
+    expect(applyMoves(scene, moves).nodes[0].bounds.x).toBe(12);
+  });
+});

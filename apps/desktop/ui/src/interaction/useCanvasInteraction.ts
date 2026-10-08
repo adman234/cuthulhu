@@ -87,6 +87,10 @@ export type CanvasInteraction = {
   /** Draws the scene, selection and any live gesture. App calls it whenever the view, size, scene
    *  or selection changes, so those redraws cannot paint the committed scene over a gesture. */
   repaint: () => void;
+  /** True from a successful Open or Reload until the loaded document's snapshot renders: the canvas
+   *  still shows the old one, and edits are dropped. The panel disables its controls on it, so a
+   *  click there does not vanish without a word (silent-failure-hunter on #301). */
+  editsLocked: boolean;
   /** The geometry the canvas shows: an unread or in-flight commit's preview, else the committed
    *  scene. Anything that computes a transform from current positions must read this one. */
   effectiveScene: Scene;
@@ -351,11 +355,19 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   }, [centre, requestFit, zoomBy]);
 
   // Every transform reaches the backend through here, so all producers share the one-in-flight
-  // rule and the pending preview that stands in for an unread commit. The moves must not share a
-  // shape: the backend moves a node under another listed node only with that node, and applies an
-  // id listed twice twice, while the preview keeps one matrix per shape, the last. Every caller
-  // sends one move or align's units, which `outermost` keeps disjoint.
-  function send(moves: Move[], requestedAt: number) {
+  // rule and the pending preview that stands in for an unread commit. An id listed twice moves by
+  // both, in the preview as in the backend; a node under another listed node moves only with that
+  // node in the backend but by both here, so the moves must not nest. Every caller sends one move
+  // or align's units, which `outermost` keeps disjoint. Filtered here as well as by the producers
+  // that decide whether to send, so a drag's release cannot put a non-finite matrix on the wire
+  // either (type-design review on #301).
+  function send(unfiltered: Move[], requestedAt: number) {
+    const moves = effective(unfiltered);
+    if (moves.length === 0) {
+      repaint();
+      gestureEnded();
+      return;
+    }
     const { expand } = latest.current;
     // What a refusal puts back. Not always nothing: a commit that landed but could not be re-read
     // leaves its preview standing for the geometry the backend holds, and this one was built on it.
@@ -424,7 +436,19 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // settle, a render before the drain, and an edit or drag in that gap went out at once and
   // overlapped the drained one on the wire (CodeRabbit on #301). And while a load replaces the
   // document, which nothing should edit until it is there.
-  const busy = () => inFlight.current || drainDue.current || replacing.current || stale();
+  // A transform drag under the pointer counts too: its release sends a commit, so an align pressed
+  // from the keyboard meanwhile went out first and the release put a second on the wire (Copilot
+  // and CodeRabbit on #301). It waits in the queue, which `gestureEnded` drains.
+  const busy = () =>
+    inFlight.current || drainDue.current || replacing.current || stale() || gesture.current?.t === "transform";
+
+  // A transform gesture ended without a commit (a no-op release, a cancel, nothing finite to send):
+  // edits queued behind it have no settle to drain them, so drain on the next render instead.
+  function gestureEnded() {
+    if (queued.current.size === 0 || inFlight.current) return;
+    drainDue.current = true;
+    previewChanged();
+  }
 
   function transformEach(key: string, make: (s: Scene, now: SendTime) => Move[]) {
     // Dropped, not queued: it was aimed at shapes of the document that just left.
@@ -560,14 +584,17 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     }
     if (isIdentity(g.m)) {
       repaint();
+      gestureEnded();
       return;
     }
     send([{ ids: g.ids, m: g.m }], performance.now());
   };
 
   const onPointerCancel = () => {
+    const wasTransform = gesture.current?.t === "transform";
     gesture.current = null;
     repaint();
+    if (wasTransform) gestureEnded();
   };
 
   const onPointerEnter = () => {
@@ -585,6 +612,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     cursor: cursorScreen ? screenToWorld(view, cursorScreen) : null,
     requestFit,
     repaint,
+    editsLocked: stale(),
     effectiveScene: gestureScene(pending.current, scene, sceneRev),
     transformWith,
     transformEach,

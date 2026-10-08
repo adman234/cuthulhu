@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import type { Affine6, Bounds } from "../render/hittest";
+import { unionBounds, type Affine6, type Bounds } from "../render/hittest";
 import { translate } from "../render/affine";
 
 /** What one align or distribute click moves as a piece: a selected id, with the world bounds of
@@ -20,19 +20,6 @@ export const AT: Record<AlignMode, number> = { left: 0, hcenter: 0.5, right: 1, 
 const start = (b: Bounds, a: Axis) => (a === "x" ? b.x : b.y);
 const size = (b: Bounds, a: Axis) => (a === "x" ? b.w : b.h);
 const along = (a: Axis, d: number): Affine6 => (a === "x" ? translate(d, 0) : translate(0, d));
-
-/** The box around every one of `boxes`, which must not be empty. A unit's bounds and the
- *  selection's both come from here, so the two cannot disagree about an edge. */
-export function unionBounds(boxes: Bounds[]): Bounds {
-  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (const b of boxes) {
-    x0 = Math.min(x0, b.x);
-    y0 = Math.min(y0, b.y);
-    x1 = Math.max(x1, b.x + b.w);
-    y1 = Math.max(y1, b.y + b.h);
-  }
-  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
-}
 
 /** Units that would not move are left out, so a click that changes nothing commits nothing. So is
  *  a non-finite move: it crosses IPC as null and comes back as an unreadable error. */

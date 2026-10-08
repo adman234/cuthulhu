@@ -3,11 +3,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction 
 import { listen } from "@tauri-apps/api/event";
 import * as ipc from "./ipc";
 import { Canvas2DRenderer } from "./render/Canvas2DRenderer";
-import type { Affine6, Scene, ShapeGeom } from "./render/hittest";
+import { unionBounds, type Affine6, type Scene, type ShapeGeom } from "./render/hittest";
 import { pathBounds } from "./render/pathdata";
 import { IDENTITY, compose, transformBounds } from "./render/affine";
 import { outermost, shapesUnder, toggleId } from "./interaction/marquee";
-import { AXIS, alignMoves, distributeBlock, distributeMoves, unionBounds, type AlignMode, type Axis, type Unit } from "./interaction/align";
+import { AXIS, alignMoves, distributeBlock, distributeMoves, type AlignMode, type Axis, type Unit } from "./interaction/align";
 import type { Matrix } from "./interaction/transform";
 import { useCanvasInteraction, type CommitOutcome } from "./interaction/useCanvasInteraction";
 import { viewMatrix, zoomPercent } from "./interaction/viewport";
@@ -555,6 +555,7 @@ export function App() {
           onChangeH={(v) => commitScale("h", v)}
           unitCount={unitCount}
           distributeBlocked={distributeBlocked}
+          editsLocked={interaction.editsLocked}
           onAlign={align}
           onDistribute={distribute}
           cutLineType={cutLineType}

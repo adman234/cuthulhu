@@ -5,6 +5,8 @@ import { AT, AXIS, type AlignMode, type Axis, type DistributeBlock } from "../in
 type Props = {
   /** Selected ids that move as a piece; see `outermost`. */
   unitCount: number;
+  /** Why every button is off for now, or null; see `CanvasInteraction.editsLocked`. */
+  locked: string | null;
   /** Per axis, from `distributeBlock`: why distribute cannot act there, or null. */
   distributeBlocked: Record<Axis, DistributeBlock | null>;
   onAlign: (mode: AlignMode) => void;
@@ -74,7 +76,7 @@ export function distributeTitle(label: string, block: DistributeBlock | null): s
   return block ? `${label}: ${BLOCKED[block]}` : label;
 }
 
-export function AlignRow({ unitCount, distributeBlocked, onAlign, onDistribute }: Props) {
+export function AlignRow({ unitCount, locked, distributeBlocked, onAlign, onDistribute }: Props) {
   // One unit aligns to the artboard, so align needs one. Distribute's reasons come from
   // `distributeBlock`, per axis, and the tooltip names the one that disabled it.
   return (
@@ -83,7 +85,7 @@ export function AlignRow({ unitCount, distributeBlocked, onAlign, onDistribute }
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
         {ALIGNS.map(({ mode, label }) => (
-          <button key={mode} aria-label={label} title={label} disabled={unitCount === 0} style={btn}
+          <button key={mode} aria-label={label} title={locked ? `${label}: ${locked}` : label} disabled={locked !== null || unitCount === 0} style={btn}
                   onClick={() => onAlign(mode)}>
             <AlignIcon at={AT[mode]} vertical={AXIS[mode] === "y"} />
           </button>
@@ -91,8 +93,8 @@ export function AlignRow({ unitCount, distributeBlocked, onAlign, onDistribute }
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
         {DISTRIBUTES.map(({ axis, label }) => (
-          <button key={axis} aria-label={label} disabled={distributeBlocked[axis] !== null} style={btn}
-                  title={distributeTitle(label, distributeBlocked[axis])}
+          <button key={axis} aria-label={label} disabled={locked !== null || distributeBlocked[axis] !== null} style={btn}
+                  title={locked ? `${label}: ${locked}` : distributeTitle(label, distributeBlocked[axis])}
                   onClick={() => onDistribute(axis)}>
             <DistributeIcon vertical={axis === "y"} />
           </button>
