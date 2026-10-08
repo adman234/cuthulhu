@@ -171,6 +171,12 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       return answer(() => applyTransforms([{ ids: a.ids as number[], m }]));
     },
     commit_transforms: (a) => {
+      // Counted while unanswered: the real backend serialises commands, so two batches on the wire
+      // at once is a frontend that stopped holding its queue (CodeRabbit on #301).
+      const hooks = window as unknown as { __maxInFlightCommits?: number };
+      inFlightCommits += 1;
+      hooks.__maxInFlightCommits = Math.max(hooks.__maxInFlightCommits ?? 0, inFlightCommits);
+      const answered = ((): Promise<unknown> => {
       // Mirrors commands::transform_each: every move in one undo, all or nothing, each entry on
       // what the earlier ones left, and nothing moved twice. Each entry is recorded with its batch,
       // so a test can tell one click from several. A refusal waits on a hold like an answer does,
@@ -195,6 +201,8 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       hooks.__batches = (hooks.__batches ?? 0) + 1;
       for (const mv of moves) hooks.__commitTransforms.push({ ids: mv.ids, m: mv.m, batch: hooks.__batches });
       return answer(() => applyTransforms(moves));
+      })();
+      return answered.finally(() => { inFlightCommits -= 1; });
     },
     delete: (a) => {
       for (const id of a.ids as number[]) {
@@ -449,9 +457,11 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
   let holdingCommits = false;
   const heldCommits: (() => void)[] = [];
   let failNextCommit = false;
+  let inFlightCommits = 0;
   let failNextSnapshot = false;
   Object.assign(window, {
     __failNextCommit: () => { failNextCommit = true; },
+    __releaseCommitsNoWait: () => { holdingCommits = false; heldCommits.splice(0).forEach((f) => f()); },
     __failNextSnapshot: () => { failNextSnapshot = true; },
     __holdCommits: () => { holdingCommits = true; },
     __releaseCommits: () => { holdingCommits = false; return release(heldCommits); },
@@ -3970,4 +3980,25 @@ test("a queued align finds a Group's shapes in the tree as it stands when it is 
   // which would have sent the Group to 5 instead.
   await expect.poll(async () => (await batchLog(page)).length).toBe(2);
   expect((await batchLog(page))[1]).toMatchObject({ ids: [2], m: [1, 0, 0, 1, expect.closeTo(-5, 6), 0] });
+});
+
+test("an edit made between a commit settling and the queue draining still waits its turn", async ({ page }) => {
+  // CodeRabbit on #301: inFlight cleared on settle but the queue drained a render later, so an
+  // edit made in between was sent at once and overlapped the drained one on the wire.
+  const v = await selectRedBesideGroup(page);
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 5 * v.scale); // red to 5..15 × 5..15
+  await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] }); // + the Group
+  await page.getByRole("button", { name: "Align top edges" }).click(); // queued behind the drag
+
+  // Release without yielding a task, let the settled chain run its microtasks, then click: React
+  // has not rendered yet, so this lands in the gap before the drain.
+  await page.evaluate(async () => {
+    (window as unknown as { __releaseCommitsNoWait: () => void }).__releaseCommitsNoWait();
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    (document.querySelector('[aria-label="Align right edges"]') as HTMLButtonElement).click();
+  });
+
+  await expect.poll(async () => (await batchLog(page)).length).toBe(3);
+  expect(await page.evaluate(() => (window as unknown as { __maxInFlightCommits?: number }).__maxInFlightCommits)).toBe(1);
 });

@@ -497,8 +497,11 @@ export function App() {
             run(async () => {
               const p = await ipc.pickOpenPath();
               if (p) {
-                await ipc.loadProject({ path: p });
+                // Before the load, not after: the backend has replaced the document by the time
+                // loadProject resolves, and a commit settling in between would drain into it
+                // (CodeRabbit on #301).
                 interaction.forgetQueued();
+                await ipc.loadProject({ path: p });
                 setLastPath(p);
                 setSelected([]); // loaded doc may not contain the old ids
                 interaction.requestFit();
@@ -507,8 +510,8 @@ export function App() {
           }
           onReload={() =>
             run(async () => {
-              await ipc.loadProject({ path: lastPath! });
               interaction.forgetQueued();
+              await ipc.loadProject({ path: lastPath! });
               setSelected([]);
               interaction.requestFit();
             })

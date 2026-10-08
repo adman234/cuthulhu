@@ -371,9 +371,14 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // Moves that would change nothing are dropped, so a no-op never holds the wire.
   const effective = (moves: Move[]) => moves.filter((mv) => !isIdentity(mv.m));
 
+  // Busy from send until the queue has drained after that commit settles. inFlight alone cleared on
+  // settle, a render before the drain, and an edit or drag in that gap went out at once and
+  // overlapped the drained one on the wire (CodeRabbit on #301).
+  const busy = () => inFlight.current || drainDue.current;
+
   function transformEach(key: string, make: (s: Scene) => Move[]) {
     const at = performance.now();
-    if (inFlight.current) {
+    if (busy()) {
       queued.current.delete(key);
       queued.current.set(key, { make, at });
       return;
@@ -394,6 +399,8 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // Sends queued edits in the order they were made, one per settled commit. An edit that comes out
   // as no change (its field already says that) is dropped so it cannot stall the rest.
   function drain() {
+    // A send in flight drains on its own settle; draining now would put a second on the wire.
+    if (inFlight.current) return;
     for (const [key, { make, at }] of queued.current) {
       queued.current.delete(key);
       const moves = effective(make(current().scene));
@@ -426,7 +433,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     const kind = box ? handleUnder(box, p, v.scale) : null;
     // Shift-click inside the box toggles the node under the pointer rather than dragging.
     if (box && kind && !(kind === "move" && e.shiftKey)) {
-      if (inFlight.current) return;
+      if (busy()) return;
       const targets = snapTargets(s, shapes, latest.current.artboard);
       gesture.current = { t: "transform", kind, box, ids: sel, shapes, start: p, m: IDENTITY, targets, guides: [] };
       return;
@@ -438,7 +445,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     }
     const next = e.shiftKey ? toggleId(sel, hit) : [hit];
     setSelected(next);
-    if (inFlight.current) {
+    if (busy()) {
       gesture.current = null;
       return;
     }
