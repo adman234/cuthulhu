@@ -146,6 +146,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // Set when a commit settles with edits queued behind it; the next render's effect drains them.
   const drainDue = useRef(false);
   useEffect(() => {
+    if (loadedAtRev.current !== null && !stale()) loadedAtRev.current = null;
     if (!drainDue.current) return;
     drainDue.current = false;
     drain();
@@ -158,6 +159,11 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   const replacing = useRef(false);
   // The commit on the wire, settled or not, so a load can wait for it (`replaceDocument`).
   const settling = useRef<Promise<void>>(Promise.resolve());
+  // The scene revision when a load replaced the document. Until a newer snapshot renders, the
+  // canvas still shows the old document, so an edit made there would send old bounds and an id the
+  // new one may reuse (Copilot on #301); `stale()` holds until then, even if that refresh failed.
+  const loadedAtRev = useRef<number | null>(null);
+  const stale = () => loadedAtRev.current !== null && latest.current.sceneRev <= loadedAtRev.current;
   // Property edits made while a commit is on the wire, in the order they were made.
   const queued = useRef(new Map<string, { make: (s: Scene, now: SendTime) => Move[]; at: number }>());
   const sendTime = (): SendTime => ({ expand: latest.current.expand, artboard: latest.current.artboard });
@@ -392,6 +398,9 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
       await settling.current;
       await load();
       replaced = true;
+      loadedAtRev.current = latest.current.sceneRev;
+      // The old document's preview has nothing left to stand in for.
+      pending.current = null;
     } finally {
       replacing.current = false;
       // Before anything can drain: every queued edit names ids from the document that just left.
@@ -410,9 +419,11 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   // settle, a render before the drain, and an edit or drag in that gap went out at once and
   // overlapped the drained one on the wire (CodeRabbit on #301). And while a load replaces the
   // document, which nothing should edit until it is there.
-  const busy = () => inFlight.current || drainDue.current || replacing.current;
+  const busy = () => inFlight.current || drainDue.current || replacing.current || stale();
 
   function transformEach(key: string, make: (s: Scene, now: SendTime) => Move[]) {
+    // Dropped, not queued: it was aimed at shapes of the document that just left.
+    if (stale()) return;
     const at = performance.now();
     if (busy()) {
       queued.current.delete(key);

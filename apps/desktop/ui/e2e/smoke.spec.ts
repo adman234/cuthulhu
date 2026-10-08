@@ -4091,3 +4091,20 @@ test("Reload waits for a commit already on the wire before it loads", async ({ p
   // The reload did happen once the commit had settled: the saved copy has red back at 0.
   await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(0, 6);
 });
+
+test("after a load whose snapshot failed, edits on the old view are not sent", async ({ page }) => {
+  // Copilot on #301: replacing cleared when the load returned, but the new document's snapshot
+  // comes after, so the canvas still showed the old one; an align there sent old bounds and a
+  // reused id into the loaded document. Edits stay off until a newer snapshot has rendered.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.evaluate(() => (window as unknown as { __failNextSnapshot: () => void }).__failNextSnapshot());
+  await page.getByRole("button", { name: "Reload" }).click();
+  await expect(page.getByText("snapshot unavailable")).toBeVisible(); // loaded, but not re-read
+
+  await page.getByTestId("layer-row").first().click(); // red, from the old view
+  await page.getByRole("button", { name: "Align horizontal centres" }).click();
+  await page.waitForTimeout(300);
+  expect(await commitLog(page)).toEqual([]);
+});
