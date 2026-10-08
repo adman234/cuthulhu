@@ -390,6 +390,11 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
 
   async function replaceDocument(load: () => Promise<unknown>) {
     replacing.current = true;
+    // A drag still under the pointer is not a commit yet, so nothing below waits for it, and its
+    // pointer-up would send the old ids and matrix into the loaded document (Copilot on #301).
+    // Dropped here, before the first await, so its release has nothing to send.
+    gesture.current = null;
+    repaint();
     let replaced = false;
     try {
       // A commit already on the wire settles first. Today the backend runs these sync commands in

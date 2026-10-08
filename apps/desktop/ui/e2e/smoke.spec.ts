@@ -530,8 +530,10 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     };
     for (const { ids, m } of moves) {
       for (const id of new Set(ids)) {
-        const node = doc.nodes[id];
-        if (!node || hasSelectedAncestor(id)) continue;
+        // Checked again when answered: a node deleted while the batch was held is NotFound in
+        // Rust, which refuses the whole batch rather than skipping it (Copilot on #301).
+        if (!doc.nodes[id]) throw new Error("the node or machine this command names is not there");
+        if (hasSelectedAncestor(id)) continue;
         const pw = worldOf(parentOf(id));
         staged.set(id, cmp(cmp(cmp(transformOf(id), pw), m), inv(pw)));
       }
@@ -4107,4 +4109,50 @@ test("after a load whose snapshot failed, edits on the old view are not sent", a
   await page.getByRole("button", { name: "Align horizontal centres" }).click();
   await page.waitForTimeout(300);
   expect(await commitLog(page)).toEqual([]);
+});
+
+test("a drag held through a Reload is dropped, not sent to the loaded document", async ({ page }) => {
+  // Copilot on #301: an unreleased drag is not a commit yet, so the load did not wait for it, and
+  // its pointer-up sent the old ids and matrix straight into the reloaded document.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  const from = await toPage(page, v, { x: 5, y: 5 });
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(from.x + 5 * v.scale, from.y, { steps: 4 }); // dragging, not released
+  await page.getByRole("button", { name: "Reload" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("layer-row").first()).toBeVisible();
+  await page.mouse.up();
+
+  await page.waitForTimeout(300);
+  expect(await commitLog(page)).toEqual([]);
+  expect((await nodeTransform(page, 2))[4]).toBeCloseTo(0, 6);
+});
+
+test("the fake refuses a held batch whose node was deleted before it was answered", async ({ page }) => {
+  // Copilot on #301: the id check ran at the call and the staged apply skipped a node gone by
+  // the answer, so the fake applied the rest where Rust refuses the batch.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const refused = await page.evaluate(async () => {
+    const w = window as unknown as {
+      __holdCommits: () => void; __releaseCommits: () => Promise<void>;
+      __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> };
+    };
+    w.__holdCommits();
+    const batch = w.__TAURI_INTERNALS__.invoke("commit_transforms", { moves: [
+      { ids: [2], m: [1, 0, 0, 1, 5, 0] },
+      { ids: [3], m: [1, 0, 0, 1, 5, 0] },
+    ] }).then(() => false, () => true);
+    await w.__TAURI_INTERNALS__.invoke("delete", { ids: [2] });
+    await w.__releaseCommits();
+    return batch;
+  });
+  expect(refused).toBe(true);
+  expect(await nodeTransform(page, 3)).toEqual([1, 0, 0, 1, 0, 0]);
 });
