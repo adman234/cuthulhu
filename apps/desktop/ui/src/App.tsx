@@ -160,14 +160,17 @@ export function App() {
   const docGen = useRef(0);
   // Snapshots in the order they were asked for, and the latest that rendered. One answering after a
   // newer one rendered is older than what is on screen: shown under the next revision, it put the
-  // canvas back to before an edit the newer one already showed (CodeRabbit on #301).
+  // canvas back to before an edit the newer one already showed (CodeRabbit on #301). It answers
+  // with the revision on screen instead, which was read later and so holds everything it would
+  // have: as null, a transform's preview stayed up over that newer scene (Copilot on #301).
   const snapshotsAsked = useRef(0);
   const snapshotShown = useRef(0);
   const refresh = useCallback(async (): Promise<number | null> => {
     const gen = docGen.current;
     const asked = ++snapshotsAsked.current;
     const json = (await ipc.snapshot()) as string;
-    if (gen !== docGen.current || asked < snapshotShown.current) return null;
+    if (gen !== docGen.current) return null;
+    if (asked < snapshotShown.current) return revCounter.current;
     snapshotShown.current = asked;
     const parsed = JSON.parse(json) as DocSnapshot;
     const rev = ++revCounter.current;

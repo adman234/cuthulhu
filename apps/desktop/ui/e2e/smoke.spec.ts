@@ -4146,6 +4146,32 @@ test("an import still reading its file finishes before Reload loads", async ({ p
   await expect.poll(order).toEqual(["import_svg", "load_project"]);
 });
 
+test("a transform's late snapshot retires its preview against the newer one already shown", async ({ page }) => {
+  // Copilot on #301: an align's snapshot answering after a Delete's had rendered was dropped as
+  // "nothing rendered", so the align's preview stayed up over the newer scene, still drawing (and
+  // hit-testing) the shape the Delete had removed.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const v = await fittedView(page);
+  await page.getByTestId("layer-row").first().click(); // red
+  const x = page.getByLabel("X", { exact: true });
+  await page.evaluate(() => (window as unknown as { __holdSnapshots: () => void }).__holdSnapshots());
+  await page.getByRole("button", { name: "Align horizontal centres" }).click(); // its snapshot is held
+  await expect.poll(() => commitLog(page).then((l) => l.length)).toBe(1);
+  await expect(x).not.toHaveValue("0");
+  const alignedX = Number(await x.inputValue());
+  await page.keyboard.press("Delete"); // its snapshot is held too
+
+  await page.evaluate(() => (window as unknown as { __releaseLatestSnapshot: () => Promise<void> }).__releaseLatestSnapshot());
+  await expect(page.getByTestId("layer-row")).toHaveCount(1); // the Delete's, red gone
+  await page.evaluate(() => (window as unknown as { __releaseSnapshot: () => Promise<void> }).__releaseSnapshot());
+  await page.waitForTimeout(300);
+
+  const at = await toPage(page, v, { x: alignedX + 5, y: 5 });
+  await page.mouse.click(at.x, at.y);
+  await expect(x).toHaveCount(0);
+});
+
 test("Delete, Undo and the other document commands are refused while a document loads", async ({ page }) => {
   // CodeRabbit on #301: only transforms waited for a load. A Delete pressed during a Reload named ids
   // from the document on screen, and the loaded one reuses them.
