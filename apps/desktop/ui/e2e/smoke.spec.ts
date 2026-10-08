@@ -3903,4 +3903,6 @@ test("the fake accepts a batch under a tiny but invertible parent, as Rust does"
   );
   expect(refused).toBe(false);
   expect((await nodeTransform(page, 2))[4]).toBeCloseTo(5, 6);
+  // A 1 mm world move beneath a 1e-7 scale is 1e7 in the rect's own space (CodeRabbit on #301).
+  expect((await nodeTransform(page, 5))[4] / 1e7).toBeCloseTo(1, 6);
 });
