@@ -8,6 +8,7 @@
   "commit_transforms": ["moves"],
   "confirm_pass_done": [],
   "connect_device": ["info"],
+  "convert_to_path": ["ids"],
   "cut": ["request"],
   "delete": ["ids"],
   "delete_preset": ["id", "machineId"],
@@ -53,5 +54,7 @@
   "trace_image": ["controls", "path"],
   "travel_for_order": ["docRevision", "grouping", "passes"],
   "undo": [],
-  "weed_box": ["ids", "lineSpacingMm", "marginMm"]
+  "update_text": ["family", "id", "sizeMm", "text"],
+  "weed_box": ["ids", "lineSpacingMm", "marginMm"],
+  "weld": ["ids"]
 }

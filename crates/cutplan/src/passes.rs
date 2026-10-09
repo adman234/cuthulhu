@@ -400,7 +400,7 @@ mod tests {
 
         if let Some(family) = any_available_family() {
             let id = ed.doc.ids.next();
-            let node = Node::shape(id, ShapeKind::Text { family, size_mm: 10.0, text: "Hi".into() });
+            let node = Node::shape(id, ShapeKind::Text { family, size_mm: 10.0, text: "Hi".into(), d: String::new() });
             ed.commit(Delta(vec![NodeOp::Add { parent: root, node, index: usize::MAX }]));
             let planned = plan_passes(&ed.doc).unwrap();
             assert_eq!(planned.passes.len(), 1);
@@ -412,6 +412,7 @@ mod tests {
         let bad_id = ed.doc.ids.next();
         let node = Node::shape(bad_id, ShapeKind::Text {
             family: "Definitely Not A Real Font Family 12345".into(), size_mm: 10.0, text: "Hi".into(),
+            d: String::new(),
         });
         let mut bad_doc = ed.doc.clone();
         bad_doc.apply(Delta(vec![NodeOp::Add { parent: root, node, index: usize::MAX }]));
@@ -433,7 +434,7 @@ mod tests {
     fn a_skipped_text_that_cannot_resolve_does_not_refuse_the_plan() {
         let Some(family) = family_that_cannot_draw(UNDRAWABLE) else { return };
         let unresolvable = ShapeKind::Text {
-            family, size_mm: 10.0, text: UNDRAWABLE.into(),
+            family, size_mm: 10.0, text: UNDRAWABLE.into(), d: String::new(),
         };
 
         let mut ed = Editor::new();
@@ -790,7 +791,7 @@ mod tests {
     fn a_no_cut_shape_is_counted_under_every_grouping() {
         let mut doc = Document::new();
         let mut shape = Node::shape(doc.ids.next(), ShapeKind::Text {
-            family: "no such family".into(), size_mm: 10.0, text: "x".into() });
+            family: "no such family".into(), size_mm: 10.0, text: "x".into(), d: String::new() });
         shape.cut_line_type = CutLineType::NoCut;
         doc.apply(Delta(vec![NodeOp::Add { parent: doc.root, node: shape, index: usize::MAX }]));
 

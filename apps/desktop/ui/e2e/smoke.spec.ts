@@ -181,6 +181,14 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     doc.nodes[parent].children.push(id);
     return id;
   };
+  const fakeText = (family: string, size: number, text: string) => {
+    if (!(size > 0 && size <= 1000)) throw new Error("a text size must be more than 0 and at most 1000 mm");
+    if (text.trim() === "") throw new Error("the text has no characters to draw");
+    const lines = text.split("\n");
+    const w = Math.max(...lines.map((l) => l.length)) * size * 0.6;
+    const h = size * 0.7 + (lines.length - 1) * size * 1.2;
+    return { family, size_mm: size, text, d: boxPath({ x: 0, y: -size * 0.7, w, h }) };
+  };
   const addedDelta = (ids: number[]) => ids.map((id) => ({ Add: { parent: parentOf(id), node: doc.nodes[id], index: 0 } }));
 
   const unimplemented = (cmd: string): never => {
@@ -221,10 +229,23 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       // selected family actually crosses the IPC boundary.
       if (typeof a.family !== "string" || a.family.length === 0) throw new Error("add_text: missing family");
       if (typeof a.sizeMm !== "number" || typeof a.text !== "string") throw new Error("add_text: missing sizeMm/text");
-      const id = nextId++;
-      doc.nodes[id] = { id, kind: { Shape: { Path: { d: "" } } }, transform: [1, 0, 0, 1, 0, 0], style: DEFAULT_STYLE, children: [], cut_line_type: "Cut", material_preset: { state: "inherit" } };
-      doc.nodes[a.parent as number].children.push(id);
-      return {};
+      shapeCall("add_text", a);
+      // Mirrors commands::add_text: an editable Text node carrying the outline it was drawn with
+      // (a box per line here), one size down from the origin.
+      const id = addNode(a.parent as number, { Shape: { Text: fakeText(a.family as string, a.sizeMm as number, a.text as string) } });
+      doc.nodes[id].transform = [1, 0, 0, 1, 0, a.sizeMm as number];
+      return addedDelta([id]);
+    },
+    // Mirrors commands::update_text: the same node, new words, kept in place.
+    update_text: (a) => {
+      shapeCall("update_text", a);
+      const n = doc.nodes[a.id as number];
+      if (!n) throw new Error("the node or machine this command names is not there");
+      if (!(typeof n.kind === "object" && n.kind !== null && "Shape" in (n.kind as object) && "Text" in ((n.kind as { Shape: object }).Shape))) {
+        throw new Error("only text can be edited as text");
+      }
+      n.kind = { Shape: { Text: fakeText(a.family as string, a.sizeMm as number, a.text as string) } };
+      return [{ Update: { id: n.id, before: null, after: n } }];
     },
     commit_transform: (a) => {
       // Composed in full: handles send scale and rotation, and a fake that kept only the
@@ -339,6 +360,38 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
         for (const u of units) added.push(copy(u, parentOf(u)!, c * (b.w + (a.gapXMm as number)), r * (b.h + (a.gapYMm as number))));
       }
       return addedDelta(added);
+    },
+    // Mirrors shape_tools::weld: the selection's subtrees go, one Path of their union comes.
+    weld: (a) => {
+      shapeCall("weld", a);
+      const units = unitsOf(a.ids as number[]);
+      const b = unionBox(units);
+      const parent = parentOf(units[0])!;
+      const first = doc.nodes[units[0]];
+      const drop = (id: number) => { for (const c of doc.nodes[id].children) drop(c); delete doc.nodes[id]; };
+      for (const u of units) {
+        doc.nodes[parentOf(u)!].children = doc.nodes[parentOf(u)!].children.filter((c) => c !== u);
+        drop(u);
+      }
+      const id = addNode(parent, { Shape: { Path: { d: boxPath(b) } } });
+      doc.nodes[id].style = first.style;
+      return addedDelta([id]);
+    },
+    // Mirrors commands::convert_to_path: same node, its outline as a Path; containers descended.
+    convert_to_path: (a) => {
+      shapeCall("convert_to_path", a);
+      const ids = a.ids as number[];
+      if (ids.length === 0) throw new Error("the selection has nothing this command can act on");
+      const visit = (id: number) => {
+        const n = doc.nodes[id];
+        if (!n) throw new Error("the node or machine this command names is not there");
+        if (typeof n.kind === "object" && n.kind !== null && "Shape" in (n.kind as object)) {
+          const shape = (n.kind as { Shape: Record<string, Record<string, unknown>> }).Shape;
+          if (!("Path" in shape)) n.kind = { Shape: { Path: { d: boxPath(localBox(shape)) } } };
+        } else n.children.forEach(visit);
+      };
+      ids.forEach(visit);
+      return [];
     },
     delete: (a) => {
       for (const id of a.ids as number[]) {
@@ -3098,6 +3151,96 @@ test("text dialog: picking a family and Insert adds a shape", async ({ page }) =
   // add_text mock was invoked — it adds a node to doc, same observable-effect assertion
   // the trace-insert test above uses.
   await expect(page.getByTestId("layer-row")).toHaveCount(1);
+});
+
+test("text dialog: the words, size and family typed are what is added, and the text is selected", async ({ page }) => {
+  await page.addInitScript(installMockTauri);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Text" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add text" });
+  await dialog.getByLabel("Text content").fill("Hello\nmakers");
+  await dialog.getByLabel("Text size").fill("25");
+  await dialog.getByLabel("Font family").selectOption("Arial");
+  await dialog.getByRole("button", { name: "Insert" }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByTestId("layer-row")).toHaveText(["Text"]);
+  await expect(page.getByTestId("layer-row").first()).toHaveAttribute("data-selected", "true");
+  const [call] = await shapeCalls(page);
+  expect(call.args).toEqual({ parent: 1, family: "Arial", sizeMm: 25, text: "Hello\nmakers" });
+});
+
+test("text dialog: blank text or a bad size cannot be inserted, and says why", async ({ page }) => {
+  await page.addInitScript(installMockTauri);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Text" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add text" });
+  await dialog.getByLabel("Text content").fill("   ");
+  await expect(dialog.getByRole("alert")).toHaveText("Type some text");
+  await expect(dialog.getByRole("button", { name: "Insert" })).toBeDisabled();
+  await dialog.getByLabel("Text content").fill("Hi");
+  await dialog.getByLabel("Text size").fill("0");
+  await expect(dialog.getByRole("alert")).toHaveText("Size must be a number of mm above zero");
+});
+
+test("Edit text… reopens the dialog on the selected text, prefilled, and rewrites it in place", async ({ page }) => {
+  await page.addInitScript(installMockTauri);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Text" }).click();
+  const add = page.getByRole("dialog", { name: "Add text" });
+  await add.getByLabel("Text content").fill("Helo");
+  await add.getByLabel("Font family").selectOption("Comic Sans MS");
+  await add.getByRole("button", { name: "Insert" }).click();
+  await expect(add).not.toBeVisible();
+
+  await page.getByRole("button", { name: "Edit text…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Edit text" });
+  await expect(dialog.getByLabel("Text content")).toHaveValue("Helo");
+  await expect(dialog.getByLabel("Text size")).toHaveValue("10");
+  await expect(dialog.getByLabel("Font family")).toHaveValue("Comic Sans MS");
+  await dialog.getByLabel("Text content").fill("Hello");
+  await dialog.getByRole("button", { name: "Apply" }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByTestId("layer-row")).toHaveCount(1);
+  const calls = await shapeCalls(page);
+  expect(calls[1]).toEqual({ cmd: "update_text", args: { id: 2, family: "Comic Sans MS", sizeMm: 10, text: "Hello" } });
+});
+
+test("double-clicking text on the canvas opens its editor, in the simple layout too", async ({ page }) => {
+  await useSimpleLayout(page);
+  await page.addInitScript(installMockTauri);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Text" }).click();
+  const add = page.getByRole("dialog", { name: "Add text" });
+  await add.getByLabel("Text content").fill("BIG");
+  await add.getByLabel("Text size").fill("200");
+  await add.getByRole("button", { name: "Insert" }).click();
+  await expect(add).not.toBeVisible();
+  // The fake draws the text as a box 360 x 140 mm with its top at y = 60 (200 down, 0.7 em up).
+  const at = await toPage(page, await fittedView(page), { x: 180, y: 130 });
+  await page.mouse.dblclick(at.x, at.y);
+  const dialog = page.getByRole("dialog", { name: "Edit text" });
+  await expect(dialog.getByLabel("Text content")).toHaveValue("BIG");
+});
+
+test("Weld replaces the selection with one Path and selects it", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await selectRows(page, [0, 1]);
+  await page.getByRole("button", { name: "Weld", exact: true }).click();
+  await expect(page.getByTestId("layer-row")).toHaveText(["Path"]);
+  await expect(page.getByTestId("layer-row").first()).toHaveAttribute("data-selected", "true");
+  expect(await shapeCalls(page)).toEqual([{ cmd: "weld", args: { ids: [2, 3] } }]);
+});
+
+test("To path turns text into a plain Path in place", async ({ page }) => {
+  await page.addInitScript(installMockTauri);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Text" }).click();
+  await page.getByRole("dialog", { name: "Add text" }).getByRole("button", { name: "Insert" }).click();
+  await expect(page.getByTestId("layer-row")).toHaveText(["Text"]);
+  await page.getByRole("button", { name: "To path" }).click();
+  await expect(page.getByTestId("layer-row")).toHaveText(["Path"]);
+  await expect(page.getByRole("button", { name: "Edit text…" })).toHaveCount(0);
 });
 
 test("text dialog: an empty font list says so and disables Insert", async ({ page }) => {

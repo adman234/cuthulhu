@@ -21,7 +21,18 @@ impl Default for Style {
 pub enum ShapeKind {
     Rect { w: f64, h: f64 },
     Ellipse { rx: f64, ry: f64 },
-    Text { family: String, size_mm: f64, text: String },
+    /// Editable text. `d` is the outline it was last drawn with, in the same mm path data as
+    /// `Path`, and it is what is shown and cut: a project opened where the family is not
+    /// installed cuts the letters that were designed, not a substitute face's. Written whenever
+    /// the text is (`add_text`, `update_text`); empty only in a document from before the cache
+    /// existed, whose outline is then drawn from the font as it always was.
+    Text {
+        family: String,
+        size_mm: f64,
+        text: String,
+        #[serde(default)]
+        d: String,
+    },
     Path { /* serialized outline in mm */ d: String },
 }
 

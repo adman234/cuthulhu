@@ -74,6 +74,23 @@ impl AppState {
         self.editor.commit_minted(|doc, gen| shape_tools::array_copies(doc, gen, &ids, cols, rows, gap_x_mm, gap_y_mm))
     }
 
+    pub fn update_text(&mut self, id: NodeId, family: String, size_mm: f64, text: String) -> Result<Delta, CmdError> {
+        let d = commands::update_text(&self.editor.doc, id, &family, size_mm, &text)?;
+        // An edit that changes nothing is not an undo step, as with `set_cut_line_type`.
+        if d.0.is_empty() { return Ok(d); }
+        Ok(self.editor.commit(d))
+    }
+
+    pub fn convert_to_path(&mut self, ids: Vec<NodeId>) -> Result<Delta, CmdError> {
+        let d = commands::convert_to_path(&self.editor.doc, &ids)?;
+        if d.0.is_empty() { return Ok(d); }
+        Ok(self.editor.commit(d))
+    }
+
+    pub fn weld(&mut self, ids: Vec<NodeId>) -> Result<Delta, CmdError> {
+        self.editor.commit_minted(|doc, gen| shape_tools::weld(doc, gen, &ids))
+    }
+
     pub fn delete(&mut self, ids: Vec<NodeId>) -> Result<Delta, CmdError> {
         let d = commands::delete_nodes(&self.editor.doc, &ids)?;
         Ok(self.editor.commit(d))

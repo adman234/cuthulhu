@@ -78,6 +78,15 @@ pub fn offset(paths: &[Path], distance: f64, join: Join) -> Result<Path, GeomErr
     Ok(shapes_to_path(&out))
 }
 
+/// The filled region of every path together, as one path: overlapping outlines merge into one,
+/// and a hole in one that another covers is filled. Unlike `boolean`'s Union this takes a single
+/// path too — a script face whose letters overlap welds on its own.
+pub fn weld(paths: &[Path]) -> Result<Path, GeomError> {
+    let region = filled_region(paths);
+    if region.is_empty() { return Err(GeomError::Degenerate); }
+    Ok(shapes_to_path(&region))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +157,19 @@ mod tests {
     #[test]
     fn a_non_finite_distance_is_refused() {
         assert_eq!(offset(&[rect_path(0.0, 0.0, 1.0, 1.0)], f64::NAN, Join::Round), Err(GeomError::Degenerate));
+    }
+
+    #[test]
+    fn weld_merges_overlapping_outlines_and_keeps_apart_ones_apart() {
+        let a = rect_path(0.0, 0.0, 10.0, 10.0);
+        let b = rect_path(5.0, 5.0, 10.0, 10.0);
+        let c = rect_path(30.0, 0.0, 5.0, 5.0);
+        let w = weld(&[a.clone(), b, c]).unwrap();
+        assert_eq!(w.flatten(0.1).len(), 2);
+        assert!((area(&w) - (175.0 + 25.0)).abs() < 1e-6);
+        // One path whose own contours overlap welds too.
+        let one = Path { segs: a.segs.into_iter().chain(rect_path(5.0, 0.0, 10.0, 10.0).segs).collect() };
+        assert_eq!(weld(&[one]).unwrap().flatten(0.1).len(), 1);
+        assert_eq!(weld(&[]), Err(GeomError::Degenerate));
     }
 }

@@ -8,9 +8,9 @@
 //! `Editor::commit_minted` hands over a copy and keeps it only when the command succeeds.
 use std::collections::{HashMap, HashSet};
 
-use geometry::{offset, rect_path, segments_outside, Affine, GeomError, Join, Path, Point, Rect, Seg};
+use geometry::{offset, rect_path, weld as weld_paths, segments_outside, Affine, GeomError, Join, Path, Point, Rect, Seg};
 
-use crate::commands::{ancestor_selected, parent_index, shape_outline, world_via, CmdError};
+use crate::commands::{ancestor_selected, delete_nodes, parent_index, shape_outline, world_via, CmdError};
 use crate::delta::{Delta, Document, NodeOp};
 use crate::node::{IdGen, Node, NodeId, NodeKind, ShapeKind};
 
@@ -304,6 +304,51 @@ pub fn array_copies(doc: &Document, gen: &mut IdGen, ids: &[NodeId], cols: u32, 
     Ok(Delta(ops))
 }
 
+/// Replace the selection with one Path: every selected shape's outline — text included, letter by
+/// letter — unioned, so overlapping letters of a script face or a word laid over a shape cut as
+/// one piece instead of crossing cuts that leave slivers. Pieces that do not touch stay separate
+/// contours of that one Path.
+///
+/// The new Path takes the first selected shape's paint and cut attributes, since those say which
+/// pass it is cut in, and lands beside the first piece. One Delta: the selection's subtrees removed
+/// and the Path added, so one undo brings the words back as words.
+pub fn weld(doc: &Document, gen: &mut IdGen, ids: &[NodeId]) -> Result<Delta, CmdError> {
+    let parents = parent_index(doc);
+    let units = selection_units(doc, &parents, ids)?;
+    let mut paths = vec![];
+    for &u in &units { paths.extend(world_outlines(doc, &parents, u)?); }
+    if paths.is_empty() { return Err(CmdError::EmptySelection); }
+    let (parent, to_parent) = landing(doc, &parents, units[0])?;
+    let welded = weld_paths(&paths).map_err(|e| CmdError::Geometry(match e {
+        GeomError::Degenerate => "the selection has no area to weld: its shapes are open lines".into(),
+        e => e.to_string(),
+    }))?;
+    let mut node = path_node(gen, &welded, &to_parent);
+    if let Some(first) = first_shape(doc, units[0]) {
+        node.style = first.style.clone();
+        node.cut_line_type = first.cut_line_type;
+        node.material_preset = first.material_preset.clone();
+    }
+    let mut ops = delete_nodes(doc, &units)?.0;
+    ops.push(NodeOp::Add { parent, node, index: usize::MAX });
+    Ok(Delta(ops))
+}
+
+/// The first shape at or beneath `id`, in document order.
+fn first_shape(doc: &Document, id: NodeId) -> Option<&Node> {
+    let mut seen = HashSet::new();
+    let mut stack = vec![id];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) { continue; }
+        let node = doc.get(id)?;
+        match node.kind {
+            NodeKind::Shape(_) => return Some(node),
+            _ => stack.extend(node.children.iter().rev().copied()),
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -590,5 +635,58 @@ pub(crate) mod tests {
         let mut origins: Vec<(f64, f64)> = added(&d).iter().map(|n| n.transform.apply(0.0, 0.0)).collect();
         origins.sort_by(|p, q| p.partial_cmp(q).unwrap());
         assert_eq!(origins, vec![(0.0, 16.0), (20.0, 21.0)]);
+    }
+
+    #[test]
+    fn weld_replaces_the_selection_with_one_path_and_one_undo_brings_it_back() {
+        let mut ed = Editor::new();
+        let root = ed.doc.root;
+        let g = ed.doc.ids.next();
+        ed.commit(Delta(vec![NodeOp::Add { parent: root, node: Node::container(g, NodeKind::Group), index: usize::MAX }]));
+        let a = rect_at(&mut ed, g, 0.0, 0.0, 10.0, 10.0);
+        let mut red = ed.doc.get(a).unwrap().clone();
+        red.style.stroke = Some(0xFF0000FF);
+        ed.commit(Delta(vec![NodeOp::Update { id: a, before: ed.doc.get(a).unwrap().clone(), after: red }]));
+        rect_at(&mut ed, g, 5.0, 5.0, 10.0, 10.0);
+        let c = rect_at(&mut ed, root, 8.0, 0.0, 10.0, 3.0);
+        let before = ed.doc.clone();
+        let d = ed.commit_minted(|doc, gen| weld(doc, gen, &[g, c])).unwrap();
+        // Root holds the welded path alone: the group, its two rects and the third rect are gone.
+        let kids = &ed.doc.get(root).unwrap().children;
+        assert_eq!(kids.len(), 1);
+        assert_eq!(ed.doc.nodes.len(), 2, "no orphaned children left behind");
+        let path = ed.doc.get(kids[0]).unwrap();
+        assert_eq!(path.style.stroke, Some(0xFF0000FF), "the first shape's pass");
+        assert_eq!(outline_of(path).flatten(0.1).len(), 1, "all three overlap into one contour");
+        assert_eq!(added(&d).len(), 1);
+        ed.undo().unwrap();
+        assert_eq!(ed.doc.nodes, before.nodes);
+    }
+
+    #[test]
+    fn weld_of_open_lines_alone_refuses_in_words() {
+        let mut ed = Editor::new();
+        let root = ed.doc.root;
+        let id = ed.doc.ids.next();
+        ed.commit(Delta(vec![NodeOp::Add { parent: root, node: Node::shape(id, ShapeKind::Path { d: "M0,0 L10,0".into() }), index: usize::MAX }]));
+        let err = ed.commit_minted(|doc, gen| weld(doc, gen, &[id])).unwrap_err();
+        assert!(err.to_string().contains("no area to weld"), "{err}");
+        assert!(ed.doc.get(id).is_some());
+    }
+
+    /// Text welds by the outline it was drawn with, so no font is needed to test it.
+    #[test]
+    fn weld_takes_text_by_its_drawn_outline() {
+        let mut ed = Editor::new();
+        let root = ed.doc.root;
+        let id = ed.doc.ids.next();
+        let text = ShapeKind::Text { family: "X".into(), size_mm: 10.0, text: "oo".into(),
+            d: "M0,0 L6,0 L6,6 L0,6 Z M4,0 L10,0 L10,6 L4,6 Z".into() };
+        ed.commit(Delta(vec![NodeOp::Add { parent: root, node: Node::shape(id, text), index: usize::MAX }]));
+        ed.commit_minted(|doc, gen| weld(doc, gen, &[id])).unwrap();
+        let kids = &ed.doc.get(root).unwrap().children;
+        let node = ed.doc.get(kids[0]).unwrap();
+        assert!(matches!(node.kind, NodeKind::Shape(ShapeKind::Path { .. })));
+        assert_eq!(outline_of(node).flatten(0.1).len(), 1);
     }
 }

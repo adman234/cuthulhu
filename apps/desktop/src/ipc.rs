@@ -74,6 +74,22 @@ pub fn array_copies(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>, cols:
 }
 
 #[tauri::command]
+pub fn update_text(state: tauri::State<AppStateHandle>, id: NodeId, family: String, size_mm: f64, text: String)
+    -> Result<Delta, String> {
+    state.lock().unwrap().update_text(id, family, size_mm, text).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn convert_to_path(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>) -> Result<Delta, String> {
+    state.lock().unwrap().convert_to_path(ids).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn weld(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>) -> Result<Delta, String> {
+    state.lock().unwrap().weld(ids).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn delete(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>) -> Result<Delta, String> {
     state.lock().unwrap().delete(ids).map_err(|e| e.to_string())
 }

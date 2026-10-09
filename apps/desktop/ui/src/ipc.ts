@@ -50,6 +50,21 @@ export async function arrayCopies(args: { ids: number[]; cols: number; rows: num
   return invoke("array_copies", args);
 }
 
+/** Rewrite a Text node's words, size and family in place; one undo. */
+export async function updateText(args: { id: number; family: string; sizeMm: number; text: string }) {
+  return invoke("update_text", args);
+}
+
+/** Every selected shape (and every shape under a selected container) becomes a Path of its outline. */
+export async function convertToPath(args: { ids: number[] }) {
+  return invoke("convert_to_path", args);
+}
+
+/** The selection unioned into one Path, replacing it; one undo. */
+export async function weld(args: { ids: number[] }) {
+  return invoke("weld", args);
+}
+
 export async function deleteNodes(args: Args) {
   return invoke("delete", args);
 }

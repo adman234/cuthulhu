@@ -68,6 +68,10 @@ fn shape_path(kind: &ShapeKind) -> Option<Path> {
         ShapeKind::Path { d } => Path::from_svg(d).ok(),
         ShapeKind::Rect { w, h } => Some(geometry::rect_path(0.0, 0.0, *w, *h)),
         ShapeKind::Ellipse { rx, ry } => Some(geometry::ellipse_path(*rx, *ry, *rx, *ry)),
+        // The outline the text was drawn with, which is what the operator saw. One from before
+        // that cache existed has none, and drawing it from the font here would export a face
+        // this machine substituted, so it stays a comment as it always was.
+        ShapeKind::Text { d, .. } if !d.is_empty() => Path::from_svg(d).ok(),
         ShapeKind::Text { .. } => None,
     }
 }
@@ -339,10 +343,21 @@ mod tests {
     }
 
     #[test]
+    fn doc_to_svg_exports_text_by_the_outline_it_was_drawn_with() {
+        let mut doc = Document::new();
+        shape_with_style(&mut doc,
+            ShapeKind::Text { family: "X".into(), size_mm: 10.0, text: "hi".into(), d: "M0,0 L5,0 L5,5 Z".into() },
+            Some(0xFF0000FF), None);
+        let svg = doc_to_svg(&doc);
+        assert!(svg.contains("<path"), "{svg}");
+        assert!(!svg.contains("skipped text"), "{svg}");
+    }
+
+    #[test]
     fn doc_to_svg_still_skips_text_with_a_comment() {
         let mut doc = Document::new();
         shape_with_style(&mut doc,
-            ShapeKind::Text { family: "X".into(), size_mm: 10.0, text: "hi".into() },
+            ShapeKind::Text { family: "X".into(), size_mm: 10.0, text: "hi".into(), d: String::new() },
             Some(0xFF0000FF), None);
         let svg = doc_to_svg(&doc);
         assert!(svg.contains("<!-- skipped text -->"), "comment emission changed: {svg}");
