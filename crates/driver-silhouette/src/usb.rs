@@ -219,6 +219,13 @@ mod tests {
     }
     #[test]
     fn open_at_unknown_locator_reports_not_found() {
+        // Only meaningful where the OS has a USB bus to search. A container or CI runner without
+        // one makes enumeration itself fail, which is an environment fact, not the not-found
+        // answer this pins — skip there, as the test above skips with a Cameo attached.
+        if nusb::list_devices().is_err() {
+            eprintln!("skipped: this machine has no USB bus to enumerate");
+            return;
+        }
         match UsbTransport::open_at(Model::Cameo1, "99:99") {
             Err(TransportError::NotFound) => {}
             Err(e) => panic!("expected NotFound, got: {e:?}"),

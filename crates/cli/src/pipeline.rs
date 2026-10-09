@@ -216,7 +216,7 @@ mod tests {
     }
 
     fn cut_settings() -> Settings {
-        Settings { speed: None, force: None, repeat_count: 1 }
+        Settings { speed: None, force: None, repeat_count: 1, ..Default::default() }
     }
 
     fn cameo5() -> Box<dyn Driver> {
@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn settings_out_of_range_are_refused_before_reaching_the_machine() {
-        let bad = Settings { speed: Some(99), force: None, repeat_count: 1 };
+        let bad = Settings { speed: Some(99), force: None, repeat_count: 1, ..Default::default() };
         let err = plan_cut_from_svg(two_color_svg(), cameo5().as_ref(), &bad, Grouping::Color, &[], &[], false).unwrap_err();
         assert!(err.contains("speed"), "expected a settings-range refusal, got: {err}");
     }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use crate::Model;
-use driver_core::{Driver, DriverError, Job, MachineCaps, MachineProfile};
+use driver_core::{Driver, DriverError, Job, MachineCaps, MachineProfile, Tool};
 use std::cell::Cell;
 
 /// Hardware margins of the Cameo 1, in mm: the carriage cannot reach the first 9 mm from the
@@ -65,21 +65,33 @@ fn push(s: &str, out: &mut Vec<u8>) { out.extend_from_slice(s.as_bytes()); out.p
 impl Driver for SilhouetteDriver {
     fn profile(&self) -> &MachineProfile { &self.profile }
     fn caps(&self) -> MachineCaps {
-        MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false }
+        let base = MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false, ..Default::default() };
+        match self.model {
+            Model::Cameo5Alpha => base,
+            // ponytail: track enhancing and pen are offered on the Cameo 1 only, whose commands
+            // (`FY0`, `FC0`) are sourced; the Cameo 5 dialect's equivalents carry a tool-holder
+            // suffix nobody has captured yet.
+            Model::Cameo1 => MachineCaps {
+                speed_max: CAMEO1_SPEED_MAX,
+                supports_track_enhancing: true,
+                supports_pen: true,
+                ..base
+            },
+        }
     }
     fn session_begin(&self) -> Vec<u8> {
         self.feed_su.set(0);
         let mut out = vec![0x1b, 0x04]; // ESC EOT init
         if self.model == Model::Cameo1 {
-            // The pre-Cameo-3 setup: track enhancing off, portrait, no corner lift, then the
-            // cutting area and plot mode. Job-wide, so it is sent once rather than per Pass;
-            // speed, force and blade offset follow per Pass, the order of the Silhouette Studio
-            // captures recorded in inkscape-silhouette.
+            // The pre-Cameo-3 setup: portrait, no corner lift, then the cutting area and plot
+            // mode. Job-wide, so it is sent once rather than per Pass; speed, force, blade offset
+            // and track enhancing follow per Pass, the order of the Silhouette Studio captures
+            // recorded in inkscape-silhouette.
             // [src: inkscape-silhouette silhouette/Graphtec.py L1276-1301, L1604-1610 (GPL-2.0+)]
             // [src: inkscape-silhouette Commands.md L410-443 (GPL-2.0+)]
             let bottom = su(self.profile.height_mm + CAMEO1_MARGIN_TOP_MM);
             let right = su(self.profile.width_mm + CAMEO1_MARGIN_LEFT_MM);
-            for cmd in ["FY1", "FN0", "TB50,0", "FE0,0", "\\0,0", &format!("Z{bottom},{right}"),
+            for cmd in ["FN0", "TB50,0", "FE0,0", "\\0,0", &format!("Z{bottom},{right}"),
                         "L0", "FE0,0", "FF0,0,0"] {
                 push(cmd, &mut out);
             }
@@ -99,12 +111,18 @@ impl Driver for SilhouetteDriver {
             Model::Cameo1 => {
                 // One tool holder, so no `J` and no tool suffix on speed and force.
                 // [src: inkscape-silhouette silhouette/Graphtec.py L1203-1220 (GPL-2.0+)]
-                // ponytail: speed is clamped here, not refused by preflight, because
-                // SETTINGS_RANGES is one range for every machine; a per-machine ceiling carried
-                // in MachineCaps is the upgrade path.
+                // Preflight refuses a speed past `caps().speed_max`; the clamp is the last line of
+                // defence for a caller that skipped it, so the wire never carries a speed the
+                // machine does not have.
                 if let Some(sp) = pass.settings.speed { push(&format!("!{}", sp.clamp(1, CAMEO1_SPEED_MAX)), &mut out); }
                 if let Some(fo) = pass.settings.force { push(&format!("FX{fo}"), &mut out); }
-                push(&format!("FC{CAMEO1_BLADE_OFFSET_SU}"), &mut out);
+                // A pen's tip sits on the holder's centre, so it gets no blade offset.
+                // [src: inkscape-silhouette silhouette/Graphtec.py L1255-1259 (GPL-2.0+)]
+                let offset = match pass.settings.tool { Tool::Blade => CAMEO1_BLADE_OFFSET_SU, Tool::Pen => 0 };
+                push(&format!("FC{offset}"), &mut out);
+                // `FY0` rolls the media three times before cutting; the machine skips it below
+                // force 19. [src: inkscape-silhouette silhouette/Graphtec.py L1276-1285, L1073-1074 (GPL-2.0+)]
+                push(if pass.settings.track_enhancing { "FY0" } else { "FY1" }, &mut out);
                 (su(CAMEO1_MARGIN_LEFT_MM), su(CAMEO1_MARGIN_TOP_MM))
             }
         };
@@ -185,7 +203,7 @@ mod tests {
     fn speed_and_force_emitted_only_when_set() {
         let d = SilhouetteDriver::new();
         let job = Job { polylines: vec![square()],
-            settings: Settings { speed: Some(10), force: Some(20), repeat_count: 1 } };
+            settings: Settings { speed: Some(10), force: Some(20), repeat_count: 1, ..Default::default() } };
         let s = String::from_utf8_lossy(&d.encode_pass(&job).unwrap()).to_string();
         assert!(s.contains("!10,1\u{3}") && s.contains("FX20,1\u{3}"));
     }
@@ -194,7 +212,7 @@ mod tests {
     fn session_framing_has_one_prologue_and_one_epilogue_across_two_passes() {
         let d = SilhouetteDriver::new();
         let job = |force| Job { polylines: vec![vec![Point{x:0.0,y:0.0}, Point{x:10.0,y:0.0}]],
-                                settings: Settings { speed: Some(5), force: Some(force), repeat_count: 1 } };
+                                settings: Settings { speed: Some(5), force: Some(force), repeat_count: 1, ..Default::default() } };
         let mut bytes = d.session_begin();
         bytes.extend(d.encode_pass(&job(10)).unwrap());
         bytes.extend(d.pass_park());
@@ -211,7 +229,7 @@ mod tests {
     fn single_pass_session_is_byte_identical_to_sp2_encoding() {
         let d = SilhouetteDriver::new();
         let job = Job { polylines: vec![vec![Point{x:1.0,y:2.0}, Point{x:3.0,y:4.0}]],
-                        settings: Settings { speed: Some(8), force: Some(12), repeat_count: 2 } };
+                        settings: Settings { speed: Some(8), force: Some(12), repeat_count: 2, ..Default::default() } };
         let mut session = d.session_begin();
         session.extend(d.encode_pass(&job).unwrap());
         session.extend(d.session_end());
@@ -230,7 +248,7 @@ mod tests {
     #[test]
     fn caps_and_abort_bytes_match_the_documented_contract() {
         let d = SilhouetteDriver::new();
-        assert_eq!(d.caps(), MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false });
+        assert_eq!(d.caps(), MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false, ..Default::default() });
         assert_eq!(d.abort_bytes(), None);
     }
 
@@ -247,14 +265,14 @@ mod tests {
     fn cameo1_encodes_square_to_documented_gpgl_stream() {
         let d = SilhouetteDriver::cameo1();
         let job = Job { polylines: vec![square()],
-            settings: Settings { speed: Some(5), force: Some(10), repeat_count: 1 } };
+            settings: Settings { speed: Some(5), force: Some(10), repeat_count: 1, ..Default::default() } };
         let mut bytes = d.session_begin();
         bytes.extend(d.encode_pass(&job).unwrap());
         bytes.extend(d.session_end());
         let mut want = vec![0x1b, 0x04];
         // 295 mm + 9 = 304 mm = 6080 SU wide, 2999 mm + 1 = 3000 mm = 60000 SU long.
-        want.extend(gpgl(&["FY1", "FN0", "TB50,0", "FE0,0", "\\0,0", "Z60000,6080", "L0", "FE0,0", "FF0,0,0",
-            "!5", "FX10", "FC18",
+        want.extend(gpgl(&["FN0", "TB50,0", "FE0,0", "\\0,0", "Z60000,6080", "L0", "FE0,0", "FF0,0,0",
+            "!5", "FX10", "FC18", "FY1",
             // (y,x) with y +20 SU (1 mm) and x +180 SU (9 mm)
             "M20,180", "D20,580", "D420,580", "D420,180", "D20,180",
             "M420,0", "SO0"]));
@@ -265,7 +283,7 @@ mod tests {
     fn cameo1_has_one_tool_so_no_j_and_no_tool_suffix() {
         let d = SilhouetteDriver::cameo1();
         let job = Job { polylines: vec![square()],
-            settings: Settings { speed: Some(3), force: Some(20), repeat_count: 1 } };
+            settings: Settings { speed: Some(3), force: Some(20), repeat_count: 1, ..Default::default() } };
         let s = String::from_utf8_lossy(&d.encode_pass(&job).unwrap()).to_string();
         assert!(!s.contains('J'), "{s:?}");
         assert!(s.contains("!3\u{3}") && s.contains("FX20\u{3}"), "{s:?}");
@@ -277,7 +295,7 @@ mod tests {
     fn cameo1_speed_is_clamped_to_its_ceiling() {
         let d = SilhouetteDriver::cameo1();
         let job = Job { polylines: vec![square()],
-            settings: Settings { speed: Some(30), force: None, repeat_count: 1 } };
+            settings: Settings { speed: Some(30), force: None, repeat_count: 1, ..Default::default() } };
         let s = String::from_utf8_lossy(&d.encode_pass(&job).unwrap()).to_string();
         assert!(s.starts_with("!10\u{3}"), "{s:?}");
         assert!(!s.contains("FX"), "an unset force is left to the machine: {s:?}");
@@ -351,7 +369,7 @@ mod tests {
         let d = SilhouetteDriver::cameo1();
         let job = Job {
             polylines: vec![vec![Point{x:0.0,y:5.0}], vec![], vec![Point{x:0.0,y:0.0}, Point{x:10.0,y:0.0}]],
-            settings: Settings { speed: None, force: None, repeat_count: 2 },
+            settings: Settings { speed: None, force: None, repeat_count: 2, ..Default::default() },
         };
         let _ = d.session_begin();
         let s = String::from_utf8_lossy(&d.encode_pass(&job).unwrap()).to_string();
@@ -365,5 +383,25 @@ mod tests {
         let d = SilhouetteDriver::cameo1();
         let _ = d.session_begin();
         assert_eq!(d.session_end(), gpgl(&["M0,0", "SO0"]));
+    }
+
+    #[test]
+    fn cameo1_pen_drops_the_blade_offset_and_track_enhancing_is_per_pass() {
+        let d = SilhouetteDriver::cameo1();
+        let pen = Job { polylines: vec![square()],
+            settings: Settings { tool: Tool::Pen, track_enhancing: true, ..Settings::default() } };
+        let s = String::from_utf8_lossy(&d.encode_pass(&pen).unwrap()).to_string();
+        assert!(s.starts_with("FC0\u{3}FY0\u{3}"), "{s:?}");
+        let blade = Job { polylines: vec![square()], settings: Settings::default() };
+        let s = String::from_utf8_lossy(&d.encode_pass(&blade).unwrap()).to_string();
+        assert!(s.starts_with("FC18\u{3}FY1\u{3}"), "{s:?}");
+    }
+
+    #[test]
+    fn caps_say_what_each_model_can_be_asked() {
+        let c1 = SilhouetteDriver::cameo1().caps();
+        assert_eq!((c1.speed_max, c1.supports_track_enhancing, c1.supports_pen), (10, true, true));
+        let c5 = SilhouetteDriver::new().caps();
+        assert_eq!((c5.speed_max, c5.supports_track_enhancing, c5.supports_pen), (30, false, false));
     }
 }

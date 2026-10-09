@@ -906,7 +906,7 @@ mod tests {
     fn fake_driver() -> Box<dyn Driver + Send> {
         fake_driver_with_caps(
             MachineProfile { id: "cameo5".into(), name: "Cameo 5".into(), width_mm: 305.0, height_mm: 1000.0 },
-            MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false },
+            MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false, ..Default::default() },
         )
     }
 
@@ -1069,7 +1069,7 @@ mod tests {
         fn driver_for(&self, _machine_id: &str) -> Option<Box<dyn Driver + Send>> {
             Some(fake_driver_with_caps(
                 MachineProfile { id: "puma".into(), name: "Puma".into(), width_mm: 300.0, height_mm: 1000.0 },
-                MachineCaps { supports_speed: false, supports_force: false, needs_operator_pass_confirm: true },
+                MachineCaps { supports_speed: false, supports_force: false, needs_operator_pass_confirm: true, ..Default::default() },
             ))
         }
         fn open_transport(&self, _info: &DeviceInfo) -> Result<Box<dyn Transport>, TransportError> {
@@ -1182,7 +1182,7 @@ mod tests {
         Arc::new(ScriptedFactory {
             info,
             profile: MachineProfile { id: "puma".into(), name: "Puma".into(), width_mm: 300.0, height_mm: 1000.0 },
-            caps: MachineCaps { supports_speed: false, supports_force: false, needs_operator_pass_confirm: true },
+            caps: MachineCaps { supports_speed: false, supports_force: false, needs_operator_pass_confirm: true, ..Default::default() },
             abort: None,
             payload_len: 8,
             park_bytes: Vec::new(),
@@ -1265,7 +1265,7 @@ mod tests {
             impl Driver for UnencodableDriver {
                 fn profile(&self) -> &MachineProfile { &self.0 }
                 fn caps(&self) -> MachineCaps {
-                    MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false }
+                    MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false, ..Default::default() }
                 }
                 fn session_begin(&self) -> Vec<u8> { Vec::new() }
                 fn encode_pass(&self, _pass: &Job) -> Result<Vec<u8>, DriverError> {
@@ -1650,16 +1650,16 @@ mod tests {
 
     #[test]
     fn cancel_mid_transmit_stops_writes_sends_abort_and_confirms_stop() {
-        let cameo_caps = MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false };
+        let cameo_caps = MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false, ..Default::default() };
         assert_cancel_mid_transmit(cameo_caps, vec![Ok(b"0\x03".to_vec())], true);
 
-        let puma_caps = MachineCaps { supports_speed: false, supports_force: false, needs_operator_pass_confirm: true };
+        let puma_caps = MachineCaps { supports_speed: false, supports_force: false, needs_operator_pass_confirm: true, ..Default::default() };
         assert_cancel_mid_transmit(puma_caps, Vec::new(), false);
     }
 
     #[test]
     fn transport_write_error_mid_job_fails_loudly() {
-        let cameo_caps = MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false };
+        let cameo_caps = MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false, ..Default::default() };
         // MockTransport clamps a scripted count to the buffer it is handed, so
         // usize::MAX is "accept whatever you are offered" — two writes through,
         // then the cable goes, whatever size the manager writes in.
@@ -1693,7 +1693,7 @@ mod tests {
 
     #[test]
     fn write_zero_maps_to_typed_error() {
-        let cameo_caps = MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false };
+        let cameo_caps = MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false, ..Default::default() };
         let write_results = VecDeque::from(vec![Ok(0)]);
         let inner = MockTransport { write_results, ..Default::default() };
         let factory = ScriptedFactory {
@@ -1751,8 +1751,8 @@ mod tests {
 
     #[test]
     fn unplug_during_each_active_state_reports_disconnected() {
-        let cameo_caps = MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false };
-        let puma_caps = MachineCaps { supports_speed: false, supports_force: false, needs_operator_pass_confirm: true };
+        let cameo_caps = MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false, ..Default::default() };
+        let puma_caps = MachineCaps { supports_speed: false, supports_force: false, needs_operator_pass_confirm: true, ..Default::default() };
 
         // Transmitting: the very first write (session_begin) fails.
         assert_unplug_surfaces_typed_error(
@@ -1836,7 +1836,7 @@ mod tests {
         let factory = ScriptedFactory {
             info: cameo_info(),
             profile: MachineProfile { id: "cameo5".into(), name: "Cameo 5".into(), width_mm: 305.0, height_mm: 1000.0 },
-            caps: MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false },
+            caps: MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false, ..Default::default() },
             abort: None,
             payload_len: MULTI_CHUNK_PAYLOAD,
             park_bytes: Vec::new(),

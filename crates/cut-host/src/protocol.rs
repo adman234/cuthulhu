@@ -144,7 +144,7 @@ mod tests {
         CutPass {
             job: Job {
                 polylines: vec![vec![Point { x: 0.0, y: 0.0 }, Point { x: 10.0, y: 0.0 }]],
-                settings: Settings { speed: Some(5), force: Some(10), repeat_count: 1 },
+                settings: Settings { speed: Some(5), force: Some(10), repeat_count: 1, ..Default::default() },
             },
         }
     }

@@ -11,16 +11,68 @@ pub use status::{Actions, ByteProgress, CutStatus, Ended, PassPosition, Phase};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Job { pub polylines: Vec<Polyline>, pub settings: Settings }
 
+/// What is in the tool holder for a Pass. A pen draws where a blade cuts, and the two need
+/// different corner handling: a blade's tip trails the holder's centre and is compensated for,
+/// a pen's does not.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Tool { #[default] Blade, Pen }
+
+/// `track_enhancing` and `tool` default on deserialize, so a Settings written before they
+/// existed — a Cut Host on an older build, a saved preset — reads as the blade it always meant.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Settings { pub speed: Option<u32>, pub force: Option<u32>, pub repeat_count: u32 }
-impl Default for Settings { fn default() -> Self { Settings { speed: None, force: None, repeat_count: 1 } } }
+pub struct Settings {
+    pub speed: Option<u32>,
+    pub force: Option<u32>,
+    pub repeat_count: u32,
+    /// Roll the media back and forth before cutting so the rollers grip a track into it.
+    #[serde(default)]
+    pub track_enhancing: bool,
+    #[serde(default)]
+    pub tool: Tool,
+}
+impl Default for Settings {
+    fn default() -> Self { Settings { speed: None, force: None, repeat_count: 1, track_enhancing: false, tool: Tool::Blade } }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MachineProfile { pub id: String, pub name: String, pub width_mm: f64, pub height_mm: f64 }
 
+/// What a machine can be asked to do. Read by preflight (whether a value is judged, and against
+/// what ceiling) and by the UI (whether a control is offered).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MachineCaps { pub supports_speed: bool, pub supports_force: bool, pub needs_operator_pass_confirm: bool }
+pub struct MachineCaps {
+    pub supports_speed: bool,
+    pub supports_force: bool,
+    pub needs_operator_pass_confirm: bool,
+    /// The fastest speed this machine has. Narrower than the shared range on older machines —
+    /// the Cameo 1 tops out at 10 where later Cameos reach 30 — so preflight refuses what the
+    /// machine cannot do instead of the driver quietly clamping it.
+    #[serde(default = "default_speed_max")]
+    pub speed_max: u32,
+    #[serde(default)]
+    pub supports_track_enhancing: bool,
+    #[serde(default)]
+    pub supports_pen: bool,
+}
+
+fn default_speed_max() -> u32 { 30 }
+
+/// The capabilities a machine has unless its Driver says otherwise: the shared speed ceiling, and
+/// none of the optional tool controls. The three original fields have no sensible default, so a
+/// literal still names them; this exists for the fields added after them.
+impl Default for MachineCaps {
+    fn default() -> Self {
+        MachineCaps {
+            supports_speed: false,
+            supports_force: false,
+            needs_operator_pass_confirm: false,
+            speed_max: default_speed_max(),
+            supports_track_enhancing: false,
+            supports_pen: false,
+        }
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub enum DriverError { UnsupportedGeometry, Encode(String) }

@@ -45,7 +45,7 @@ impl Driver for FakeDriver {
     fn profile(&self) -> &MachineProfile { &self.profile }
     fn caps(&self) -> MachineCaps {
         // Needs an operator to confirm, so the job parks instead of polling.
-        MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: true }
+        MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: true, ..Default::default() }
     }
     fn session_begin(&self) -> Vec<u8> { b"BEGIN".to_vec() }
     fn encode_pass(&self, pass: &Job) -> Result<Vec<u8>, DriverError> {

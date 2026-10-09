@@ -16,7 +16,7 @@ fn u(mm: f64) -> i64 { (mm / 25.4 * 1016.0).round() as i64 }   // 1016 units/inc
 impl Driver for HpglDriver {
     fn profile(&self) -> &MachineProfile { &self.profile }
     fn caps(&self) -> MachineCaps {
-        MachineCaps { supports_speed: false, supports_force: false, needs_operator_pass_confirm: true }
+        MachineCaps { supports_speed: false, supports_force: false, needs_operator_pass_confirm: true, ..Default::default() }
     }
     fn session_begin(&self) -> Vec<u8> { b"IN;".to_vec() }
     fn encode_pass(&self, pass: &Job) -> Result<Vec<u8>, DriverError> {
@@ -63,7 +63,7 @@ mod tests {
     fn session_framing_has_one_prologue_and_one_epilogue_across_two_passes() {
         let d = HpglDriver::new();
         let job = |x: f64| Job { polylines: vec![vec![Point{x:0.0,y:0.0}, Point{x, y:0.0}]],
-                                settings: Settings { speed: None, force: None, repeat_count: 1 } };
+                                settings: Settings { speed: None, force: None, repeat_count: 1, ..Default::default() } };
         let mut bytes = d.session_begin();
         bytes.extend(d.encode_pass(&job(10.0)).unwrap());
         bytes.extend(d.pass_park());
@@ -80,7 +80,7 @@ mod tests {
     fn single_pass_session_is_byte_identical_to_sp2_encoding() {
         let d = HpglDriver::new();
         let job = Job { polylines: vec![vec![Point{x:1.0,y:2.0}, Point{x:3.0,y:4.0}]],
-                        settings: Settings { speed: None, force: None, repeat_count: 2 } };
+                        settings: Settings { speed: None, force: None, repeat_count: 2, ..Default::default() } };
         let mut session = d.session_begin();
         session.extend(d.encode_pass(&job).unwrap());
         session.extend(d.session_end());
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn caps_and_abort_bytes_match_the_documented_contract() {
         let d = HpglDriver::new();
-        assert_eq!(d.caps(), MachineCaps { supports_speed: false, supports_force: false, needs_operator_pass_confirm: true });
+        assert_eq!(d.caps(), MachineCaps { supports_speed: false, supports_force: false, needs_operator_pass_confirm: true, ..Default::default() });
         assert_eq!(d.abort_bytes(), Some(b"PU;".to_vec()));
     }
 }

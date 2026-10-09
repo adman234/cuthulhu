@@ -1029,7 +1029,7 @@ impl DeviceManagerHandle {
                 let override_ = SettingsOverride {
                     speed: dto.speed,
                     force: dto.force,
-                    repeat_count: dto.repeat_count,
+                    repeat_count: dto.repeat_count, ..Default::default()
                 };
                 Ok(PassSelection { key: dto.key.clone(), settings: resolve_settings(preset, &override_) })
             })
@@ -1568,7 +1568,7 @@ mod tests {
                 // stable mid-flight phase. `MockTransport` answers no status query, so a
                 // pollable machine would instead sit out the manager's 60s completion
                 // budget and then fail.
-                caps: MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: true },
+                caps: MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: true, ..Default::default() },
             }))
         }
         fn open_transport(&self, _info: &DeviceInfo) -> Result<Box<dyn Transport>, TransportError> {
@@ -2001,7 +2001,7 @@ mod tests {
         let caps = dev.caps_for("cameo5").expect("known machine id");
         assert_eq!(
             caps,
-            MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: true }
+            MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: true, ..Default::default() }
         );
     }
 
@@ -2020,7 +2020,7 @@ mod tests {
         let json = serde_json::to_value(MachineCaps {
             supports_speed: true,
             supports_force: false,
-            needs_operator_pass_confirm: true,
+            needs_operator_pass_confirm: true, ..Default::default()
         })
         .unwrap();
         assert_eq!(json["supportsSpeed"], serde_json::json!(true));
@@ -3567,9 +3567,9 @@ mod tests {
             name: format!("{machine} {id}"),
             machine_id: machine.into(),
             settings: cutplan::presets::PresetSettings {
-                speed: Some(5), force: Some(force), repeat_count: 1,
+                speed: Some(5), force: Some(force), repeat_count: 1, ..Default::default()
             },
-            builtin: false,
+            builtin: false, ..Default::default()
         }
     }
 

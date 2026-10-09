@@ -116,7 +116,7 @@ mod tests {
         MachineProfile { id: "cameo5".into(), name: "Cameo".into(), width_mm: 300.0, height_mm: 200.0 }
     }
     fn caps() -> MachineCaps {
-        MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false }
+        MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false, ..Default::default() }
     }
     fn pass_with(polylines: Vec<Vec<Point>>, settings: Settings) -> CutPass {
         CutPass { job: Job { polylines, settings } }
@@ -166,10 +166,10 @@ mod tests {
 
     #[test]
     fn settings_outside_the_attached_machines_range_are_refused() {
-        let bad = pass_with(vec![square()], Settings { speed: Some(99), force: None, repeat_count: 1 });
+        let bad = pass_with(vec![square()], Settings { speed: Some(99), force: None, repeat_count: 1, ..Default::default() });
         assert!(matches!(check_passes(&[bad], &profile(), &caps()), Err(PassFault::Settings { pass: 0, .. })));
 
-        let repeats = pass_with(vec![square()], Settings { speed: None, force: None, repeat_count: 99 });
+        let repeats = pass_with(vec![square()], Settings { speed: None, force: None, repeat_count: 99, ..Default::default() });
         assert!(matches!(check_passes(&[repeats], &profile(), &caps()), Err(PassFault::Settings { pass: 0, .. })));
     }
 
@@ -177,8 +177,8 @@ mod tests {
     /// will never encode must not refuse the cut.
     #[test]
     fn a_setting_the_machine_ignores_is_not_out_of_range() {
-        let no_speed = MachineCaps { supports_speed: false, supports_force: false, needs_operator_pass_confirm: true };
-        let p = pass_with(vec![square()], Settings { speed: Some(99), force: Some(99), repeat_count: 1 });
+        let no_speed = MachineCaps { supports_speed: false, supports_force: false, needs_operator_pass_confirm: true, ..Default::default() };
+        let p = pass_with(vec![square()], Settings { speed: Some(99), force: Some(99), repeat_count: 1, ..Default::default() });
         assert!(check_passes(&[p], &profile(), &no_speed).is_ok());
     }
 
@@ -186,7 +186,7 @@ mod tests {
     fn an_oversized_cut_is_refused() {
         // 16 bytes/point × repeat_count, over 64 MB.
         let many = vec![Point { x: 1.0, y: 1.0 }; 500_000];
-        let p = pass_with(vec![many], Settings { speed: None, force: None, repeat_count: 10 });
+        let p = pass_with(vec![many], Settings { speed: None, force: None, repeat_count: 10, ..Default::default() });
         assert!(matches!(check_passes(&[p], &profile(), &caps()), Err(PassFault::TooLarge(_))));
     }
 

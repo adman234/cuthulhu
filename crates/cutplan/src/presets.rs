@@ -1,24 +1,50 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use driver_core::Settings;
+use driver_core::{Settings, Tool};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::fs;
 use std::io::Write;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MaterialPreset {
     pub id: String,
     pub name: String,
     pub machine_id: String,
     pub settings: PresetSettings,
     pub builtin: bool,
+    /// What the operator wants the next person to know: the brand that worked, which side up.
+    /// Defaulted on read so a file written before notes existed still loads.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
+    /// The ratchet blade's depth setting (1–10) this material wants. Advice, not a command: the
+    /// Cameo 1's blade is set by hand, so nothing sends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blade_depth: Option<u8>,
+    /// Whether a material is cut mirrored — heat-transfer vinyl is cut face down, so a design
+    /// cut unmirrored comes out backwards once pressed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mirror: bool,
 }
 
+/// The new fields default on read, so a presets file written before they existed still loads
+/// as the blade-cut, untracked material it always described.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PresetSettings {
     pub speed: Option<u32>,
     pub force: Option<u32>,
     pub repeat_count: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub track_enhancing: bool,
+    #[serde(default, skip_serializing_if = "is_blade")]
+    pub tool: Tool,
+}
+
+fn is_blade(t: &Tool) -> bool { *t == Tool::Blade }
+
+impl Default for PresetSettings {
+    fn default() -> Self {
+        PresetSettings { speed: None, force: None, repeat_count: 1, track_enhancing: false, tool: Tool::Blade }
+    }
 }
 
 /// The only on-disk format this build reads or writes. Named once so the check in
@@ -114,6 +140,8 @@ pub struct SettingsOverride {
     pub speed: Option<u32>,
     pub force: Option<u32>,
     pub repeat_count: Option<u32>,
+    pub track_enhancing: Option<bool>,
+    pub tool: Option<Tool>,
 }
 
 /// Override fields win over the preset's; with neither, `Settings::default()`
@@ -126,6 +154,11 @@ pub fn resolve_settings(preset: Option<&MaterialPreset>, override_: &SettingsOve
             .repeat_count
             .or_else(|| preset.map(|p| p.settings.repeat_count))
             .unwrap_or(1),
+        track_enhancing: override_
+            .track_enhancing
+            .or_else(|| preset.map(|p| p.settings.track_enhancing))
+            .unwrap_or(false),
+        tool: override_.tool.or_else(|| preset.map(|p| p.settings.tool)).unwrap_or_default(),
     }
 }
 
@@ -139,9 +172,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: Some(5),
                 force: Some(20),
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
         MaterialPreset {
             id: "cameo5-vinyl-adhesive".into(),
@@ -150,9 +183,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: Some(8),
                 force: Some(10),
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
         MaterialPreset {
             id: "cameo5-htv".into(),
@@ -161,9 +194,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: Some(8),
                 force: Some(12),
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
         MaterialPreset {
             id: "cameo5-copy-paper".into(),
@@ -172,9 +205,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: Some(10),
                 force: Some(8),
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
         MaterialPreset {
             id: "cameo5-cardboard-thin".into(),
@@ -183,9 +216,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: Some(3),
                 force: Some(30),
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
         // Cameo 1 presets: the speed and force of inkscape-silhouette's media table, which it took
         // from robocut's cut dialog. No HTV row because that table has none; the pen row waits
@@ -198,9 +231,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: Some(5),
                 force: Some(10),
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
         MaterialPreset {
             id: "cameo1-sticker-sheet".into(),
@@ -209,9 +242,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: Some(10),
                 force: Some(20),
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
         MaterialPreset {
             id: "cameo1-print-paper-light".into(),
@@ -220,9 +253,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: Some(10),
                 force: Some(5),
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
         MaterialPreset {
             id: "cameo1-print-paper-medium".into(),
@@ -231,9 +264,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: Some(10),
                 force: Some(25),
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
         MaterialPreset {
             id: "cameo1-cardstock".into(),
@@ -242,9 +275,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: Some(10),
                 force: Some(30),
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
         MaterialPreset {
             id: "cameo1-thin-media".into(),
@@ -253,9 +286,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: Some(10),
                 force: Some(2),
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
         MaterialPreset {
             id: "cameo1-thick-media".into(),
@@ -264,9 +297,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: Some(10),
                 force: Some(27),
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
         MaterialPreset {
             id: "cameo1-magnetic-sheet".into(),
@@ -275,9 +308,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: Some(3),
                 force: Some(30),
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
         // Puma presets (panel-set: speed/force None)
         MaterialPreset {
@@ -287,9 +320,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: None,
                 force: None,
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
         MaterialPreset {
             id: "puma-vinyl-adhesive".into(),
@@ -298,9 +331,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: None,
                 force: None,
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
         MaterialPreset {
             id: "puma-htv".into(),
@@ -309,9 +342,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: None,
                 force: None,
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
         MaterialPreset {
             id: "puma-copy-paper".into(),
@@ -320,9 +353,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: None,
                 force: None,
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
         MaterialPreset {
             id: "puma-cardboard-thin".into(),
@@ -331,9 +364,9 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             settings: PresetSettings {
                 speed: None,
                 force: None,
-                repeat_count: 1,
+                repeat_count: 1, ..Default::default()
             },
-            builtin: true,
+            builtin: true, ..Default::default()
         },
     ]
 }
@@ -725,17 +758,17 @@ mod tests {
             id: "p1".into(),
             name: "Test".into(),
             machine_id: "cameo5".into(),
-            settings: PresetSettings { speed: Some(5), force: Some(20), repeat_count: 3 },
-            builtin: false,
+            settings: PresetSettings { speed: Some(5), force: Some(20), repeat_count: 3, ..Default::default() },
+            builtin: false, ..Default::default()
         };
 
-        let partial = SettingsOverride { speed: None, force: Some(25), repeat_count: None };
+        let partial = SettingsOverride { speed: None, force: Some(25), repeat_count: None, ..Default::default() };
         let resolved = resolve_settings(Some(&preset), &partial);
         assert_eq!(resolved.force, Some(25), "override wins");
         assert_eq!(resolved.speed, Some(5), "preset fills the gap");
         assert_eq!(resolved.repeat_count, 3, "preset fills the gap");
 
-        let empty = SettingsOverride { speed: None, force: None, repeat_count: None };
+        let empty = SettingsOverride { speed: None, force: None, repeat_count: None, ..Default::default() };
         assert_eq!(resolve_settings(None, &empty), Settings::default());
     }
 
@@ -784,9 +817,9 @@ mod tests {
             settings: PresetSettings {
                 speed: Some(3),
                 force: Some(25),
-                repeat_count: 2,
+                repeat_count: 2, ..Default::default()
             },
-            builtin: false,
+            builtin: false, ..Default::default()
         }];
 
         save_user_presets(&user_file, &user_presets).unwrap();
@@ -838,8 +871,8 @@ mod tests {
             id: id.into(),
             name: format!("{machine} {id}"),
             machine_id: machine.into(),
-            settings: PresetSettings { speed: Some(speed), force: Some(10), repeat_count: 1 },
-            builtin: false,
+            settings: PresetSettings { speed: Some(speed), force: Some(10), repeat_count: 1, ..Default::default() },
+            builtin: false, ..Default::default()
         };
 
         save_user_presets(&user_file, &[
@@ -918,9 +951,9 @@ mod tests {
             settings: PresetSettings {
                 speed: Some(7),
                 force: Some(15),
-                repeat_count: 3,
+                repeat_count: 3, ..Default::default()
             },
-            builtin: false,
+            builtin: false, ..Default::default()
         }];
 
         // Save user presets

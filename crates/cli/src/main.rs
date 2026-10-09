@@ -135,7 +135,7 @@ fn run() -> Result<(), String> {
             let grouping: cutplan::Grouping = group_by.into();
             check_pass_flag_scope(&skip_pass, &order, grouping)?;
             let svg = std::fs::read(&file).map_err(|e| format!("read {}: {e}", file.display()))?;
-            let settings = Settings { speed, force, repeat_count: 1 };
+            let settings = Settings { speed, force, repeat_count: 1, ..Default::default() };
             cut_planned(&svg, driver.as_ref(), &device, &settings, grouping, &skip_pass, &order,
                         dry_run, port, baud, allow_out_of_bounds)
         }

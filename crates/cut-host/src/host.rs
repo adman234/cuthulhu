@@ -553,7 +553,7 @@ pub mod testing {
             };
             Some(Box::new(TestDriver {
                 profile,
-                caps: MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: true },
+                caps: MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: true, ..Default::default() },
             }))
         }
         fn open_transport(&self, _info: &DeviceInfo) -> Result<Box<dyn Transport>, TransportError> {
@@ -638,7 +638,7 @@ pub mod testing {
             }
             Some(Box::new(TestDriver {
                 profile: MachineProfile { id: "cameo5".into(), name: "Cameo".into(), width_mm: 300.0, height_mm: 200.0 },
-                caps: MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: true },
+                caps: MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: true, ..Default::default() },
             }))
         }
         fn open_transport(&self, _info: &DeviceInfo) -> Result<Box<dyn Transport>, TransportError> {
@@ -667,7 +667,7 @@ pub mod testing {
             match machine_id {
                 "cameo5" => Some(Box::new(TestDriver {
                     profile: MachineProfile { id: "cameo5".into(), name: "Cameo".into(), width_mm: 300.0, height_mm: 200.0 },
-                    caps: MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: true },
+                    caps: MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: true, ..Default::default() },
                 })),
                 _ => None,
             }

@@ -3,6 +3,7 @@ use driver_core::{MachineProfile, MachineCaps, Settings};
 use document::NodeId;
 use geometry::Point;
 use serde::Serialize;
+use std::borrow::Cow;
 use crate::passes::DocumentPass;
 
 pub struct ConfiguredPass<'a> {
@@ -17,7 +18,9 @@ pub enum PreflightError {
     NonFiniteGeometry(NodeId),
     DegeneratePolyline(NodeId),
     OutOfBounds { node: NodeId, bounds: (f64, f64, f64, f64) },
-    SettingsOutOfRange(&'static str),
+    /// A `Cow` because most refusals are fixed sentences, but one names the connected
+    /// machine's own speed ceiling, which only the machine knows.
+    SettingsOutOfRange(Cow<'static, str>),
     MachineMismatch { document: String, device: String },
     OutputTooLarge(usize),
 }
@@ -143,12 +146,44 @@ fn out_of_range(
 /// A setting the machine does not support is ignored rather than refused —
 /// the Drivers skip those values, so refusing them would reject a cut over a
 /// number that will never reach the wire.
-pub fn settings_out_of_range(s: &Settings, caps: &MachineCaps) -> Option<&'static str> {
-    out_of_range(
-        s.speed.filter(|_| caps.supports_speed),
-        s.force.filter(|_| caps.supports_force),
-        s.repeat_count,
-    )
+pub fn settings_out_of_range(s: &Settings, caps: &MachineCaps) -> Option<Cow<'static, str>> {
+    let speed = s.speed.filter(|_| caps.supports_speed);
+    if let Some(message) = out_of_range(speed, s.force.filter(|_| caps.supports_force), s.repeat_count) {
+        return Some(Cow::Borrowed(message));
+    }
+    // The machine's own ceiling, checked after the shared range so a value past both is told
+    // the shared one — the bound every machine states the same way.
+    match speed {
+        Some(v) if v > caps.speed_max => Some(Cow::Owned(format!(
+            "speed must be {}..={} on this machine", SETTINGS_RANGES.speed.min, caps.speed_max))),
+        _ => None,
+    }
+}
+
+/// The ranges a machine admits: the shared ones, with speed narrowed to the machine's ceiling.
+/// What the preset editor and the Cuts panel offer, so a field never accepts a value that
+/// preflight will then refuse.
+pub fn settings_ranges_for(caps: &MachineCaps) -> SettingsRanges {
+    SettingsRanges {
+        speed: SettingRange { min: SETTINGS_RANGES.speed.min, max: SETTINGS_RANGES.speed.max.min(caps.speed_max) },
+        ..SETTINGS_RANGES
+    }
+}
+
+/// A stored preset judged against the machine it belongs to: the shared bounds, then the
+/// machine's own speed ceiling, so a Cameo 1 preset cannot be saved at a speed it cannot run.
+pub fn preset_settings_out_of_range_for(
+    s: &crate::presets::PresetSettings,
+    caps: &MachineCaps,
+) -> Option<Cow<'static, str>> {
+    if let Some(message) = preset_settings_out_of_range(s) {
+        return Some(Cow::Borrowed(message));
+    }
+    match s.speed {
+        Some(v) if v > caps.speed_max => Some(Cow::Owned(format!(
+            "speed must be {}..={} on this machine", SETTINGS_RANGES.speed.min, caps.speed_max))),
+        _ => None,
+    }
 }
 
 /// The same bounds with no machine to ask. A stored preset is checked whole: the fields a
@@ -304,7 +339,7 @@ mod tests {
         MachineCaps {
             supports_speed: false,
             supports_force: false,
-            needs_operator_pass_confirm: false,
+            needs_operator_pass_confirm: false, ..Default::default()
         }
     }
 
@@ -312,7 +347,7 @@ mod tests {
         MachineCaps {
             supports_speed: true,
             supports_force: true,
-            needs_operator_pass_confirm: false,
+            needs_operator_pass_confirm: false, ..Default::default()
         }
     }
 
@@ -454,20 +489,20 @@ mod tests {
     fn repeat_count_below_1_rejected() {
         let shape = make_shape(10, vec![vec![pt(10.0, 10.0), pt(20.0, 20.0)]]);
         let pass = make_pass(PassKey::Color(Some(0xFF0000FF)), vec![shape]);
-        let settings = Settings { speed: None, force: None, repeat_count: 0 };
+        let settings = Settings { speed: None, force: None, repeat_count: 0, ..Default::default() };
         let configured = vec![make_configured_pass(&pass, settings, true)];
         let result = preflight(&configured, &profile_100x100(), &caps_no_speed_force(), None, false);
-        assert_eq!(result, Err(PreflightError::SettingsOutOfRange("repeat_count must be 1..=10")));
+        assert_eq!(result, Err(PreflightError::SettingsOutOfRange("repeat_count must be 1..=10".into())));
     }
 
     #[test]
     fn repeat_count_above_10_rejected() {
         let shape = make_shape(11, vec![vec![pt(10.0, 10.0), pt(20.0, 20.0)]]);
         let pass = make_pass(PassKey::Color(Some(0xFF0000FF)), vec![shape]);
-        let settings = Settings { speed: None, force: None, repeat_count: 11 };
+        let settings = Settings { speed: None, force: None, repeat_count: 11, ..Default::default() };
         let configured = vec![make_configured_pass(&pass, settings, true)];
         let result = preflight(&configured, &profile_100x100(), &caps_no_speed_force(), None, false);
-        assert_eq!(result, Err(PreflightError::SettingsOutOfRange("repeat_count must be 1..=10")));
+        assert_eq!(result, Err(PreflightError::SettingsOutOfRange("repeat_count must be 1..=10".into())));
     }
 
     #[test]
@@ -475,7 +510,7 @@ mod tests {
         // Unsupported speed is ignored (drivers skip it); should pass preflight
         let shape = make_shape(12, vec![vec![pt(10.0, 10.0), pt(20.0, 20.0)]]);
         let pass = make_pass(PassKey::Color(Some(0xFF0000FF)), vec![shape]);
-        let settings = Settings { speed: Some(15), force: None, repeat_count: 1 };
+        let settings = Settings { speed: Some(15), force: None, repeat_count: 1, ..Default::default() };
         let configured = vec![make_configured_pass(&pass, settings, true)];
         let result = preflight(&configured, &profile_100x100(), &caps_no_speed_force(), None, false);
         assert!(result.is_ok());
@@ -485,20 +520,20 @@ mod tests {
     fn speed_below_1_rejected() {
         let shape = make_shape(13, vec![vec![pt(10.0, 10.0), pt(20.0, 20.0)]]);
         let pass = make_pass(PassKey::Color(Some(0xFF0000FF)), vec![shape]);
-        let settings = Settings { speed: Some(0), force: None, repeat_count: 1 };
+        let settings = Settings { speed: Some(0), force: None, repeat_count: 1, ..Default::default() };
         let configured = vec![make_configured_pass(&pass, settings, true)];
         let result = preflight(&configured, &profile_100x100(), &caps_with_speed_force(), None, false);
-        assert_eq!(result, Err(PreflightError::SettingsOutOfRange("speed must be 1..=30")));
+        assert_eq!(result, Err(PreflightError::SettingsOutOfRange("speed must be 1..=30".into())));
     }
 
     #[test]
     fn speed_above_30_rejected() {
         let shape = make_shape(14, vec![vec![pt(10.0, 10.0), pt(20.0, 20.0)]]);
         let pass = make_pass(PassKey::Color(Some(0xFF0000FF)), vec![shape]);
-        let settings = Settings { speed: Some(31), force: None, repeat_count: 1 };
+        let settings = Settings { speed: Some(31), force: None, repeat_count: 1, ..Default::default() };
         let configured = vec![make_configured_pass(&pass, settings, true)];
         let result = preflight(&configured, &profile_100x100(), &caps_with_speed_force(), None, false);
-        assert_eq!(result, Err(PreflightError::SettingsOutOfRange("speed must be 1..=30")));
+        assert_eq!(result, Err(PreflightError::SettingsOutOfRange("speed must be 1..=30".into())));
     }
 
     #[test]
@@ -506,7 +541,7 @@ mod tests {
         // Unsupported force is ignored (drivers skip it); should pass preflight
         let shape = make_shape(15, vec![vec![pt(10.0, 10.0), pt(20.0, 20.0)]]);
         let pass = make_pass(PassKey::Color(Some(0xFF0000FF)), vec![shape]);
-        let settings = Settings { speed: None, force: Some(15), repeat_count: 1 };
+        let settings = Settings { speed: None, force: Some(15), repeat_count: 1, ..Default::default() };
         let configured = vec![make_configured_pass(&pass, settings, true)];
         let result = preflight(&configured, &profile_100x100(), &caps_no_speed_force(), None, false);
         assert!(result.is_ok());
@@ -516,20 +551,20 @@ mod tests {
     fn force_below_1_rejected() {
         let shape = make_shape(16, vec![vec![pt(10.0, 10.0), pt(20.0, 20.0)]]);
         let pass = make_pass(PassKey::Color(Some(0xFF0000FF)), vec![shape]);
-        let settings = Settings { speed: None, force: Some(0), repeat_count: 1 };
+        let settings = Settings { speed: None, force: Some(0), repeat_count: 1, ..Default::default() };
         let configured = vec![make_configured_pass(&pass, settings, true)];
         let result = preflight(&configured, &profile_100x100(), &caps_with_speed_force(), None, false);
-        assert_eq!(result, Err(PreflightError::SettingsOutOfRange("force must be 1..=33")));
+        assert_eq!(result, Err(PreflightError::SettingsOutOfRange("force must be 1..=33".into())));
     }
 
     #[test]
     fn force_above_33_rejected() {
         let shape = make_shape(17, vec![vec![pt(10.0, 10.0), pt(20.0, 20.0)]]);
         let pass = make_pass(PassKey::Color(Some(0xFF0000FF)), vec![shape]);
-        let settings = Settings { speed: None, force: Some(34), repeat_count: 1 };
+        let settings = Settings { speed: None, force: Some(34), repeat_count: 1, ..Default::default() };
         let configured = vec![make_configured_pass(&pass, settings, true)];
         let result = preflight(&configured, &profile_100x100(), &caps_with_speed_force(), None, false);
-        assert_eq!(result, Err(PreflightError::SettingsOutOfRange("force must be 1..=33")));
+        assert_eq!(result, Err(PreflightError::SettingsOutOfRange("force must be 1..=33".into())));
     }
 
     #[test]
@@ -581,7 +616,7 @@ mod tests {
         }
         let shape = make_shape(20, vec![points]);
         let pass = make_pass(PassKey::Color(Some(0xFF0000FF)), vec![shape]);
-        let settings = Settings { speed: None, force: None, repeat_count: 10 };
+        let settings = Settings { speed: None, force: None, repeat_count: 10, ..Default::default() };
         let configured = vec![make_configured_pass(&pass, settings, true)];
         let result = preflight(&configured, &profile_100x100(), &caps_no_speed_force(), None, false);
         assert!(matches!(result, Err(PreflightError::OutputTooLarge(_))));
@@ -599,8 +634,8 @@ mod tests {
         let big = make_pass(PassKey::Color(Some(0xFF0000FF)), vec![make_shape(20, vec![points])]);
         let tiny = make_pass(PassKey::Color(Some(0x00FF00FF)), vec![make_shape(21, vec![vec![pt(0.0, 0.0); 10]])]);
         let configured = vec![
-            make_configured_pass(&big, Settings { speed: None, force: None, repeat_count: 1 }, true),
-            make_configured_pass(&tiny, Settings { speed: None, force: None, repeat_count: 10 }, true),
+            make_configured_pass(&big, Settings { speed: None, force: None, repeat_count: 1, ..Default::default() }, true),
+            make_configured_pass(&tiny, Settings { speed: None, force: None, repeat_count: 10, ..Default::default() }, true),
         ];
         let result = preflight(&configured, &profile_100x100(), &caps_no_speed_force(), None, false);
         assert!(result.is_ok());
@@ -610,7 +645,7 @@ mod tests {
     fn happy_path_valid_cut() {
         let shape = make_shape(21, vec![vec![pt(10.0, 10.0), pt(20.0, 20.0), pt(30.0, 10.0)]]);
         let pass = make_pass(PassKey::Color(Some(0xFF0000FF)), vec![shape]);
-        let settings = Settings { speed: Some(15), force: Some(20), repeat_count: 3 };
+        let settings = Settings { speed: Some(15), force: Some(20), repeat_count: 3, ..Default::default() };
         let configured = vec![make_configured_pass(&pass, settings, true)];
         let result = preflight(&configured, &profile_100x100(), &caps_with_speed_force(), None, false);
         assert_eq!(result, Ok(()));
@@ -645,7 +680,7 @@ mod tests {
                 "shape #5 lies outside the 304.8 x 304.8 mm cutting area",
             ),
             (
-                PreflightError::SettingsOutOfRange("speed must be 1..=30"),
+                PreflightError::SettingsOutOfRange("speed must be 1..=30".into()),
                 "settings_out_of_range",
                 "speed must be 1..=30",
             ),
@@ -677,16 +712,16 @@ mod tests {
                 Settings {
                     speed: None,
                     force: None,
-                    repeat_count: SETTINGS_RANGES.repeat_count.max + 1,
+                    repeat_count: SETTINGS_RANGES.repeat_count.max + 1, ..Default::default()
                 },
                 SETTINGS_RANGES.repeat_count,
             ),
             (
-                Settings { speed: Some(SETTINGS_RANGES.speed.max + 1), force: None, repeat_count: 1 },
+                Settings { speed: Some(SETTINGS_RANGES.speed.max + 1), force: None, repeat_count: 1, ..Default::default() },
                 SETTINGS_RANGES.speed,
             ),
             (
-                Settings { speed: None, force: Some(SETTINGS_RANGES.force.max + 1), repeat_count: 1 },
+                Settings { speed: None, force: Some(SETTINGS_RANGES.force.max + 1), repeat_count: 1, ..Default::default() },
                 SETTINGS_RANGES.force,
             ),
         ];
@@ -723,11 +758,11 @@ mod tests {
         let stored = crate::presets::PresetSettings {
             speed: Some(SETTINGS_RANGES.speed.max + 1),
             force: None,
-            repeat_count: 1,
+            repeat_count: 1, ..Default::default()
         };
         assert_eq!(
             settings_out_of_range(
-                &Settings { speed: stored.speed, force: None, repeat_count: stored.repeat_count },
+                &Settings { speed: stored.speed, force: None, repeat_count: stored.repeat_count, ..Default::default() },
                 &caps_no_speed_force(),
             ),
             None,
@@ -738,5 +773,20 @@ mod tests {
             Some("speed must be 1..=30"),
             "a preset's out-of-range speed was let through to its file",
         );
+    }
+
+    #[test]
+    fn a_speed_past_the_machines_own_ceiling_is_refused_and_says_which() {
+        let caps = MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false, speed_max: 10, ..Default::default() };
+        let s = Settings { speed: Some(11), ..Settings::default() };
+        assert_eq!(settings_out_of_range(&s, &caps).as_deref(), Some("speed must be 1..=10 on this machine"));
+        assert_eq!(settings_out_of_range(&Settings { speed: Some(10), ..Settings::default() }, &caps), None);
+        // Past the shared range too: the shared sentence wins, as every machine states it alike.
+        assert_eq!(settings_out_of_range(&Settings { speed: Some(31), ..Settings::default() }, &caps).as_deref(), Some("speed must be 1..=30"));
+        // A machine that ignores speed is not judged on it, whatever its ceiling.
+        let no_speed = MachineCaps { supports_speed: false, ..caps };
+        assert_eq!(settings_out_of_range(&s, &no_speed), None);
+        assert_eq!(settings_ranges_for(&caps).speed, SettingRange { min: 1, max: 10 });
+        assert_eq!(settings_ranges_for(&caps).force, SETTINGS_RANGES.force);
     }
 }

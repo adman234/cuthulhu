@@ -195,7 +195,7 @@ mod tests {
     }
 
     fn caps() -> MachineCaps {
-        MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false }
+        MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false, ..Default::default() }
     }
 
     /// Colours are the only keys these cases need, so the helper still takes them — it names
@@ -293,7 +293,7 @@ mod tests {
         let planned = passes(&[(RED, 0.0, 0.0)]);
         let too_fast = vec![PassSelection {
             key: PassKey::Color(Some(RED)),
-            settings: Settings { speed: Some(99), force: None, repeat_count: 1 },
+            settings: Settings { speed: Some(99), force: None, repeat_count: 1, ..Default::default() },
         }];
         let err = plan_cut(&planned, &profile(500.0, 500.0), &caps(), &opts(too_fast)).unwrap_err();
         assert!(
@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn each_job_carries_its_own_pass_geometry_and_settings() {
         let planned = passes(&[(RED, 0.0, 0.0), (RED, 10.0, 0.0), (BLUE, 20.0, 0.0)]);
-        let settings = Settings { speed: Some(5), force: Some(20), repeat_count: 2 };
+        let settings = Settings { speed: Some(5), force: Some(20), repeat_count: 2, ..Default::default() };
         let sel = vec![PassSelection { key: PassKey::Color(Some(RED)), settings: settings.clone() }];
 
         let plan = plan_cut(&planned, &profile(500.0, 500.0), &caps(), &opts(sel)).unwrap();
