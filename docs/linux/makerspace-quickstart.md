@@ -6,28 +6,54 @@ laid out like LightBurn. The Cameo 1 support is meant to go upstream once it has
 hardware. Until the hardware checklist in `apps/desktop/MANUAL-CHECKLIST.md` (§ Cameo 1) is
 ticked, treat every cut as a test cut and use scrap media.
 
-## 1. Install (Ubuntu / Debian)
+## 1. Build the package (once, on any Ubuntu / Debian machine)
 
 ```sh
 sudo apt-get install -y build-essential pkg-config libudev-dev \
   libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
 curl https://sh.rustup.rs -sSf | sh          # Rust, if not installed
-cargo install tauri-cli --version '^2'       # once
+cargo install tauri-cli --version '^2' --locked   # once
 git clone https://github.com/adman234/cuthulhu && cd cuthulhu
-(cd apps/desktop && cargo tauri build)       # → target/release/bundle/{deb,appimage}
+(cd apps/desktop && cargo tauri build --bundles deb,appimage)
+# → target/release/bundle/deb/cuthulhu_0.1.0_amd64.deb
+# → target/release/bundle/appimage/cuthulhu_0.1.0_amd64.AppImage
 ```
 
-## 2. Let members use the cutter without root
+`--bundles rpm` builds a Fedora package the same way.
+
+## 2. Install it on each computer
+
+```sh
+sudo apt install ./cuthulhu_0.1.0_amd64.deb
+```
+
+The `.deb` does three things beyond copying the app:
+
+- installs the udev rule `docs/linux/99-silhouette-cameo1.rules` as
+  `/etc/udev/rules.d/99-silhouette-cameo1.rules`, so members can use the cutter without root;
+- reloads udev after installing (and after removing), so a Cameo that is already plugged in works
+  without a replug — if it still is not found, unplug and replug it once;
+- adds **Cuthulhu** to the applications menu under Graphics and Engineering.
+
+You do not need to blacklist the kernel printer driver (`usblp`): Cuthulhu detaches it when it
+opens the cutter.
+
+### AppImage instead of a .deb
+
+An AppImage cannot install system files, so on a computer that runs the AppImage install the udev
+rule by hand, once:
 
 ```sh
 sudo cp docs/linux/99-silhouette-cameo1.rules /etc/udev/rules.d/
 sudo udevadm control --reload && sudo udevadm trigger
+chmod +x cuthulhu_0.1.0_amd64.AppImage && ./cuthulhu_0.1.0_amd64.AppImage
 ```
 
-Then unplug and replug the Cameo. You do not need to blacklist the kernel printer driver
-(`usblp`): Cuthulhu detaches it when it opens the cutter.
+Then unplug and replug the Cameo.
 
-Check the setup from a terminal:
+### Check the setup
+
+From a source checkout:
 
 ```sh
 cargo run -p cli -- list-devices        # should list a cameo1 device

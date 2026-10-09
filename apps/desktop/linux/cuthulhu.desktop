@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Tauri renders this with handlebars ({{exec}}, {{icon}}) into the .deb and .rpm desktop entry.
+# Written out rather than left to `bundle.category`, which can name one category, not Engineering
+# beside Graphics. StartupWMClass is the binary name because GTK takes the window class from it.
+[Desktop Entry]
+Type=Application
+Name=Cuthulhu
+GenericName=Vinyl Cutter
+Comment=Design and cut vinyl, card and heat-transfer material on a Silhouette Cameo or GCC Puma
+Categories=Graphics;Engineering;
+Keywords=vinyl;cutter;plotter;silhouette;cameo;puma;htv;
+Exec={{exec}}
+Icon={{icon}}
+StartupWMClass={{exec}}
+Terminal=false
