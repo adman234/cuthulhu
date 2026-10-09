@@ -27,7 +27,8 @@ import { SimpleDock } from "./simple/SimpleDock";
 import { ColorPalette } from "./simple/ColorPalette";
 import { readLayout, writeLayout, type Layout } from "./simple/layout";
 import { ShapeToolDialog } from "./shapes/ShapeToolDialog";
-import { COPIES_FORM, OFFSET_FORM, WEED_FORM } from "./shapes/viewmodel";
+import { COPIES_FORM, NEST_FORM, OFFSET_FORM, WEED_FORM, nestRefusal, type NestRequest } from "./shapes/viewmodel";
+import { nest } from "./interaction/nest";
 import type { ShapeTool } from "./panels/ToolRail";
 
 /** `window.localStorage` itself can throw (blocked site data), not just its methods. */
@@ -163,7 +164,7 @@ export function App() {
   };
   // Which text the dialog is for: a new one, or the Text node it is rewriting.
   const [textOpen, setTextOpen] = useState<null | "new" | TextSource>(null);
-  const [shapeTool, setShapeTool] = useState<"offset" | "weed" | "copies" | null>(null);
+  const [shapeTool, setShapeTool] = useState<"offset" | "weed" | "copies" | "nest" | null>(null);
   const [tracePath, setTracePath] = useState<string | null>(null);
   const [status, setStatus] = useState<ipc.CutStatus>(ipc.DISCONNECTED_STATUS);
   /** The machine's material presets, for the properties panel's control. Loaded here rather
@@ -578,6 +579,30 @@ export function App() {
     if (outer.length > 0) setSelected(outer);
   };
   const noSelection = selected.length === 0 ? "Select shapes first" : null;
+  // Through the canvas queue, like align: every piece's move is one batch and one undo, and a nest
+  // clicked while a drag's commit is on the wire packs the pieces from where that drag left them.
+  // Checked against the scene on screen first, so a nest that cannot place every piece moves none.
+  const onNest = async ({ gapMm, allowTurn }: NestRequest): Promise<boolean> => {
+    const lock = interaction.editsLockNow();
+    if (lock !== null) {
+      refuseEdit(lock);
+      return false;
+    }
+    if (!doc) return false;
+    const ids = units;
+    const refusal = nestRefusal(nest(unitsOf(interaction.effectiveScene, ids, expand), doc.artboard, gapMm, allowTurn), allowTurn);
+    if (refusal) {
+      setError(refusal);
+      return false;
+    }
+    setError(null);
+    interaction.transformEach(`nest:${[...ids].sort((p, q) => p - q).join(",")}`, (sc, now) => {
+      if (!now.artboard) return [];
+      const r = nest(unitsOf(sc, ids, now.expand), now.artboard, gapMm, allowTurn);
+      return nestRefusal(r, allowTurn) ? [] : r.moves;
+    });
+    return true;
+  };
   const shapeTools: ShapeTool[] = [
     { label: "Offset…", disabled: noSelection, onClick: () => setShapeTool("offset") },
     { label: "Weed box…", disabled: noSelection, onClick: () => setShapeTool("weed") },
@@ -585,6 +610,7 @@ export function App() {
     // Replaces the selection, so what is selected afterwards is the one welded Path.
     { label: "Weld", disabled: noSelection, onClick: () => edit(async () => selectAdded(await ipc.weld({ ids: selected }))) },
     { label: "To path", disabled: noSelection, onClick: () => edit(() => ipc.convertToPath({ ids: selected })) },
+    { label: "Nest…", disabled: unitCount === 0 ? "Select the pieces to nest" : null, onClick: () => setShapeTool("nest") },
   ];
   const selectionNote = `${unitCount} piece${unitCount === 1 ? "" : "s"} selected`;
 
@@ -783,6 +809,9 @@ export function App() {
           onApply={(r) => edit(async () => selectAdded(await ipc.weedBox({ ids: selected, ...r })))}
           onClose={() => setShapeTool(null)}
         />
+      ) : null}
+      {shapeTool === "nest" ? (
+        <ShapeToolDialog form={NEST_FORM} note={`${selectionNote}, packed across the media from its top`} onApply={onNest} onClose={() => setShapeTool(null)} />
       ) : null}
       {shapeTool === "copies" ? (
         <ShapeToolDialog

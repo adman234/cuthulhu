@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { describe, expect, it } from "vitest";
-import { COPIES_FORM, OFFSET_FORM, WEED_FORM } from "./viewmodel";
+import { COPIES_FORM, NEST_FORM, OFFSET_FORM, WEED_FORM, nestRefusal } from "./viewmodel";
 
 describe("OFFSET_FORM", () => {
   it("starts at a 2 mm round outset around everything", () => {
@@ -59,5 +59,28 @@ describe("COPIES_FORM", () => {
   it("refuses a grid of one cell and a negative gap", () => {
     expect(COPIES_FORM.parse({ ...COPIES_FORM.defaults, cols: "1", rows: "1" })).toEqual({ ok: false, error: "Copies need more than one column or row" });
     expect(COPIES_FORM.parse({ ...COPIES_FORM.defaults, gapY: "-1" })).toEqual({ ok: false, error: "Gaps must not be negative" });
+  });
+});
+
+describe("NEST_FORM", () => {
+  it("starts at a 3 mm gap with turning allowed", () => {
+    expect(NEST_FORM.parse(NEST_FORM.defaults)).toEqual({ ok: true, value: { gapMm: 3, allowTurn: true } });
+  });
+
+  it("refuses a negative or missing gap", () => {
+    expect(NEST_FORM.parse({ gap: "-1", turn: false })).toEqual({ ok: false, error: "Gap must not be negative" });
+    expect(NEST_FORM.parse({ gap: "", turn: false })).toEqual({ ok: false, error: "Gap must be a number" });
+  });
+});
+
+describe("nestRefusal", () => {
+  it("names pieces too wide, and whether turning was tried", () => {
+    expect(nestRefusal({ tooWide: [[1]], tooLong: false }, true)).toBe("Not nested: a piece is wider than the media even turned");
+    expect(nestRefusal({ tooWide: [[1], [2]], tooLong: true }, false)).toBe("Not nested: 2 pieces are wider than the media");
+  });
+
+  it("names a pack that runs past the media, and is null when it fits", () => {
+    expect(nestRefusal({ tooWide: [], tooLong: true }, true)).toBe("Not nested: the packed pieces run past the end of the media");
+    expect(nestRefusal({ tooWide: [], tooLong: false }, true)).toBeNull();
   });
 });

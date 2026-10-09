@@ -4881,6 +4881,41 @@ test("Copies with one cell is refused before anything is sent", async ({ page })
   expect(await shapeCalls(page)).toEqual([]);
 });
 
+test("Nest packs the selected pieces across the media in one batch", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedAlignExtras: true, seedTwoColorRects: true });
+  await page.goto("/");
+  // The red rect and the Group of two (50..80 x 20..50).
+  await selectRows(page, [0, 2]);
+  await page.getByRole("button", { name: "Nest…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Nest" });
+  await dialog.getByLabel("Gap between pieces").fill("5");
+  await dialog.getByLabel("Turn pieces a quarter when it saves media").uncheck();
+  await dialog.getByRole("button", { name: "Nest pieces" }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  const log = await commitLog(page);
+  expect(new Set(log.map((c) => c.batch))).toEqual(new Set([1]));
+  // Tallest first: the Group's 30 x 30 box to (5, 5), then the red rect beside it at (40, 5).
+  const byId = Object.fromEntries(log.map((c) => [c.ids[0], c.m]));
+  expect(byId[4]).toEqual([1, 0, 0, 1, -45, -15]);
+  expect(byId[2]).toEqual([1, 0, 0, 1, 40, 5]);
+});
+
+test("a Nest with a piece too wide for the media moves nothing and says why", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  await page.getByLabel("W", { exact: true }).fill("400");
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  await page.getByRole("button", { name: "Nest…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Nest" });
+  await dialog.getByLabel("Turn pieces a quarter when it saves media").uncheck();
+  await dialog.getByRole("button", { name: "Nest pieces" }).click();
+  await expect(page.getByText("Not nested: a piece is wider than the media")).toBeVisible();
+  await expect(dialog).toBeVisible();
+  expect((await commitLog(page)).length).toBe(1);
+});
+
 // ── Simple (LightBurn-style) shell ─────────────────────────────────────────────────────────────
 
 const useSimpleLayout = (page: Page) =>

@@ -113,3 +113,32 @@ export const COPIES_FORM: ToolForm<CopiesRequest> = {
     return { ok: true, value: { cols, rows, gapXMm, gapYMm } };
   },
 };
+
+export type NestRequest = { gapMm: number; allowTurn: boolean };
+
+export const NEST_FORM: ToolForm<NestRequest> = {
+  title: "Nest",
+  apply: "Nest pieces",
+  fields: [
+    { key: "gap", label: "Gap between pieces", kind: "number", unit: "mm", step: 0.5 },
+    { key: "turn", label: "Turn pieces a quarter when it saves media", kind: "checkbox" },
+  ],
+  defaults: { gap: "3", turn: true },
+  parse: (v) => {
+    const gapMm = num(v, "gap", "Gap");
+    if (typeof gapMm === "string") return fail(gapMm);
+    if (gapMm < 0) return fail("Gap must not be negative");
+    return { ok: true, value: { gapMm, allowTurn: v.turn === true } };
+  },
+};
+
+/** Why a nest was not applied, or null when it can be: said before anything moves, since half a
+ *  nest — some pieces packed, one left where it was on top of them — is worse than none. */
+export function nestRefusal(r: { tooWide: number[][]; tooLong: boolean }, allowTurn: boolean): string | null {
+  if (r.tooWide.length > 0) {
+    const n = r.tooWide.length;
+    return `Not nested: ${n === 1 ? "a piece is" : `${n} pieces are`} wider than the media${allowTurn ? " even turned" : ""}`;
+  }
+  if (r.tooLong) return "Not nested: the packed pieces run past the end of the media";
+  return null;
+}
