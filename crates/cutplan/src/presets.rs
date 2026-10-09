@@ -187,10 +187,10 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             },
             builtin: true,
         },
-        // Cameo 1 presets: the Silhouette media table's speed and force, which the Cameo 1's own
-        // firmware applies for the same media. No HTV row because that table has none; the pen
-        // row waits for a pen tool (it needs `FC0`, not the blade offset).
-        // [src: inkscape-silhouette silhouette/Graphtec.py L88-118 (GPL-2.0+)]
+        // Cameo 1 presets: the speed and force of inkscape-silhouette's media table, which it took
+        // from robocut's cut dialog. No HTV row because that table has none; the pen row waits
+        // for a pen tool (it needs `FC0`, not the blade offset).
+        // [src: inkscape-silhouette silhouette/Graphtec.py L84-118 (GPL-2.0+)]
         MaterialPreset {
             id: "cameo1-vinyl-sticker".into(),
             name: "Vinyl Sticker".into(),

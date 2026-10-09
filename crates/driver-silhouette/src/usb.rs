@@ -120,7 +120,7 @@ impl UsbTransport {
         let dev = di.open().map_err(|e| TransportError::Io(e.to_string()))?;
         // Detach first: the Cameo 1 enumerates as a USB printer, so on Linux `usblp` already
         // holds interface 0 and a plain claim fails with "busy". Elsewhere this is a plain claim.
-        // [src: inkscape-silhouette silhouette/Graphtec.py L585-597 (GPL-2.0+)]
+        // [src: inkscape-silhouette silhouette/Graphtec.py L589-596 (GPL-2.0+)]
         let iface = dev
             .detach_and_claim_interface(0)
             .map_err(|e| TransportError::Io(e.to_string()))?;

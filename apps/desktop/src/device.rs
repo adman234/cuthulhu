@@ -1062,12 +1062,16 @@ impl DeviceManagerHandle {
     /// against itself. So the aim is re-read and compared here, before anything is sent.
     pub fn execute_cut(&self, planned_for: DeviceInfo, passes: Vec<CutPass>) -> Result<CutStarted, IpcError> {
         let aimed = self.connected.lock().unwrap().clone();
-        // A cutter is its id *and* its host, never the id alone: fallback ids are assigned by
-        // location (`usb:at:1:4`, `serial:at:/dev/ttyUSB0`), so two hosts wired alike hand out
-        // the same string for two different machines.
-        let same_cutter = aimed
-            .as_ref()
-            .is_some_and(|d| d.instance_id == planned_for.instance_id && d.host == planned_for.host);
+        // A cutter is its id, its host *and* its machine, never the id alone: fallback ids are
+        // assigned by location (`usb:at:1:4`, `serial:at:/dev/ttyUSB0`), so two hosts wired alike
+        // hand out the same string for two different machines — and so does one socket that a
+        // Cameo 5 is unplugged from and a Cameo 1 plugged into, whose Passes were preflighted
+        // against a different cutting area.
+        let same_cutter = aimed.as_ref().is_some_and(|d| {
+            d.instance_id == planned_for.instance_id
+                && d.host == planned_for.host
+                && d.machine_id == planned_for.machine_id
+        });
         if !same_cutter {
             return Err(IpcError::new(
                 "device_mismatch",
@@ -2552,6 +2556,20 @@ mod tests {
     /// the loopback host's Cameo are both `usb:1:4`, because a fallback id is assigned by
     /// location and two identically-wired machines really do collide. A guard comparing ids
     /// alone would call these the same cutter and send A's Passes to B.
+    /// A socket-named id survives a cable swap, so a Cameo 1 plugged in where the Cameo 5 was
+    /// answers to the id the cut was planned for. Its cutting area is narrower, so Passes
+    /// preflighted for the Cameo 5 must not reach it.
+    #[test]
+    fn a_different_machine_in_the_same_socket_is_not_the_planned_cutter() {
+        let mut app = AppState::new();
+        let dev = test_device_setup();
+        app.add_rect(10.0, 10.0);
+        let (planned_for, passes) = dev.prepare_cut(&app, request_from(plan_for(&app))).unwrap();
+        *dev.connected.lock().unwrap() = Some(DeviceInfo { machine_id: "cameo1".into(), ..planned_for.clone() });
+        let err = dev.execute_cut(planned_for, passes).expect_err("Passes planned for one machine must not go to another");
+        assert_eq!(err.code, "device_mismatch");
+    }
+
     #[test]
     fn a_dispatch_whose_aim_moved_after_planning_is_refused() {
         use std::time::{Duration, Instant};

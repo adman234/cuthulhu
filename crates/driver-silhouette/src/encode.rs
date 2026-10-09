@@ -15,7 +15,7 @@ const CAMEO1_MARGIN_TOP_MM: f64 = 1.0;
 const CAMEO1_SPEED_MAX: u32 = 10;
 
 /// The 0.9 mm blade's offset, in device units — the circle the head turns on a corner so the
-/// trailing blade tip meets it. [src: inkscape-silhouette silhouette/Graphtec.py L1241-1259 (GPL-2.0+)]
+/// trailing blade tip meets it. [src: inkscape-silhouette silhouette/Graphtec.py L1244-1259 (GPL-2.0+)]
 const CAMEO1_BLADE_OFFSET_SU: i64 = 18;
 
 pub struct SilhouetteDriver {
@@ -42,11 +42,12 @@ impl SilhouetteDriver {
             Model::Cameo5Alpha => MachineProfile {
                 id: "cameo5".into(), name: "Silhouette Cameo 5 Alpha".into(),
                 width_mm: 330.0, height_mm: 3000.0 },
-            // 304 mm of media width less the unreachable left margin.
+            // 304 mm of media width less the unreachable left margin, and 3000 mm of length less
+            // the top margin, so the cutting area's far corner (`Z`) is the device's own maximum.
             // [src: inkscape-silhouette silhouette/Graphtec.py L218-221 (GPL-2.0+)]
             Model::Cameo1 => MachineProfile {
                 id: "cameo1".into(), name: "Silhouette Cameo".into(),
-                width_mm: 304.0 - CAMEO1_MARGIN_LEFT_MM, height_mm: 3000.0 },
+                width_mm: 304.0 - CAMEO1_MARGIN_LEFT_MM, height_mm: 3000.0 - CAMEO1_MARGIN_TOP_MM },
         };
         SilhouetteDriver { profile, model, feed_su: Cell::new(0) }
     }
@@ -71,8 +72,11 @@ impl Driver for SilhouetteDriver {
         let mut out = vec![0x1b, 0x04]; // ESC EOT init
         if self.model == Model::Cameo1 {
             // The pre-Cameo-3 setup: track enhancing off, portrait, no corner lift, then the
-            // cutting area and plot mode. Job-wide, so it is sent once rather than per Pass.
+            // cutting area and plot mode. Job-wide, so it is sent once rather than per Pass;
+            // speed, force and blade offset follow per Pass, the order of the Silhouette Studio
+            // captures recorded in inkscape-silhouette.
             // [src: inkscape-silhouette silhouette/Graphtec.py L1276-1301, L1604-1610 (GPL-2.0+)]
+            // [src: inkscape-silhouette Commands.md L410-443 (GPL-2.0+)]
             let bottom = su(self.profile.height_mm + CAMEO1_MARGIN_TOP_MM);
             let right = su(self.profile.width_mm + CAMEO1_MARGIN_LEFT_MM);
             for cmd in ["FY1", "FN0", "TB50,0", "FE0,0", "\\0,0", &format!("Z{bottom},{right}"),
@@ -107,7 +111,9 @@ impl Driver for SilhouetteDriver {
         let mut feed = self.feed_su.get();
         for _ in 0..pass.settings.repeat_count.max(1) {
             for poly in &pass.polylines {
-                if poly.is_empty() { continue; }
+                // Both drivers skip a path that cannot draw: a lone point would be a bare move
+                // that still pushed the end-of-job feed. [src: Graphtec.py L1443 (GPL-2.0+)]
+                if poly.len() < 2 { continue; }
                 let f = poly[0];                            // note (y,x) order
                 push(&format!("M{},{}", su(f.y) + dy, su(f.x) + dx), &mut out);
                 for p in &poly[1..] { push(&format!("D{},{}", su(p.y) + dy, su(p.x) + dx), &mut out); }
@@ -123,7 +129,7 @@ impl Driver for SilhouetteDriver {
     }
     fn status_query(&self) -> Vec<u8> {
         // ESC ENQ, not the bare-ENQ default: the Silhouette dialect frames its
-        // status query as 1b 05. [src: Graphtec.py L176 (GPL-2.0+)]
+        // status query as 1b 05. [src: Graphtec.py L180 (GPL-2.0+)]
         vec![0x1b, 0x05]
     }
     fn session_end(&self) -> Vec<u8> {
@@ -246,8 +252,8 @@ mod tests {
         bytes.extend(d.encode_pass(&job).unwrap());
         bytes.extend(d.session_end());
         let mut want = vec![0x1b, 0x04];
-        // 295 mm + 9 = 304 mm = 6080 SU wide, 3000 mm + 1 = 60020 SU long.
-        want.extend(gpgl(&["FY1", "FN0", "TB50,0", "FE0,0", "\\0,0", "Z60020,6080", "L0", "FE0,0", "FF0,0,0",
+        // 295 mm + 9 = 304 mm = 6080 SU wide, 2999 mm + 1 = 3000 mm = 60000 SU long.
+        want.extend(gpgl(&["FY1", "FN0", "TB50,0", "FE0,0", "\\0,0", "Z60000,6080", "L0", "FE0,0", "FF0,0,0",
             "!5", "FX10", "FC18",
             // (y,x) with y +20 SU (1 mm) and x +180 SU (9 mm)
             "M20,180", "D20,580", "D420,580", "D420,180", "D20,180",
@@ -316,6 +322,7 @@ mod tests {
         let d = SilhouetteDriver::cameo1();
         assert_eq!(d.profile().id, "cameo1");
         assert_eq!(d.profile().width_mm, 295.0);
+        assert_eq!(d.profile().height_mm, 2999.0);
         assert_eq!(d.model(), Model::Cameo1);
     }
 
@@ -330,5 +337,33 @@ mod tests {
         let mut want = vec![0x1b, 0x04];
         want.extend(gpgl(&["J1","M0,0","D0,400","D400,400","D400,0","D0,0","SO0","FN0"]));
         assert_eq!(bytes, want);
+    }
+
+    /// The cutting area's far corner must be the device's own length, 3000 mm, not past it.
+    #[test]
+    fn cameo1_cutting_area_ends_at_the_device_maximum() {
+        let s = String::from_utf8_lossy(&SilhouetteDriver::cameo1().session_begin()).to_string();
+        assert!(s.contains("Z60000,6080\u{3}"), "{s:?}");
+    }
+
+    #[test]
+    fn cameo1_repeats_paths_and_skips_ones_that_cannot_draw() {
+        let d = SilhouetteDriver::cameo1();
+        let job = Job {
+            polylines: vec![vec![Point{x:0.0,y:5.0}], vec![], vec![Point{x:0.0,y:0.0}, Point{x:10.0,y:0.0}]],
+            settings: Settings { speed: None, force: None, repeat_count: 2 },
+        };
+        let _ = d.session_begin();
+        let s = String::from_utf8_lossy(&d.encode_pass(&job).unwrap()).to_string();
+        assert_eq!(s.matches('M').count(), 2, "one move per repeat of the one drawable path: {s:?}");
+        assert!(!s.contains("M120,"), "the lone point at y=5 is not moved to: {s:?}");
+        assert_eq!(d.session_end(), gpgl(&["M20,0", "SO0"]), "the lone point does not push the feed");
+    }
+
+    #[test]
+    fn cameo1_session_with_nothing_cut_feeds_nowhere() {
+        let d = SilhouetteDriver::cameo1();
+        let _ = d.session_begin();
+        assert_eq!(d.session_end(), gpgl(&["M0,0", "SO0"]));
     }
 }

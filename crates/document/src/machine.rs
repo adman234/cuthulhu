@@ -25,13 +25,13 @@ pub fn builtin_profiles() -> Vec<MachineProfile> {
             width_mm: 600.0,
             height_mm: 5000.0,
         },
-        // The reachable area: 304 mm media less the 9 mm the carriage cannot reach. Must
-        // match `driver_silhouette::SilhouetteDriver::cameo1()`'s profile.
+        // The reachable area: 304 × 3000 mm less the 9 mm left and 1 mm top margins. Pinned to
+        // `SilhouetteDriver::cameo1()`'s profile by the desktop's profile-agreement test.
         MachineProfile {
             id: "cameo1".into(),
             name: "Silhouette Cameo".into(),
             width_mm: 295.0,
-            height_mm: 3000.0,
+            height_mm: 2999.0,
         },
     ]
 }
