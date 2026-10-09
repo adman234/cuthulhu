@@ -433,6 +433,22 @@ fn transmit_steps(
     Ok(TransmitOutcome::Completed)
 }
 
+/// Throw away whatever the machine said before this session asked it anything. An answer is
+/// matched by its bytes alone, so a stale one — the "found" of a search that was cancelled before
+/// it replied — would otherwise be taken as this search's, and the job cut against marks the
+/// machine never looked for. Bounded, so a machine that never stops talking cannot hold the cut.
+fn drain_input(transport: &mut dyn Transport) -> Result<(), DeviceError> {
+    let mut buf = [0u8; 64];
+    for _ in 0..32 {
+        match transport.read(&mut buf, Duration::from_millis(50)) {
+            Ok(0) | Err(TransportError::Timeout) => return Ok(()),
+            Ok(_) => {}
+            Err(e) => return Err(DeviceError::from(e)),
+        }
+    }
+    Ok(())
+}
+
 /// Read until the machine's answer is complete — its first ETX, the GPGL terminator — and hold it
 /// against `expectation`. `Ok(false)` is a cancel observed while waiting.
 ///
@@ -607,6 +623,9 @@ fn run_from_pass(
         // deleting it is #69's either/or; the wrapper keeps `Io`'s payload a sentence meanwhile.
         .map_err(|e| DeviceError::Io(format!("the cut could not be encoded for this cutter ({e:?})")))?;
     let sent_bytes: usize = steps.iter().map(|s| match s { SessionStep::Send(b) => b.len(), SessionStep::Expect(_) => 0 }).sum();
+    if steps.iter().any(|s| matches!(s, SessionStep::Expect(_))) {
+        drain_input(transport)?;
+    }
     match transmit_steps(transport, &steps, job_id, pass_index, total_passes, state, rep, cancel_flag)? {
         TransmitOutcome::Cancelled { submitted_bytes } => {
             return Ok(PassRunOutcome::Cancelled { pass_index, submitted_bytes });
@@ -2074,7 +2093,8 @@ mod tests {
     /// leave it — the worker reads to the terminator, not one read's worth.
     #[test]
     fn found_marks_let_the_cut_run_on() {
-        let reads = Reads::Scripted(vec![Ok(b"  ".to_vec()), Ok(b"  0\x03".to_vec()), Ok(b"0\x03".to_vec())]);
+        // The leading timeout is the drain finding nothing stale.
+        let reads = Reads::Scripted(vec![Err(TransportError::Timeout), Ok(b"  ".to_vec()), Ok(b"  0\x03".to_vec()), Ok(b"0\x03".to_vec())]);
         let (mgr, _events, written) = registration_rig(registering_caps(), Duration::from_secs(2), reads);
         mgr.cut(vec![registered_pass()]).unwrap();
         let status = wait_for_ended(&mgr, Ended::Completed);
@@ -2090,7 +2110,7 @@ mod tests {
     /// geometry, no end-of-job feed.
     #[test]
     fn marks_not_found_fail_the_cut_before_any_geometry() {
-        let reads = Reads::Scripted(vec![Ok(b"    1\x03".to_vec())]);
+        let reads = Reads::Scripted(vec![Err(TransportError::Timeout), Ok(b"    1\x03".to_vec())]);
         let (mgr, _events, written) = registration_rig(registering_caps(), Duration::from_secs(2), reads);
         let err = mgr.cut(vec![registered_pass()]).unwrap_err();
         assert_eq!(err, DeviceError::Io("the marks were not found: the cutter answered `1`".into()));
@@ -2165,6 +2185,19 @@ mod tests {
         let err = mgr.cut(vec![registered_pass(), CutPass { job: empty_job() }]).unwrap_err();
         assert_eq!(err, DeviceError::Io("the passes of this cut disagree about the registration marks they are cut against".into()));
         assert!(written.lock().unwrap().is_empty());
+        mgr.shutdown();
+    }
+
+    /// A "found" left over from an earlier, cancelled search is drained before this search is
+    /// sent, so it cannot answer for marks the machine has not looked for. Here the machine then
+    /// says nothing, and the job fails rather than cutting.
+    #[test]
+    fn a_stale_found_from_before_the_search_is_not_taken_as_its_answer() {
+        let reads = Reads::Scripted(vec![Ok(FOUND.to_vec()), Err(TransportError::Timeout)]);
+        let (mgr, _events, written) = registration_rig(registering_caps(), Duration::from_millis(100), reads);
+        let err = mgr.cut(vec![registered_pass()]).unwrap_err();
+        assert!(matches!(&err, DeviceError::Io(m) if m.contains("no answer")), "{err:?}");
+        assert_eq!(*written.lock().unwrap(), b"SEARCH".to_vec());
         mgr.shutdown();
     }
 }
