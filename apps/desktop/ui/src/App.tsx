@@ -61,6 +61,8 @@ export type DocNode = {
   transform: Affine6;
   cut_line_type: CutLineTypeJson;
   material_preset: ipc.PresetAssignmentJson;
+  /** `0xRRGGBBAA`, mirroring `document::Style`; the stroke is what puts a shape on a layer. */
+  style?: { stroke: number | null; fill: number | null };
   children: number[];
 };
 
@@ -115,6 +117,25 @@ function buildScene(doc: DocSnapshot): Scene {
   return { nodes };
 }
 
+/** Every visible stroke colour of the shapes at or under `ids`. */
+function strokesUnder(doc: DocSnapshot, ids: number[]): number[] {
+  const found = new Set<number>();
+  const stack = [...ids];
+  const seen = new Set<number>();
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const n = doc.nodes[id];
+    if (!n) continue;
+    if (typeof n.kind === "object" && "Shape" in n.kind) {
+      const stroke = n.style?.stroke ?? null;
+      if (stroke !== null && (stroke & 0xff) !== 0) found.add(stroke >>> 0);
+    } else stack.push(...n.children);
+  }
+  return [...found];
+}
+
 /** One align unit per id, bounded by every shape it moves (`expand`) as they stand in `scene`, in
  *  document order (the scene's, by each unit's first shape), since that breaks a distribute tie. */
 function unitsOf(s: Scene, ids: number[], expand: (ids: number[]) => number[]): Unit[] {
@@ -150,6 +171,8 @@ export function App() {
   }, []);
   const [lastPath, setLastPath] = useState<string | null>(null);
   const [cutOpen, setCutOpen] = useState(false);
+  /** Shapes on a layer with Output off, reported by the simple dock for the canvas to dim. */
+  const [mutedIds, setMutedIds] = useState<number[]>([]);
   const [layout, setLayout] = useState<Layout>(() => readLayout(layoutStorage()));
   const toggleLayout = () => {
     const next: Layout = layout === "simple" ? "classic" : "simple";
@@ -407,11 +430,12 @@ export function App() {
     if (!r) return;
     r.setArtboard(doc?.artboard ?? null);
     r.setView(viewMatrix(interaction.view));
+    r.setMuted(layout === "simple" ? mutedIds : []);
     // The hook draws the scene, so a redraw here cannot paint the committed scene over a live
     // gesture. `scene` and `selected` are listed because they are what it draws; `size` because a
     // resize clears the backing store and nothing else would repaint it.
     repaint();
-  }, [scene, selected, doc, interaction.view, interaction.size, repaint]);
+  }, [scene, selected, doc, interaction.view, interaction.size, repaint, mutedIds, layout]);
 
   // Clears selection only once the delete actually lands, so a failed delete leaves the
   // (still valid) selection in place, and a successful one can't leave stale ids around to
@@ -517,6 +541,8 @@ export function App() {
     if (selected.length === 0) return;
     edit(() => ipc.setStrokeColor({ ids: selected, rgba }));
   };
+  // The stroke colours under the selection, for the palette to show which layer it is on.
+  const selectionStrokes = useMemo(() => (doc ? strokesUnder(doc, selected) : []), [doc, selected]);
   const paletteDisabled =
     lockReason(interaction.editsLock) ?? (selected.length === 0 ? "Select shapes to put them on a layer" : null);
 
@@ -700,6 +726,9 @@ export function App() {
           onOpenCutDialog={() => setCutOpen(true)}
           objects={objects}
           gridRow="2 / 4"
+          scene={scene}
+          onJobEdit={(call) => void edit(call)}
+          onMuted={setMutedIds}
         />
       ) : (
         <div style={{ display: "grid", gridTemplateRows: "1fr 1fr", borderLeft: "1px solid var(--border)", minHeight: 0 }}>
@@ -708,7 +737,7 @@ export function App() {
       )}
       {layout === "simple" ? (
         <div style={{ gridRow: "3", gridColumn: "2 / 3" }}>
-          <ColorPalette disabledReason={paletteDisabled} onPick={setStrokeColor} />
+          <ColorPalette disabledReason={paletteDisabled} onPick={setStrokeColor} active={selectionStrokes} />
         </div>
       ) : null}
       <div style={{ gridColumn: "1 / -1" }}>

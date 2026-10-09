@@ -23,11 +23,18 @@ type Props = {
   onPassDone: () => void;
   onUseCutterMachine: () => void;
   onOpenCutDialog: () => void;
+  /** "about 3 min", or null with nothing to cut. */
+  estimate: string | null;
+  testCut: Control;
+  testAt: { x: number; y: number };
+  onTestAt: (at: { x: number; y: number }) => void;
+  onTestCut: () => void;
 };
 
 const btn: CSSProperties = {
   background: "var(--panel)", color: "var(--text)", border: "1px solid var(--border)", padding: "4px 10px", cursor: "pointer",
 };
+const field: CSSProperties = { background: "var(--workspace)", color: "var(--text)", border: "1px solid var(--border)", fontSize: 12 };
 const big: CSSProperties = { ...btn, padding: "8px 14px", fontWeight: 600 };
 const toneColor = { idle: "var(--ready)", busy: "var(--accent)", attention: "#fbbf24", unknown: "var(--muted)", gone: "var(--cut)" };
 
@@ -99,6 +106,32 @@ export function CutterPanel(p: Props) {
         <button style={big} onClick={p.onStop} disabled={!p.status.actions.cancel}>Stop</button>
         {p.status.actions.resume ? <button style={big} onClick={p.onResume}>Resume</button> : null}
         {p.status.actions.confirm ? <button style={big} onClick={p.onPassDone}>Pass done</button> : null}
+      </div>
+      {p.estimate ? (
+        <div data-testid="cut-estimate" style={{ fontSize: 11, color: "var(--muted)" }} title="Rough: drawing time at the set speeds, plus a few seconds a layer">
+          Estimated time: {p.estimate}
+        </div>
+      ) : null}
+      <div style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+        <button
+          style={btn}
+          onClick={p.onTestCut}
+          disabled={!p.testCut.enabled}
+          title={p.testCut.reason ?? "Cut a 10 mm square with a triangle inside, with the top layer's settings"}
+        >
+          Test cut
+        </button>
+        <label style={{ display: "flex", gap: 2, alignItems: "center" }}>
+          X
+          <input aria-label="Test cut X" inputMode="decimal" style={{ width: 40, ...field }} value={p.testAt.x}
+            onChange={(e) => p.onTestAt({ ...p.testAt, x: Number(e.target.value) || 0 })} />
+        </label>
+        <label style={{ display: "flex", gap: 2, alignItems: "center" }}>
+          Y
+          <input aria-label="Test cut Y" inputMode="decimal" style={{ width: 40, ...field }} value={p.testAt.y}
+            onChange={(e) => p.onTestAt({ ...p.testAt, y: Number(e.target.value) || 0 })} />
+        </label>
+        <span style={{ color: "var(--muted)" }}>mm</span>
       </div>
       {p.start.reason && !p.start.enabled ? (
         <div data-testid="start-reason" style={{ fontSize: 11, color: "var(--muted)" }}>{p.start.reason}</div>

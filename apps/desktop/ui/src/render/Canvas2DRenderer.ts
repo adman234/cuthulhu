@@ -5,6 +5,8 @@ import { apply, compose, IDENTITY, transformBounds } from "./affine";
 import { boxCorners, handleWorld, SCALE_HANDLES } from "../interaction/selectionBox";
 
 const FALLBACK_ACCENT = "#22D3EE";
+/** How faint a muted shape is: still findable, plainly not going to be cut. */
+const MUTED_ALPHA = 0.25;
 const FALLBACK_BORDER = "#2E2E34";
 const FALLBACK_PANEL = "#1F1F23";
 const FALLBACK_TEXT = "#E7E7EA";
@@ -19,6 +21,7 @@ const MARQUEE_ALPHA = 0.12;
 export class Canvas2DRenderer implements Renderer {
   private scene: Scene = { nodes: [] };
   private selected = new Set<NodeId>();
+  private muted = new Set<NodeId>();
   private artboard: Bounds | null = null;
   private view: Affine6 = IDENTITY;
   private dpr = 1;
@@ -49,6 +52,10 @@ export class Canvas2DRenderer implements Renderer {
 
   setSelection(ids: NodeId[]): void {
     this.selected = new Set(ids);
+  }
+
+  setMuted(ids: NodeId[]): void {
+    this.muted = new Set(ids);
   }
 
   resize(cssW: number, cssH: number, dpr: number): void {
@@ -98,6 +105,9 @@ export class Canvas2DRenderer implements Renderer {
       const selected = this.selected.has(node.id);
       ctx.strokeStyle = selected ? accent : text;
       ctx.lineWidth = selected ? SELECTED_STROKE_PX : STROKE_PX;
+      // A selected shape stays at full strength even on a muted layer: it is what the operator
+      // is working on.
+      ctx.globalAlpha = this.muted.has(node.id) && !selected ? MUTED_ALPHA : 1;
       if (node.shape && node.world) {
         // Geometry is carried to screen space before stroking, so the line is in CSS px whatever
         // the zoom or the node's own scale. Stroking under the node's transform scaled it too.
@@ -111,6 +121,7 @@ export class Canvas2DRenderer implements Renderer {
       }
     }
 
+    ctx.globalAlpha = 1;
     this.drawOverlay(accent, panel, guide);
     this.dirty.clear();
   }

@@ -18,5 +18,7 @@ export interface Renderer {
   /** World mm → CSS px. */
   setView(m: Affine6): void;
   setOverlay(o: Overlay): void;
+  /** Shapes drawn faint: a layer whose Output is off, as LightBurn shows it. */
+  setMuted(ids: NodeId[]): void;
   draw(): void;
 }

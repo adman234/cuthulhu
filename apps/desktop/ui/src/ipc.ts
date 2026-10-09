@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+import type { ConfiguredPassDto } from "./cut/viewmodel";
 import { invoke } from "@tauri-apps/api/core";
 import { save as dialogSave, open as dialogOpen } from "@tauri-apps/plugin-dialog";
 
@@ -181,6 +182,8 @@ export type PlanCutPassSummary = {
   /** Each shape's first world-space point, parallel to node_ids — where the blade lands.
    *  null is a shape whose outline flattened to nothing. */
   starts: ([number, number] | null)[];
+  /** Length the blade draws in one run of the pass, mm. Absent from an older backend. */
+  cut_length_mm?: number;
 };
 
 export type PlanCutResponse = {
@@ -357,6 +360,19 @@ export async function setLayerOrder(order: PassKey[]) {
 
 export async function setMirror(on: boolean) {
   return invoke("set_mirror", { on });
+}
+
+export type TestCutRequest = {
+  device_instance_id: string;
+  x_mm: number;
+  y_mm: number;
+  pass: ConfiguredPassDto;
+};
+
+/** Cuts Silhouette's test figure (10 mm square, triangle inside) at a point with one pass's
+ *  settings, through the same plan and preflight as a real cut. */
+export async function testCut(request: TestCutRequest): Promise<CutStarted> {
+  return invoke("test_cut", { request });
 }
 
 /** Sizes the artboard to the loaded media, clamped by the backend to the machine's reach. */

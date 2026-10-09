@@ -1,13 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import * as ipc from "../ipc";
-import { toCutRequest, type Caps, type Preset, type PresetLookup } from "../cut/viewmodel";
+import { toCutRequest, toTravelPasses, type Caps, type Preset, type PresetLookup } from "../cut/viewmodel";
+import type { DocSnapshot } from "../App";
+import type { Scene } from "../render/hittest";
 import { CutsPanel } from "./CutsPanel";
 import { CutterPanel } from "./CutterPanel";
 import {
-  holdSettings, machineMismatch, rowsFromPlan, startControl,
-  type CutRow, type DockPlan, type RowSettings,
+  MEDIA, currentMedia, estimateSeconds, formatDuration, heldFromJob, machineMismatch,
+  moveKey, mutedNodeIds, orderRows, readBeginner, rowsFromPlan, shouldAutoMirror, startControl,
+  testCutControl, toLayer, writeBeginner,
+  type CutRow, type DockPlan,
 } from "./cutsModel";
+
+/** `window.localStorage` itself can throw (blocked site data), not just its methods. */
+function storage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
 
 // The same offline placeholder the cut dialog uses: preflight ignores what a machine does not
 // support, so an optimistic default cannot mis-send anything.
@@ -18,8 +31,15 @@ const ALL_ENABLED: Caps = { supportsSpeed: true, supportsForce: true, needsOpera
 const REPLAN_DEBOUNCE_MS = 150;
 
 type Props = {
-  /** The current document snapshot. Only its identity is read: a new one means "replan". */
-  doc: unknown;
+  /** The current document snapshot: a new one means "replan", and its `job` holds the saved
+   *  layer settings, order and mirror. */
+  doc: DocSnapshot | null;
+  scene: Scene;
+  /** Runs a document command the way every other edit runs (refused while a document loads,
+   *  snapshot refreshed after), for the layer settings this dock saves into the project. */
+  onJobEdit: (call: () => Promise<unknown>) => void;
+  /** The shapes whose layer has Output off, for the canvas to dim. */
+  onMuted: (ids: number[]) => void;
   docMachineId: string | null;
   status: ipc.CutStatus;
   refreshDeviceState: () => Promise<void>;
@@ -44,7 +64,6 @@ export function SimpleDock(props: Props) {
   const [plan, setPlan] = useState<DockPlan | null>(null);
   const [planning, setPlanning] = useState(false);
   const [planError, setPlanError] = useState<string | null>(null);
-  const held = useRef<Map<string, RowSettings>>(new Map());
   const planSeq = useRef(0);
 
   const [devices, setDevices] = useState<ipc.DeviceInfo[]>([]);
@@ -56,6 +75,18 @@ export function SimpleDock(props: Props) {
 
   const [presets, setPresets] = useState<{ machineId: string; list: Preset[] } | null>(null);
   const [caps, setCaps] = useState<Caps>(ALL_ENABLED);
+  const [beginner, setBeginnerState] = useState(() => readBeginner(storage()));
+  const setBeginner = (on: boolean) => {
+    writeBeginner(storage(), on);
+    setBeginnerState(on);
+  };
+  const [testAt, setTestAt] = useState({ x: 0, y: 0 });
+  const travelSeq = useRef(0);
+  // The latest snapshot, for the replan's reply: it lands after the effect that asked for it. The
+  // document is the record of what the operator set, so a reloaded project or another edit is
+  // what the rows show.
+  const docRef = useRef(doc);
+  docRef.current = doc;
 
   const replan = useCallback(() => {
     const seq = ++planSeq.current;
@@ -64,7 +95,15 @@ export function SimpleDock(props: Props) {
       .planCut("Color")
       .then((r) => {
         if (seq !== planSeq.current) return; // a newer replan owns the panel
-        setPlan({ revision: r.doc_revision, rows: rowsFromPlan(r.passes, held.current), skippedNotCut: r.skipped_not_cut });
+        const order = docRef.current?.job?.layer_order ?? [];
+        setPlan({
+          revision: r.doc_revision,
+          rows: orderRows(rowsFromPlan(r.passes, heldFromJob(docRef.current?.job)), order),
+          skippedNotCut: r.skipped_not_cut,
+          // Planned in the planner's own order; reordered or disabled rows ask again below.
+          travel: order.length === 0 ? r.travel : [],
+        });
+        if (order.length > 0) refreshTravel(r.doc_revision, orderRows(r.passes.map((x) => ({ key: x.key, enabled: true })), order));
         setPlanError(null);
       })
       .catch((e) => {
@@ -79,6 +118,10 @@ export function SimpleDock(props: Props) {
 
   useEffect(() => {
     if (doc === null) return;
+    // Planning from the moment the document moves, not from when the debounced request leaves:
+    // in between, the rows on screen belong to a revision the backend will refuse, so Start must
+    // already be withheld — a press in that window was a cut refused as stale.
+    setPlanning(true);
     const t = setTimeout(replan, REPLAN_DEBOUNCE_MS);
     return () => clearTimeout(t);
   }, [doc, replan]);
@@ -135,14 +178,45 @@ export function SimpleDock(props: Props) {
   const lookup: PresetLookup =
     presets !== null && presets.machineId === machineId ? { presets: presets.list, loaded: true } : { presets: [], loaded: false };
 
+  // Travel for the rows as they stand. Only the newest request may install its answer, and a
+  // stale-plan refusal is silent: the replan the document change triggered is already on its way.
+  function refreshTravel(revision: string, rows: { key: string; enabled: boolean }[]) {
+    const seq = ++travelSeq.current;
+    ipc
+      .travelForOrder(revision, "Color", toTravelPasses(rows))
+      .then((travel) => {
+        if (seq === travelSeq.current) setPlan((prev) => (prev && prev.revision === revision ? { ...prev, travel } : prev));
+      })
+      .catch(() => {});
+  }
+
   const updateRow = (i: number, patch: Partial<CutRow>) => {
-    setPlan((prev) => {
-      if (prev === null) return prev;
-      const rows = prev.rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r));
-      held.current = holdSettings(held.current, rows[i]);
-      return { ...prev, rows };
-    });
+    if (plan === null) return;
+    const rows = plan.rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r));
+    setPlan({ ...plan, rows });
+    props.onJobEdit(() => ipc.setLayerSettings(rows[i].key, toLayer(rows[i])));
+    if (patch.enabled !== undefined) refreshTravel(plan.revision, rows);
+    if (patch.presetId !== undefined) {
+      const preset = lookup.presets.find((x) => x.id === patch.presetId);
+      if (shouldAutoMirror(preset, doc?.job?.mirror ?? false)) {
+        props.onJobEdit(() => ipc.setMirror(true));
+        setNotice(`Mirror turned on: ${preset?.name} is cut face down.`);
+      }
+    }
   };
+
+  const moveRow = (i: number, dir: -1 | 1) => {
+    if (plan === null) return;
+    const keys = moveKey(plan.rows, i, dir);
+    if (keys === null) return;
+    const rows = orderRows(plan.rows, keys);
+    setPlan({ ...plan, rows });
+    props.onJobEdit(() => ipc.setLayerOrder(keys));
+    refreshTravel(plan.revision, rows);
+  };
+
+  const { onMuted } = props;
+  useEffect(() => onMuted(plan ? mutedNodeIds(plan.rows) : []), [plan, onMuted]);
 
   const connect = () => {
     const info = devices.find((d) => d.instance_id === chosen);
@@ -195,6 +269,30 @@ export function SimpleDock(props: Props) {
       .finally(() => setSending(false));
   };
 
+  const testCut = testCutControl({ status, connected, sending, mismatch });
+  const runTestCut = () => {
+    if (!testCut.enabled || connected === null) return;
+    // The top layer's settings, Output on or not: a test cut checks the material a member is
+    // about to cut, which is the first one in the list.
+    const row = plan?.rows[0];
+    const pass = toCutRequest(connected.instance_id, "", "Color", row ? [row] : [])
+      .passes[0] ?? { key: "all", enabled: true, preset_id: null, speed: null, force: null, repeat_count: null, track_enhancing: null, tool: null };
+    setSending(true);
+    ipc
+      .testCut({ device_instance_id: connected.instance_id, x_mm: testAt.x, y_mm: testAt.y, pass })
+      .then(() => setNotice("Test cut sent."))
+      .catch((e) => onError(ipc.ipcErrorMessage(e)))
+      .finally(() => setSending(false));
+  };
+
+  const rows = plan?.rows ?? [];
+  const estimate = rows.some((r) => r.enabled && r.shapeCount > 0) ? formatDuration(estimateSeconds(rows, lookup)) : null;
+  const media = doc ? currentMedia(doc.artboard, doc.machine) : null;
+  const pickMedia = (id: string) => {
+    const m = MEDIA.find((x) => x.id === id);
+    if (m) props.onJobEdit(() => ipc.setMedia(m.w, m.h));
+  };
+
   const act = (call: () => Promise<void>) => () => {
     call().then(refreshDeviceState).catch((e) => onError(ipc.ipcErrorMessage(e)));
   };
@@ -222,7 +320,24 @@ export function SimpleDock(props: Props) {
       </div>
       <div style={{ minHeight: 0, overflow: "auto", display: "grid" }}>
         {tab === "cuts" ? (
-          <CutsPanel plan={plan} planning={planning} planError={planError} lookup={lookup} caps={caps} onChange={updateRow} />
+          <CutsPanel
+            plan={plan}
+            planning={planning}
+            planError={planError}
+            lookup={lookup}
+            caps={caps}
+            onChange={updateRow}
+            onMove={moveRow}
+            beginner={beginner}
+            onBeginner={setBeginner}
+            mirror={doc?.job?.mirror ?? false}
+            onMirror={(on) => props.onJobEdit(() => ipc.setMirror(on))}
+            media={media}
+            mediaDisabled={doc?.machine ? null : "Choose a machine first"}
+            onMedia={pickMedia}
+            scene={props.scene}
+            artboard={doc?.artboard ?? { x: 0, y: 0, w: 0, h: 0 }}
+          />
         ) : (
           props.objects
         )}
@@ -246,6 +361,11 @@ export function SimpleDock(props: Props) {
         onPassDone={act(ipc.confirmPassDone)}
         onUseCutterMachine={() => connected && onConvertMachine(connected.machine_id)}
         onOpenCutDialog={props.onOpenCutDialog}
+        estimate={estimate}
+        testCut={testCut}
+        testAt={testAt}
+        onTestAt={setTestAt}
+        onTestCut={runTestCut}
       />
     </div>
   );

@@ -11,7 +11,7 @@ import ipcInventory from "../../ipc-inventory.json" with { type: "json" };
 // can't close over anything outside itself) and mirrors the JSON shape produced by
 // crates/document's Document::snapshot_json() — see App.tsx's DocSnapshot/buildScene,
 // which is what actually parses this on the JS side.
-function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview?: boolean; dropTraceControl?: string; seedBusyHost?: boolean; seedRemoteConnected?: boolean; slowList?: boolean; failList?: boolean; noFonts?: boolean; seedMachine?: boolean; seedUserPreset?: boolean; seedEmptyPresetAssignment?: boolean; seedGroup?: boolean; seedAlignExtras?: boolean; seedCollapsedGroup?: boolean; collapsedScale?: number }) {
+function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview?: boolean; dropTraceControl?: string; seedBusyHost?: boolean; seedRemoteConnected?: boolean; slowList?: boolean; failList?: boolean; noFonts?: boolean; seedMachine?: boolean; seedUserPreset?: boolean; seedEmptyPresetAssignment?: boolean; seedGroup?: boolean; seedAlignExtras?: boolean; seedCollapsedGroup?: boolean; collapsedScale?: number; seedCameo1?: boolean }) {
   type Style = { stroke: number | null; fill: number | null };
   type PresetAssignment = { state: "inherit" } | { state: "unassigned" } | { state: "preset"; id: string };
   type Node = { id: number; kind: unknown; transform: number[]; style: Style; children: number[]; cut_line_type: "Cut" | "NoCut"; material_preset: PresetAssignment };
@@ -21,6 +21,8 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     root: number;
     artboard: { x: number; y: number; w: number; h: number };
     machine: { id: string; name: string; width_mm: number; height_mm: number } | null;
+    // Mirrors document::JobSettings; created on first write, as an older snapshot lacks it.
+    job?: { layers: Record<string, unknown>; layer_order: string[]; mirror: boolean };
   };
 
   const machines = [
@@ -50,6 +52,14 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     };
   };
   let doc = freshDoc();
+  // A Cameo 1 document and cutter, for the dock's machine-specific controls.
+  const CAMEO1 = { id: "cameo1", name: "Silhouette Cameo", width_mm: 295, height_mm: 2999 };
+  if (opts?.seedCameo1) {
+    machines.push(CAMEO1);
+    doc.machine = CAMEO1;
+    doc.artboard = { x: 0, y: 0, w: 295, h: 2999 };
+  }
+  const job = () => (doc.job ??= { layers: {}, layer_order: [], mirror: false });
   let saved: Doc | null = null;
 
   // Seed two differently-stroked rects synchronously (bypassing invoke) so the doc is
@@ -394,6 +404,9 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     { instance_id: "usb:mock", machine_id: "cameo5", transport: { Usb: { locator: "mock" } }, candidate: false, host: null },
     { instance_id: "serial:/dev/mock0", machine_id: "puma", transport: { Serial: { path: "/dev/mock0", baud: 9600 } }, candidate: true, host: null },
   ];
+  if (opts?.seedCameo1) {
+    devices.unshift({ instance_id: "usb:sn:CAMEO1", machine_id: "cameo1", transport: { Usb: { locator: "sn:CAMEO1" } }, candidate: false, host: null });
+  }
 
   // A paired host that cannot be reached, with a cutter on it. Both halves matter: the row has
   // to stay listed with its reason (#42), and `forget_host` has to be refusable while it does.
@@ -654,6 +667,12 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       shape_count: p.node_ids.length,
       node_ids: p.node_ids,
       starts: p.node_ids.map(() => null),
+      // A rect's perimeter, the length the real planner measures from its outline.
+      cut_length_mm: p.node_ids.reduce((sum, id) => {
+        const k = doc.nodes[id]?.kind as { Shape?: { Rect?: { w: number; h: number } } };
+        const r = k?.Shape?.Rect;
+        return sum + (r ? 2 * (r.w + r.h) : 0);
+      }, 0),
     }));
     // The snapshot itself is the revision, mirroring cutplan::doc_revision hashing
     // snapshot_json: a doc edited back to a previous state is not stale. A counter
@@ -1100,7 +1119,38 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     // Deliberately one constant, not a per-machine table: that mapping is pinned in
     // Rust by each Driver's own caps test, and restating it here would recreate the
     // copy this change removed — in a file nobody thinks of as production code.
-    machine_caps: () => ({ supportsSpeed: true, supportsForce: true, needsOperatorPassConfirm: false }),
+    // The Cameo 1's own answer is what the dock's machine-specific controls hang off; every other
+    // machine keeps the one constant the cut dialog's tests were written against.
+    machine_caps: (a) => a.machineId === "cameo1"
+      ? { supportsSpeed: true, supportsForce: true, needsOperatorPassConfirm: false, speedMax: 10, supportsTrackEnhancing: true, supportsPen: true }
+      : { supportsSpeed: true, supportsForce: true, needsOperatorPassConfirm: false },
+    // Mirror desktop::state's job-settings commands: not undo steps, saved in the document.
+    set_layer_settings: (a) => {
+      if (a.value === null) delete job().layers[a.key as string];
+      else job().layers[a.key as string] = a.value;
+      return null;
+    },
+    set_layer_order: (a) => {
+      job().layer_order = [...new Set(a.order as string[])];
+      return null;
+    },
+    set_mirror: (a) => {
+      job().mirror = a.on as boolean;
+      return null;
+    },
+    set_media: (a) => {
+      if (!doc.machine) throw new Error("choose a machine before setting the media size");
+      doc.artboard = { x: 0, y: 0, w: Math.min(a.wMm as number, doc.machine.width_mm), h: Math.min(a.hMm as number, doc.machine.height_mm) };
+      return null;
+    },
+    test_cut: (a) => {
+      const request = a.request as { device_instance_id: string };
+      if (!connected) throw ipcError("not_connected", "no device connected");
+      if (connected.instance_id !== request.device_instance_id) throw ipcError("device_mismatch", "connected device changed");
+      (window as unknown as { __testCuts?: unknown[] }).__testCuts ??= [];
+      (window as unknown as { __testCuts: unknown[] }).__testCuts.push(a.request);
+      return { job_id: 99, duplicate: false };
+    },
     // Empty unless a test asks for a host, so existing assertions (device list, connect flow)
     // are unaffected.
     list_hosts: () => hosts,
@@ -4579,3 +4629,82 @@ test("the layout switch brings back the classic panels and is remembered", async
   await expect(page.getByTestId("layer-row")).toHaveCount(2);
   expect(await page.evaluate(() => localStorage.getItem("cuthulhu.layout"))).toBe("classic");
 });
+
+test("a layer's settings and the cut order are saved in the document and drive the cut", async ({ page }) => {
+  await useSimpleLayout(page);
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await expect(page.getByTestId("cuts-row")).toHaveCount(2);
+
+  await page.getByLabel("Speed for Red").fill("4");
+  await page.getByRole("button", { name: "Cut Red later" }).click();
+  await expect(page.getByTestId("cuts-row").first()).toContainText("#00ff00");
+
+  const snap = JSON.parse((await callFake(page, "snapshot")) as string) as {
+    job: { layers: Record<string, { speed: number; output: boolean }>; layer_order: string[] };
+  };
+  expect(snap.job.layers["color:ff0000ff"]).toMatchObject({ speed: 4, output: true });
+  expect(snap.job.layer_order).toEqual(["color:00ff00ff", "color:ff0000ff"]);
+  await expect(page.getByTestId("cut-estimate")).toBeVisible();
+
+  await page.getByRole("button", { name: "Connect cutter" }).click();
+  await page.getByRole("button", { name: "Start", exact: true }).click();
+  await expect.poll(() => callFake(page, "__test_last_cut_request")).not.toBeNull();
+  const request = (await callFake(page, "__test_last_cut_request")) as { passes: { key: string; speed: number | null }[] };
+  expect(request.passes.map((p) => p.key)).toEqual(["color:00ff00ff", "color:ff0000ff"]);
+  expect(request.passes[1].speed).toBe(4);
+});
+
+test("on a Cameo 1 the dock offers media, mirror, track enhancing, pen and a test cut", async ({ page }) => {
+  await useSimpleLayout(page);
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedCameo1: true });
+  await page.goto("/");
+  await expect(page.getByTestId("cuts-row")).toHaveCount(2);
+
+  await page.getByLabel("Media").selectOption("mat-12x12");
+  await page.getByLabel("Mirror (HTV)").check();
+  await page.getByLabel("Track enhancing for Red").check();
+  await page.getByLabel("Pen for Red").check();
+  await expect.poll(async () => {
+    const d = JSON.parse((await callFake(page, "snapshot")) as string) as { artboard: { w: number; h: number }; job?: { mirror: boolean; layers: Record<string, { track_enhancing: boolean; pen: boolean }> } };
+    return [d.artboard.w, d.artboard.h, d.job?.mirror, d.job?.layers["color:ff0000ff"]?.track_enhancing, d.job?.layers["color:ff0000ff"]?.pen];
+  }).toEqual([295, 304.8, true, true, true]);
+  await expect(page.getByLabel("Speed for Red")).toHaveAttribute("title", "1–10");
+
+  await page.getByRole("button", { name: "Connect cutter" }).click();
+  await page.getByLabel("Test cut X").fill("12");
+  await page.getByRole("button", { name: "Test cut" }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __testCuts?: { x_mm: number; pass: { tool: string } }[] }).__testCuts ?? [])).toHaveLength(1);
+  const cuts = await page.evaluate(() => (window as unknown as { __testCuts: { x_mm: number; y_mm: number; pass: { tool: string | null } }[] }).__testCuts);
+  expect(cuts[0]).toMatchObject({ x_mm: 12, y_mm: 0, pass: { tool: "Pen" } });
+});
+
+test("beginner mode leaves only the material picker", async ({ page }) => {
+  await useSimpleLayout(page);
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await expect(page.getByLabel("Speed for Red")).toBeVisible();
+  await page.getByLabel("Beginner").check();
+  await expect(page.getByLabel("Speed for Red")).toHaveCount(0);
+  await expect(page.getByLabel("Material for Red")).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem("cuthulhu.beginner"))).toBe("on");
+});
+
+test("the dock's cut preview opens on the planned layers", async ({ page }) => {
+  await useSimpleLayout(page);
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Show cut preview" }).click();
+  await expect(page.getByRole("img", { name: /Cut preview/ })).toBeVisible();
+});
+
+test("the palette marks the selection's layer", async ({ page }) => {
+  await useSimpleLayout(page);
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Objects" }).click();
+  await page.getByTestId("layer-row").first().click();
+  await expect(page.getByRole("button", { name: "Put selection on Red" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "Put selection on Blue" })).toHaveAttribute("aria-pressed", "false");
+});
+

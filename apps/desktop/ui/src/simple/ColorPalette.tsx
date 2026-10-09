@@ -5,10 +5,13 @@ type Props = {
   /** Why a swatch would do nothing right now (no selection, edits locked), or null. */
   disabledReason: string | null;
   onPick: (rgba: number) => void;
+  /** Stroke colours of the current selection: their swatches are marked, as LightBurn marks the
+   *  selection's layer. */
+  active?: number[];
 };
 
 /** LightBurn's colour strip: pick a swatch to put the selection on that cut layer. */
-export function ColorPalette({ disabledReason, onPick }: Props) {
+export function ColorPalette({ disabledReason, onPick, active = [] }: Props) {
   return (
     <div
       role="toolbar"
@@ -31,6 +34,7 @@ export function ColorPalette({ disabledReason, onPick }: Props) {
           title={disabledReason ?? `${s.name} layer`}
           disabled={disabledReason !== null}
           onClick={() => onPick(s.rgba)}
+          aria-pressed={active.includes(s.rgba >>> 0)}
           style={{
             width: 26,
             height: 20,
@@ -38,7 +42,7 @@ export function ColorPalette({ disabledReason, onPick }: Props) {
             fontSize: 10,
             color: (s.rgba >>> 8) < 0x808080 ? "#fff" : "#000",
             background: swatchCss(s.rgba),
-            border: "1px solid var(--border)",
+            border: active.includes(s.rgba >>> 0) ? "2px solid var(--accent)" : "1px solid var(--border)",
             cursor: disabledReason === null ? "pointer" : "default",
             opacity: disabledReason === null ? 1 : 0.5,
           }}
