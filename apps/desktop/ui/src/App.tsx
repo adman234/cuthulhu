@@ -22,6 +22,7 @@ import { StatusBar } from "./panels/StatusBar";
 import { CutDialog } from "./cut/CutDialog";
 import { TraceDialog } from "./trace/TraceDialog";
 import { TextDialog } from "./text/TextDialog";
+import { PrintCutDialog } from "./printcut/PrintCutDialog";
 import { SimpleDock } from "./simple/SimpleDock";
 import { ColorPalette } from "./simple/ColorPalette";
 import { readLayout, writeLayout, type Layout } from "./simple/layout";
@@ -157,6 +158,7 @@ export function App() {
     setLayout(next);
   };
   const [textOpen, setTextOpen] = useState(false);
+  const [printCutOpen, setPrintCutOpen] = useState(false);
   const [tracePath, setTracePath] = useState<string | null>(null);
   const [status, setStatus] = useState<ipc.CutStatus>(ipc.DISCONNECTED_STATUS);
   /** The machine's material presets, for the properties panel's control. Loaded here rather
@@ -663,6 +665,7 @@ export function App() {
           onImportFile={onImportFile}
           onCut={() => setCutOpen(true)}
           onTrace={onTrace}
+          onPrintCut={() => setPrintCutOpen(true)}
           layout={layout}
           onToggleLayout={toggleLayout}
         />
@@ -732,6 +735,9 @@ export function App() {
           onError={setError}
           onClose={() => setCutOpen(false)}
         />
+      ) : null}
+      {printCutOpen ? (
+        <PrintCutDialog onChanged={refresh} onClose={() => setPrintCutOpen(false)} />
       ) : null}
       {tracePath !== null ? (
         <TraceDialog path={tracePath} onInsert={onTraceInsert} onClose={() => setTracePath(null)} />

@@ -188,6 +188,8 @@ export type PlanCutResponse = {
   skipped_not_cut: number;
   doc_revision: string;
   travel: [number, number, number, number][];
+  /** The marks the plan is cut against; absent or null when the cut is not registered. */
+  registration?: Registration | null;
 };
 
 export type IpcError = { code: string; message: string };
@@ -344,6 +346,8 @@ export type JobSettings = {
   layers: Record<PassKey, LayerSettings>;
   layer_order: PassKey[];
   mirror: boolean;
+  /** Mirrors `document::Registration`: the Group holding the marks, and whether the cut uses them. */
+  registration?: { marks: number; enabled: boolean } | null;
 };
 
 /** `value: null` forgets the pass's settings. Saved with the project; not an undo step. */
@@ -372,6 +376,65 @@ export async function savePreset(p: Args) {
  *  Cameo and on a Puma, and deleting by id alone removed both (#153). */
 export async function deletePreset(machineId: string, id: string) {
   return invoke("delete_preset", { machineId, id });
+}
+
+// --- print & cut (registration marks) ---
+
+/** Mirrors `document::Paper`. */
+export type Paper = "letter" | "a4";
+
+/** Mirrors `document::RegistrationArea`: where the marks are, in mm from the sheet's top-left
+ *  corner — the top-left square's corner, and the distances to the other two marks' corners. */
+export type RegistrationArea = {
+  origin_x_mm: number;
+  origin_y_mm: number;
+  width_mm: number;
+  length_mm: number;
+};
+
+/** Mirrors `driver_core::Registration` — the same four facts as they travel with a cut. */
+export type Registration = {
+  originXMm: number;
+  originYMm: number;
+  widthMm: number;
+  lengthMm: number;
+};
+
+/** Mirrors `desktop::state::RegistrationStatus`. `marks` is null when the document has none
+ *  (including after their add was undone); `problem` says why marks that are there cannot be read. */
+export type RegistrationStatus = {
+  marks: number | null;
+  enabled: boolean;
+  area: RegistrationArea | null;
+  problem: string | null;
+};
+
+/** The template's default layout on a sheet of `paper`. */
+export async function registrationAreaForPaper(paper: Paper): Promise<RegistrationArea> {
+  return invoke("registration_area_for_paper", { paper });
+}
+
+/** Lays out the marks (replacing any already there) as one undo step, and turns registration on. */
+export async function addRegistrationMarks(area: RegistrationArea) {
+  return invoke("add_registration_marks", { area });
+}
+
+/** Refused when turning it on with no marks to register against. */
+export async function setRegistrationEnabled(on: boolean): Promise<void> {
+  return invoke("set_registration_enabled", { on });
+}
+
+export async function registrationStatus(): Promise<RegistrationStatus> {
+  return invoke("registration_status", {});
+}
+
+/** Writes the printable sheet — marks and artwork at true size on `paper` — to `path`. */
+export async function exportPrintSvg(path: string, paper: Paper): Promise<void> {
+  return invoke("export_print_svg", { path, paper });
+}
+
+export async function pickPrintPath(): Promise<string | null> {
+  return dialogSave({ defaultPath: "cuthulhu-print.svg", filters: [{ name: "SVG for printing", extensions: ["svg"] }] });
 }
 
 const CUT_FILTER = [{ name: "cuthulhu project", extensions: ["cut"] }];

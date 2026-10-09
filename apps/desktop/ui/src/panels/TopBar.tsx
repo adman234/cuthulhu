@@ -16,6 +16,8 @@ type Props = {
   onImportFile: (file: File) => void;
   onCut: () => void;
   onTrace: () => void;
+  /** Opens print & cut (registration marks and the printable sheet). Absent, no button. */
+  onPrintCut?: () => void;
   /** The shell on screen, and how to switch it. Absent, no switch is offered. */
   layout?: Layout;
   onToggleLayout?: () => void;
@@ -42,6 +44,7 @@ export function TopBar({
   onImportFile,
   onCut,
   onTrace,
+  onPrintCut,
   layout,
   onToggleLayout,
 }: Props) {
@@ -81,6 +84,12 @@ export function TopBar({
       <button aria-label="Trace" style={btn} onClick={onTrace}>
         Trace…
       </button>
+      {onPrintCut ? (
+        // Named without "cut": every Cut-button locator in the shell matches by substring.
+        <button aria-label="Registration marks" style={btn} onClick={onPrintCut}>
+          Print &amp; Cut…
+        </button>
+      ) : null}
       <div style={{ flex: 1 }} />
       <select
         aria-label="Machine"

@@ -25,7 +25,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   },
 }));
 
-// `pickSavePath`/`pickOpenPath` reach the dialog plugin rather than a command of ours; stubbed so
+// `pickSavePath`/`pickOpenPath`/`pickPrintPath` reach the dialog plugin rather than a command of ours; stubbed so
 // calling them is harmless, and they record nothing to check.
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   save: () => Promise.resolve(null),
@@ -36,10 +36,10 @@ const declared: Record<string, string[]> = inventory;
 
 const observed = new Set<string>();
 
-// Four exports are not commands: two open the dialog plugin's own picker, and two only read a
+// Five exports are not commands: three open the dialog plugin's own picker, and two only read a
 // rejected value. Each must invoke nothing at all, which is as much a fact about the seam as the
 // others.
-const NOT_COMMANDS = ["pickSavePath", "pickOpenPath", "ipcErrorCode", "ipcErrorMessage"];
+const NOT_COMMANDS = ["pickSavePath", "pickOpenPath", "pickPrintPath", "ipcErrorCode", "ipcErrorMessage"];
 
 // A wrapper is named after the command it calls, so the pairing is derived rather than kept by hand
 // in what would be a fourth copy of the surface. Two wrappers cannot follow the rule: `delete` is a

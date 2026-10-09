@@ -51,6 +51,7 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
   };
   let doc = freshDoc();
   let saved: Doc | null = null;
+  let registration: { marks: number; enabled: boolean; area: unknown } | null = null;
 
   // Seed two differently-stroked rects synchronously (bypassing invoke) so the doc is
   // already populated by the time App.tsx's mount effect calls snapshot() — avoids a
@@ -320,6 +321,53 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       // A real load takes as long as the project is big; held, a test can act while it runs.
       if (holdingLoads) return new Promise((resolve) => heldLoads.push(() => resolve(load())));
       return load();
+    },
+    // Print & cut. Mirrors `document::registration`: the marks are a Group of three NoCut shapes,
+    // the area the template lays out for a paper is 10 mm in from its edges, and turning
+    // registration on needs marks to register against.
+    registration_area_for_paper: (a) => {
+      const [w, h] = a.paper === "a4" ? [210, 297] : [215.9, 279.4];
+      return { origin_x_mm: 10, origin_y_mm: 10, width_mm: w - 20, length_mm: h - 20 };
+    },
+    add_registration_marks: (a) => {
+      const area = a.area as { origin_x_mm: number; origin_y_mm: number; width_mm: number; length_mm: number };
+      if (area.width_mm < 40 || area.length_mm < 40) throw new Error("the registration marks must be at least 40 mm apart each way");
+      const reg = registration as { marks: number; enabled: boolean } | null;
+      if (reg && doc.nodes[reg.marks]) {
+        for (const c of doc.nodes[reg.marks].children) delete doc.nodes[c];
+        delete doc.nodes[reg.marks];
+        doc.nodes[doc.root].children = doc.nodes[doc.root].children.filter((c) => c !== reg.marks);
+      }
+      const groupId = nextId++;
+      const mark = (x: number, y: number): number => {
+        const id = nextId++;
+        doc.nodes[id] = { id, kind: { Shape: { Rect: { w: 5, h: 5 } } }, transform: [1, 0, 0, 1, x, y], style: { stroke: null, fill: 0x000000ff }, children: [], cut_line_type: "NoCut", material_preset: { state: "inherit" } };
+        return id;
+      };
+      const children = [mark(area.origin_x_mm, area.origin_y_mm), mark(area.origin_x_mm + area.width_mm - 5, area.origin_y_mm), mark(area.origin_x_mm, area.origin_y_mm + area.length_mm - 5)];
+      doc.nodes[groupId] = { id: groupId, kind: "Group", transform: [1, 0, 0, 1, 0, 0], style: { stroke: null, fill: null }, children, cut_line_type: "NoCut", material_preset: { state: "inherit" } };
+      doc.nodes[doc.root].children.push(groupId);
+      registration = { marks: groupId, enabled: true, area };
+      return {};
+    },
+    set_registration_enabled: (a) => {
+      if (!registration) {
+        if (a.on) throw new Error("this document has no registration marks; add them first");
+        return null;
+      }
+      registration.enabled = a.on as boolean;
+      return null;
+    },
+    registration_status: () =>
+      registration
+        ? { marks: registration.marks, enabled: registration.enabled, area: registration.area, problem: null }
+        : { marks: null, enabled: false, area: null, problem: null },
+    export_print_svg: (a) => {
+      (window as unknown as { __printExports?: unknown[] }).__printExports = [
+        ...((window as unknown as { __printExports?: unknown[] }).__printExports ?? []),
+        { path: a.path, paper: a.paper },
+      ];
+      return null;
     },
     set_machine: (a) => {
       const m = machines.find((p) => p.id === a.machineId);
@@ -806,7 +854,12 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       // Answered from the document as it is *now*, like the real command, then parked if
       // the test has armed the hold: which of a replan and an older reorder settles first
       // is the whole subject of the race test, and a timing race cannot state it.
-      const plan = planFromDoc(a.grouping as Grouping);
+      // Registered while the marks are in the document and switched on, as `active_registration`.
+      const reg = registration && registration.enabled && doc.nodes[registration.marks] ? registration.area as { origin_x_mm: number; origin_y_mm: number; width_mm: number; length_mm: number } : null;
+      const plan = {
+        ...planFromDoc(a.grouping as Grouping),
+        registration: reg && { originXMm: reg.origin_x_mm, originYMm: reg.origin_y_mm, widthMm: reg.width_mm, lengthMm: reg.length_mm },
+      };
       if (!holding) return plan;
       return new Promise((resolve) => heldPlans.push(() => resolve(plan)));
     },
@@ -4578,4 +4631,65 @@ test("the layout switch brings back the classic panels and is remembered", async
   await expect(page.getByRole("region", { name: "Cuts" })).toHaveCount(0);
   await expect(page.getByTestId("layer-row")).toHaveCount(2);
   expect(await page.evaluate(() => localStorage.getItem("cuthulhu.layout"))).toBe("classic");
+});
+
+test("print & cut adds registration marks that are not cut, switches registration and exports the sheet", async ({ page }) => {
+  await page.addInitScript(installMockTauri);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Registration marks" }).click();
+  const dialog = page.getByRole("dialog", { name: "Print and cut" });
+  await expect(dialog.getByTestId("registration-status")).toHaveText("No registration marks in this document yet.");
+  // Nothing to register against yet, so the switch is not offered.
+  await expect(dialog.getByRole("checkbox", { name: "Use registration marks when cutting" })).toBeDisabled();
+
+  // The fields come from the backend's template for the paper, not from a copy in the UI.
+  await expect(dialog.getByRole("textbox", { name: "Marks width" })).toHaveValue("195.9");
+  await dialog.getByRole("combobox", { name: "Paper" }).selectOption("a4");
+  await expect(dialog.getByRole("textbox", { name: "Marks length" })).toHaveValue("277");
+
+  await dialog.getByRole("button", { name: "Add registration marks" }).click();
+  await expect(dialog.getByTestId("registration-status")).toHaveText(
+    "Marks placed (190 × 277 mm, from 10, 10 mm); the cut will register against them.",
+  );
+  // The marks are in the document — the group's row — and marked No Cut.
+  await expect(page.getByTestId("layer-row")).not.toHaveCount(0);
+
+  const toggle = dialog.getByRole("checkbox", { name: "Use registration marks when cutting" });
+  await expect(toggle).toBeChecked();
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  await expect(dialog.getByTestId("registration-status")).toContainText("registration is off");
+
+  // A refusal from the backend is shown, not swallowed.
+  await dialog.getByRole("textbox", { name: "Marks width" }).fill("10");
+  await dialog.getByRole("button", { name: "Replace registration marks" }).click();
+  await expect(dialog.getByRole("alert")).toHaveText("the registration marks must be at least 40 mm apart each way");
+
+  await dialog.getByRole("button", { name: "Export for printing" }).click();
+  await expect(dialog.getByRole("status")).toContainText("Print it at 100 %");
+  const exports = await page.evaluate(() => (window as unknown as { __printExports?: unknown[] }).__printExports);
+  expect(exports).toEqual([{ path: "/mock/cuthulhu-project.cut", paper: "a4" }]);
+
+  await dialog.getByRole("button", { name: "Close" }).click();
+  await expect(dialog).toHaveCount(0);
+});
+
+test("the cut dialog says when a cut is registered against printed marks", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Cut" }).click();
+  await page.getByRole("button", { name: "Connect", exact: true }).first().click();
+  await expect(page.getByTestId("cut-pass-row")).toHaveCount(2);
+  await expect(page.getByTestId("cut-registered")).toHaveCount(0);
+  await page.getByRole("button", { name: "Close" }).first().click();
+
+  await page.getByRole("button", { name: "Registration marks" }).click();
+  await page.getByRole("button", { name: "Add registration marks" }).click();
+  await expect(page.getByTestId("registration-status")).toContainText("the cut will register against them");
+  await page.getByRole("dialog", { name: "Print and cut" }).getByRole("button", { name: "Close" }).click();
+
+  await page.getByRole("button", { name: "Cut" }).click();
+  await expect(page.getByTestId("cut-registered")).toHaveText(
+    "Registered: the cutter looks for the printed marks first (195.9 × 259.4 mm from 10, 10 mm) and cuts from them.",
+  );
 });

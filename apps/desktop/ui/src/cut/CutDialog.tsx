@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import * as ipc from "../ipc";
+import { registeredNotice } from "../printcut/viewmodel";
 import { connectedControl, deviceBadge, forgetFrom, groupDevices, sameCutter, staleSection } from "../hosts/deviceList";
 import { PairHostDialog } from "../hosts/PairHostDialog";
 import type { Scene } from "../render/hittest";
@@ -58,6 +59,8 @@ type InstalledPlan = {
   rows: PassRow[];
   skippedNotCut: number;
   travel: [number, number, number, number][];
+  /** What to tell the operator about registration, or null when the cut is not registered. */
+  registered: string | null;
 };
 
 type Props = {
@@ -267,6 +270,7 @@ export function CutDialog({
           grouping: mode,
           revision: response.doc_revision,
           skippedNotCut: response.skipped_not_cut,
+          registered: registeredNotice(response.registration),
           rows: response.passes.map((p) => ({
             key: p.key,
             shapeCount: p.shape_count,
@@ -1104,6 +1108,11 @@ export function CutDialog({
         <div style={{ fontSize: 12, color: "var(--muted)" }}>
           Not cut: {plan?.skippedNotCut ?? 0} shape{(plan?.skippedNotCut ?? 0) === 1 ? "" : "s"} marked No Cut
         </div>
+        {plan?.registered ? (
+          <div data-testid="cut-registered" style={{ fontSize: 12 }}>
+            {plan.registered}
+          </div>
+        ) : null}
 
         <CutPreview scene={scene} artboard={artboard} passes={plan?.rows ?? []} travel={plan?.travel ?? []} />
 
