@@ -33,6 +33,13 @@ function num(v: FormValues, key: string, label: string): number | string {
   return Number.isFinite(n) ? n : `${label} must be a number`;
 }
 
+/** A whole number of at least 1. */
+function count(v: FormValues, key: string, label: string): number | string {
+  const n = num(v, key, label);
+  if (typeof n === "string") return n;
+  return Number.isInteger(n) && n >= 1 ? n : `${label} must be a whole number of at least 1`;
+}
+
 export type Join = "Round" | "Miter" | "Bevel";
 export type OffsetRequest = { distanceMm: number; union: boolean; join: Join };
 
@@ -77,5 +84,32 @@ export const WEED_FORM: ToolForm<WeedRequest> = {
     if (typeof lineSpacingMm === "string") return fail(lineSpacingMm);
     if (lineSpacingMm <= 0) return fail("Line spacing must be more than zero");
     return { ok: true, value: { marginMm, lineSpacingMm } };
+  },
+};
+
+export type CopiesRequest = { cols: number; rows: number; gapXMm: number; gapYMm: number };
+
+export const COPIES_FORM: ToolForm<CopiesRequest> = {
+  title: "Copies",
+  apply: "Make copies",
+  fields: [
+    { key: "cols", label: "Columns", kind: "number" },
+    { key: "rows", label: "Rows", kind: "number" },
+    { key: "gapX", label: "Gap across", kind: "number", unit: "mm", step: 0.5 },
+    { key: "gapY", label: "Gap down", kind: "number", unit: "mm", step: 0.5 },
+  ],
+  defaults: { cols: "2", rows: "1", gapX: "3", gapY: "3" },
+  parse: (v) => {
+    const cols = count(v, "cols", "Columns");
+    if (typeof cols === "string") return fail(cols);
+    const rows = count(v, "rows", "Rows");
+    if (typeof rows === "string") return fail(rows);
+    if (cols * rows < 2) return fail("Copies need more than one column or row");
+    const gapXMm = num(v, "gapX", "Gap across");
+    if (typeof gapXMm === "string") return fail(gapXMm);
+    const gapYMm = num(v, "gapY", "Gap down");
+    if (typeof gapYMm === "string") return fail(gapYMm);
+    if (gapXMm < 0 || gapYMm < 0) return fail("Gaps must not be negative");
+    return { ok: true, value: { cols, rows, gapXMm, gapYMm } };
   },
 };

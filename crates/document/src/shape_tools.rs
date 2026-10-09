@@ -230,6 +230,80 @@ fn has_area(p: &Path) -> bool {
     })
 }
 
+/// The most nodes' worth of copies one command makes. A makerspace sheet of stickers is dozens;
+/// thousands is a typo, and each copy is a node the canvas draws and the planner flattens.
+pub const MAX_COPIES: u32 = 500;
+/// The widest gap between copies, in mm, for the reason `MAX_OFFSET_MM` gives.
+pub const MAX_COPY_GAP_MM: f64 = 1000.0;
+
+/// Copy `id`'s subtree under `parent` with fresh ids, its root's local transform replaced by
+/// `transform`. Emitted parent-first, each node added with no children and then its children added
+/// under it, because `NodeOp::Add` inserts the node's id into its parent's list itself: a copy
+/// carrying its children's ids would list each of them twice.
+fn copy_subtree(doc: &Document, gen: &mut IdGen, id: NodeId, parent: NodeId, transform: Option<Affine>,
+                ops: &mut Vec<NodeOp>, depth: usize) -> Result<(), CmdError> {
+    // A cycle in a malformed manifest would otherwise copy forever; no real tree is this deep.
+    if depth > 1000 { return Err(CmdError::Geometry("the selection's tree is too deep to copy".into())); }
+    let node = doc.get(id).ok_or(CmdError::NotFound)?;
+    let mut copy = node.clone();
+    copy.id = gen.next();
+    copy.children = vec![];
+    if let Some(t) = transform { copy.transform = t; }
+    let new_id = copy.id;
+    ops.push(NodeOp::Add { parent, node: copy, index: usize::MAX });
+    for &child in &node.children {
+        copy_subtree(doc, gen, child, new_id, None, ops, depth + 1)?;
+    }
+    Ok(())
+}
+
+/// The selection repeated into a grid of `cols` × `rows`, the original in the top-left cell and
+/// the copies `gap_x_mm` / `gap_y_mm` apart, measured between the selection's bounding boxes —
+/// the spacing an operator lays out a sheet of stickers by. The whole selection moves as one
+/// block, so pieces keep their places relative to each other in every cell.
+///
+/// Each copy is a deep copy beside its original, under the same parent, with every node given a
+/// new id; one Delta for the lot.
+pub fn array_copies(doc: &Document, gen: &mut IdGen, ids: &[NodeId], cols: u32, rows: u32, gap_x_mm: f64, gap_y_mm: f64)
+    -> Result<Delta, CmdError> {
+    if cols == 0 || rows == 0 || cols.saturating_mul(rows) < 2 {
+        return Err(CmdError::Geometry("copies need at least two cells: more than one column or row".into()));
+    }
+    if cols.saturating_mul(rows) > MAX_COPIES {
+        return Err(CmdError::Geometry(format!("at most {MAX_COPIES} cells of copies can be made at once")));
+    }
+    for g in [gap_x_mm, gap_y_mm] {
+        if !g.is_finite() || !(0.0..=MAX_COPY_GAP_MM).contains(&g) {
+            return Err(CmdError::Geometry(format!("the gap between copies must be between 0 and {MAX_COPY_GAP_MM} mm")));
+        }
+    }
+    let parents = parent_index(doc);
+    let units = selection_units(doc, &parents, ids)?;
+    let mut paths = vec![];
+    for &u in &units { paths.extend(world_outlines(doc, &parents, u)?); }
+    let bounds = union_bounds(&paths).ok_or(CmdError::EmptySelection)?;
+    let (pitch_x, pitch_y) = (bounds.w + gap_x_mm, bounds.h + gap_y_mm);
+
+    let mut ops = vec![];
+    for r in 0..rows {
+        for c in 0..cols {
+            if r == 0 && c == 0 { continue; }
+            let shift = Affine::translate(c as f64 * pitch_x, r as f64 * pitch_y);
+            for &u in &units {
+                let parent = *parents.get(&u).ok_or(CmdError::NoParent)?;
+                let pw = world_via(doc, &parents, parent).ok_or(CmdError::NotFound)?;
+                let pw_inv = pw.inverse().ok_or_else(|| CmdError::Geometry(
+                    "something in the selection sits under a transform that cannot be reversed".into()))?;
+                // new_local = old_local · parent world · shift · parent world⁻¹, as a move does.
+                let local = doc.get(u).ok_or(CmdError::NotFound)?.transform;
+                let t = local.then(&pw).then(&shift).then(&pw_inv);
+                copy_subtree(doc, gen, u, parent, Some(t), &mut ops, 0)?;
+            }
+        }
+    }
+    Ok(Delta(ops))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -437,5 +511,84 @@ pub(crate) mod tests {
         for (s, e) in weed_lines(&ed, &d) {
             if s.x == e.x { assert!(e.y <= 9.0 + 1e-9 || s.y >= 11.0 - 1e-9, "{s:?} {e:?} crosses the stroke"); }
         }
+    }
+
+    fn copies(ed: &mut Editor, ids: &[NodeId], cols: u32, rows: u32, gx: f64, gy: f64) -> Result<Delta, CmdError> {
+        ed.commit_minted(|doc, gen| array_copies(doc, gen, ids, cols, rows, gx, gy))
+    }
+
+    #[test]
+    fn copies_fill_a_grid_spaced_by_the_gap_between_boxes() {
+        let mut ed = Editor::new();
+        let root = ed.doc.root;
+        let a = rect_at(&mut ed, root, 5.0, 5.0, 10.0, 20.0);
+        let d = copies(&mut ed, &[a], 3, 2, 2.0, 3.0).unwrap();
+        let mut origins: Vec<(f64, f64)> = added(&d).iter().map(|n| n.transform.apply(0.0, 0.0)).collect();
+        origins.sort_by(|p, q| p.partial_cmp(q).unwrap());
+        assert_eq!(origins, vec![(5.0, 28.0), (17.0, 5.0), (17.0, 28.0), (29.0, 5.0), (29.0, 28.0)]);
+        assert_eq!(ed.doc.get(root).unwrap().children.len(), 6);
+        ed.undo().unwrap();
+        assert_eq!(ed.doc.get(root).unwrap().children, vec![a]);
+    }
+
+    #[test]
+    fn copies_of_a_group_are_deep_with_new_ids_throughout() {
+        let mut ed = Editor::new();
+        let root = ed.doc.root;
+        let g = ed.doc.ids.next();
+        ed.commit(Delta(vec![NodeOp::Add { parent: root, node: Node::container(g, NodeKind::Group), index: usize::MAX }]));
+        let a = rect_at(&mut ed, g, 0.0, 0.0, 10.0, 10.0);
+        let b = rect_at(&mut ed, g, 20.0, 0.0, 10.0, 10.0);
+        let d = copies(&mut ed, &[g], 2, 1, 5.0, 0.0).unwrap();
+        let new = added(&d);
+        assert_eq!(new.len(), 3);
+        let copy = ed.doc.get(new[0].id).unwrap();
+        assert!(matches!(copy.kind, NodeKind::Group));
+        assert_eq!(copy.children.len(), 2, "each child listed once");
+        assert!(!copy.children.contains(&a) && !copy.children.contains(&b));
+        // The group moved by the box width plus the gap; its children keep their own transforms.
+        assert_eq!(copy.transform.apply(0.0, 0.0), (35.0, 0.0));
+        assert_eq!(ed.doc.get(copy.children[1]).unwrap().transform.apply(0.0, 0.0), (20.0, 0.0));
+        assert_eq!(ed.doc.get(g).unwrap().children, vec![a, b], "the original is untouched");
+    }
+
+    #[test]
+    fn copies_move_in_world_space_under_a_scaled_parent() {
+        let mut ed = Editor::new();
+        let root = ed.doc.root;
+        let g = ed.doc.ids.next();
+        let mut group = Node::container(g, NodeKind::Group);
+        group.transform = Affine([2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
+        ed.commit(Delta(vec![NodeOp::Add { parent: root, node: group, index: usize::MAX }]));
+        let a = rect_at(&mut ed, g, 0.0, 0.0, 5.0, 5.0);
+        let d = copies(&mut ed, &[a], 2, 1, 4.0, 0.0).unwrap();
+        let copy = added(&d)[0].id;
+        let world = crate::commands::world_transform(&ed.doc, copy).unwrap();
+        // 10 mm wide in the world, so the copy starts 14 mm along.
+        assert_eq!(world.apply(0.0, 0.0), (14.0, 0.0));
+    }
+
+    #[test]
+    fn copies_refuse_a_single_cell_too_many_cells_or_a_bad_gap() {
+        let mut ed = Editor::new();
+        let root = ed.doc.root;
+        let a = rect_at(&mut ed, root, 0.0, 0.0, 10.0, 10.0);
+        assert!(copies(&mut ed, &[a], 1, 1, 0.0, 0.0).unwrap_err().to_string().contains("at least two cells"));
+        assert!(copies(&mut ed, &[a], 0, 5, 0.0, 0.0).unwrap_err().to_string().contains("at least two cells"));
+        assert!(copies(&mut ed, &[a], 100, 100, 0.0, 0.0).unwrap_err().to_string().contains("at most 500"));
+        assert!(copies(&mut ed, &[a], 2, 1, -1.0, 0.0).unwrap_err().to_string().contains("gap between copies"));
+        assert!(copies(&mut ed, &[a], 2, 1, f64::NAN, 0.0).unwrap_err().to_string().contains("gap between copies"));
+    }
+
+    #[test]
+    fn copies_of_several_pieces_keep_their_layout_in_each_cell() {
+        let mut ed = Editor::new();
+        let root = ed.doc.root;
+        let a = rect_at(&mut ed, root, 0.0, 0.0, 10.0, 10.0);
+        let b = rect_at(&mut ed, root, 20.0, 5.0, 10.0, 10.0);
+        let d = copies(&mut ed, &[b, a], 1, 2, 0.0, 1.0).unwrap();
+        let mut origins: Vec<(f64, f64)> = added(&d).iter().map(|n| n.transform.apply(0.0, 0.0)).collect();
+        origins.sort_by(|p, q| p.partial_cmp(q).unwrap());
+        assert_eq!(origins, vec![(0.0, 16.0), (20.0, 21.0)]);
     }
 }

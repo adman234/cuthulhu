@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { describe, expect, it } from "vitest";
-import { OFFSET_FORM, WEED_FORM } from "./viewmodel";
+import { COPIES_FORM, OFFSET_FORM, WEED_FORM } from "./viewmodel";
 
 describe("OFFSET_FORM", () => {
   it("starts at a 2 mm round outset around everything", () => {
@@ -40,5 +40,24 @@ describe("WEED_FORM", () => {
     expect(WEED_FORM.parse({ ...WEED_FORM.defaults, margin: "-1" })).toEqual({ ok: false, error: "Margin must not be negative" });
     expect(WEED_FORM.parse({ ...WEED_FORM.defaults, spacing: "0" })).toEqual({ ok: false, error: "Line spacing must be more than zero" });
     expect(WEED_FORM.parse({ ...WEED_FORM.defaults, spacing: "x" })).toEqual({ ok: false, error: "Line spacing must be a number" });
+  });
+});
+
+describe("COPIES_FORM", () => {
+  it("starts at one copy beside the original, 3 mm apart", () => {
+    expect(COPIES_FORM.parse(COPIES_FORM.defaults)).toEqual({ ok: true, value: { cols: 2, rows: 1, gapXMm: 3, gapYMm: 3 } });
+  });
+
+  it("refuses counts that are not whole numbers of at least 1", () => {
+    for (const cols of ["0", "1.5", "-2", ""]) {
+      const r = COPIES_FORM.parse({ ...COPIES_FORM.defaults, cols });
+      expect(r.ok).toBe(false);
+    }
+    expect(COPIES_FORM.parse({ ...COPIES_FORM.defaults, cols: "1.5" })).toEqual({ ok: false, error: "Columns must be a whole number of at least 1" });
+  });
+
+  it("refuses a grid of one cell and a negative gap", () => {
+    expect(COPIES_FORM.parse({ ...COPIES_FORM.defaults, cols: "1", rows: "1" })).toEqual({ ok: false, error: "Copies need more than one column or row" });
+    expect(COPIES_FORM.parse({ ...COPIES_FORM.defaults, gapY: "-1" })).toEqual({ ok: false, error: "Gaps must not be negative" });
   });
 });

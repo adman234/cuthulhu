@@ -69,6 +69,11 @@ impl AppState {
         self.editor.commit_minted(|doc, gen| shape_tools::weed_box(doc, gen, &ids, margin_mm, line_spacing_mm))
     }
 
+    pub fn array_copies(&mut self, ids: Vec<NodeId>, cols: u32, rows: u32, gap_x_mm: f64, gap_y_mm: f64)
+        -> Result<Delta, CmdError> {
+        self.editor.commit_minted(|doc, gen| shape_tools::array_copies(doc, gen, &ids, cols, rows, gap_x_mm, gap_y_mm))
+    }
+
     pub fn delete(&mut self, ids: Vec<NodeId>) -> Result<Delta, CmdError> {
         let d = commands::delete_nodes(&self.editor.doc, &ids)?;
         Ok(self.editor.commit(d))

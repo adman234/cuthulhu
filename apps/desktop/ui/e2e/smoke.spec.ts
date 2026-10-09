@@ -314,6 +314,32 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       if (spacing !== null) added.push(addNode(group, { Shape: { Path: { d: `M${box.x},${box.y + box.h / 2} L${box.x + box.w},${box.y + box.h / 2}` } } }));
       return addedDelta(added);
     },
+    // Mirrors shape_tools::array_copies: deep copies with new ids, each cell offset by the
+    // selection's box plus the gap.
+    array_copies: (a) => {
+      shapeCall("array_copies", a);
+      const cols = a.cols as number;
+      const rows = a.rows as number;
+      if (cols < 1 || rows < 1 || cols * rows < 2) throw new Error("copies need at least two cells: more than one column or row");
+      if (cols * rows > 500) throw new Error("at most 500 cells of copies can be made at once");
+      const units = unitsOf(a.ids as number[]);
+      const b = unionBox(units);
+      const copy = (id: number, parent: number, dx: number, dy: number): number => {
+        const n = doc.nodes[id];
+        const cid = nextId++;
+        const [ta, tb, tc, td, te, tf] = n.transform;
+        doc.nodes[cid] = { ...JSON.parse(JSON.stringify(n)), id: cid, children: [], transform: [ta, tb, tc, td, te + dx, tf + dy] };
+        doc.nodes[parent].children.push(cid);
+        for (const c of n.children) copy(c, cid, 0, 0);
+        return cid;
+      };
+      const added: number[] = [];
+      for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+        if (r === 0 && c === 0) continue;
+        for (const u of units) added.push(copy(u, parentOf(u)!, c * (b.w + (a.gapXMm as number)), r * (b.h + (a.gapYMm as number))));
+      }
+      return addedDelta(added);
+    },
     delete: (a) => {
       for (const id of a.ids as number[]) {
         delete doc.nodes[id];
@@ -4673,6 +4699,43 @@ test("Weed box without lines sends no spacing, in the simple layout too", async 
   await expect(page.getByTestId("layer-row")).toHaveCount(4);
   const [call] = await shapeCalls(page);
   expect(call.args).toEqual({ ids: [2], marginMm: 3, lineSpacingMm: null });
+});
+
+test("Copies repeats the selection into a grid spaced by the gap", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  await page.getByRole("button", { name: "Copies…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Copies" });
+  await dialog.getByLabel("Columns").fill("3");
+  await dialog.getByLabel("Rows").fill("2");
+  await dialog.getByLabel("Gap across").fill("5");
+  await dialog.getByRole("button", { name: "Make copies" }).click();
+  await expect(dialog).not.toBeVisible();
+  // Two seeded rects plus five copies of the red one.
+  await expect(page.getByTestId("layer-row")).toHaveCount(7);
+  const [call] = await shapeCalls(page);
+  expect(call).toEqual({ cmd: "array_copies", args: { ids: [2], cols: 3, rows: 2, gapXMm: 5, gapYMm: 3 } });
+  // The last copy sits two cells across (10 mm box + 5 mm gap) and one down (10 + 3).
+  const last = await page.evaluate(async () => {
+    const internals = window as unknown as { __TAURI_INTERNALS__: { invoke: (c: string, a?: unknown) => Promise<string> } };
+    const d = JSON.parse(await internals.__TAURI_INTERNALS__.invoke("snapshot", {}));
+    const ids = d.nodes[d.root].children as number[];
+    return d.nodes[ids[ids.length - 1]].transform;
+  });
+  expect(last).toEqual([1, 0, 0, 1, 30, 13]);
+});
+
+test("Copies with one cell is refused before anything is sent", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  await page.getByRole("button", { name: "Copies…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Copies" });
+  await dialog.getByLabel("Columns").fill("1");
+  await expect(dialog.getByRole("alert")).toHaveText("Copies need more than one column or row");
+  await expect(dialog.getByRole("button", { name: "Make copies" })).toBeDisabled();
+  expect(await shapeCalls(page)).toEqual([]);
 });
 
 // ── Simple (LightBurn-style) shell ─────────────────────────────────────────────────────────────

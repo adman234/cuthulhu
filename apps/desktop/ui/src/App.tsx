@@ -26,7 +26,7 @@ import { SimpleDock } from "./simple/SimpleDock";
 import { ColorPalette } from "./simple/ColorPalette";
 import { readLayout, writeLayout, type Layout } from "./simple/layout";
 import { ShapeToolDialog } from "./shapes/ShapeToolDialog";
-import { OFFSET_FORM, WEED_FORM } from "./shapes/viewmodel";
+import { COPIES_FORM, OFFSET_FORM, WEED_FORM } from "./shapes/viewmodel";
 import type { ShapeTool } from "./panels/ToolRail";
 
 /** `window.localStorage` itself can throw (blocked site data), not just its methods. */
@@ -160,7 +160,7 @@ export function App() {
     setLayout(next);
   };
   const [textOpen, setTextOpen] = useState(false);
-  const [shapeTool, setShapeTool] = useState<"offset" | "weed" | null>(null);
+  const [shapeTool, setShapeTool] = useState<"offset" | "weed" | "copies" | null>(null);
   const [tracePath, setTracePath] = useState<string | null>(null);
   const [status, setStatus] = useState<ipc.CutStatus>(ipc.DISCONNECTED_STATUS);
   /** The machine's material presets, for the properties panel's control. Loaded here rather
@@ -576,6 +576,7 @@ export function App() {
   const shapeTools: ShapeTool[] = [
     { label: "Offset…", disabled: noSelection, onClick: () => setShapeTool("offset") },
     { label: "Weed box…", disabled: noSelection, onClick: () => setShapeTool("weed") },
+    { label: "Copies…", disabled: noSelection, onClick: () => setShapeTool("copies") },
   ];
   const selectionNote = `${unitCount} piece${unitCount === 1 ? "" : "s"} selected`;
 
@@ -769,6 +770,14 @@ export function App() {
           form={WEED_FORM}
           note={selectionNote}
           onApply={(r) => edit(async () => selectAdded(await ipc.weedBox({ ids: selected, ...r })))}
+          onClose={() => setShapeTool(null)}
+        />
+      ) : null}
+      {shapeTool === "copies" ? (
+        <ShapeToolDialog
+          form={COPIES_FORM}
+          note={selectionNote}
+          onApply={(r) => edit(async () => { await ipc.arrayCopies({ ids: selected, ...r }); })}
           onClose={() => setShapeTool(null)}
         />
       ) : null}

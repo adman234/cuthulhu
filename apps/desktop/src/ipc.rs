@@ -68,6 +68,12 @@ pub fn weed_box(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>, margin_mm
 }
 
 #[tauri::command]
+pub fn array_copies(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>, cols: u32, rows: u32, gap_x_mm: f64, gap_y_mm: f64)
+    -> Result<Delta, String> {
+    state.lock().unwrap().array_copies(ids, cols, rows, gap_x_mm, gap_y_mm).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn delete(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>) -> Result<Delta, String> {
     state.lock().unwrap().delete(ids).map_err(|e| e.to_string())
 }

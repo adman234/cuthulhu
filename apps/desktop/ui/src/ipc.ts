@@ -45,6 +45,11 @@ export async function weedBox(args: { ids: number[]; marginMm: number; lineSpaci
   return invoke("weed_box", args);
 }
 
+/** The selection repeated into a `cols` × `rows` grid, gaps measured between boxes; one undo. */
+export async function arrayCopies(args: { ids: number[]; cols: number; rows: number; gapXMm: number; gapYMm: number }) {
+  return invoke("array_copies", args);
+}
+
 export async function deleteNodes(args: Args) {
   return invoke("delete", args);
 }
