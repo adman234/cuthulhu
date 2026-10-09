@@ -201,3 +201,10 @@ Tauri window.
 - [ ] Stop during a cut ends it, and the badge goes back to Ready.
 - [ ] Connecting from the full cut dialog is reflected in the dock without reopening it.
 - [ ] Classic layout switches back and is remembered across launches.
+
+## Integration review, open on hardware (2026-10-09)
+- [ ] Print & cut on a Cameo 1: is the 9 mm / 1 mm margin applied to the registered cutting area as
+      well as the paths? Cut a shape right at the far edge of the marks and check it is not clipped
+      and lands where printed.
+- [ ] A Cut Host on the same build cuts a registered, a pen and a track-enhancing job correctly
+      (an older host would drop all three; see docs/cut-host.md).

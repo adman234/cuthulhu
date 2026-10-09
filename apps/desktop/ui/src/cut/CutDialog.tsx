@@ -73,6 +73,10 @@ type Props = {
   status: ipc.CutStatus;
   refreshDeviceState: () => Promise<void>;
   onConvertMachine: (machineId: string) => void;
+  /** Whether the job is cut mirrored (`JobSettings.mirror`), and how to change it: the cut path
+   *  applies it, so the dialog that sends the cut has to show it. */
+  mirror: boolean;
+  onMirror: (on: boolean) => void;
   onError: (msg: string) => void;
   onClose: () => void;
 };
@@ -130,6 +134,8 @@ export function CutDialog({
   status,
   refreshDeviceState,
   onConvertMachine,
+  mirror,
+  onMirror,
   onError,
   onClose,
 }: Props) {
@@ -239,6 +245,9 @@ export function CutDialog({
           .machineCaps(info.machine_id)
           .then((c) => setCapsFor({ machineId: info.machine_id, caps: c as Caps }))
           .catch((e) => onError(ipc.ipcErrorMessage(e)));
+        // The editor's ranges narrowed to this cutter — a Cameo 1 is offered speeds 1–10, not the
+        // shared 1–30 that `save_preset` would then refuse.
+        ipc.settingsRanges(info.machine_id).then(setRanges).catch(() => {});
         return readPresets(aim, info.machine_id);
       })
       .catch((e) => onError(ipc.ipcErrorMessage(e)));
@@ -362,6 +371,9 @@ export function CutDialog({
           .machineCaps(info.machine_id)
           .then((c) => setCapsFor({ machineId: info.machine_id, caps: c as Caps }))
           .catch((e) => onError(ipc.ipcErrorMessage(e)));
+        // The editor's ranges narrowed to this cutter — a Cameo 1 is offered speeds 1–10, not the
+        // shared 1–30 that `save_preset` would then refuse.
+        ipc.settingsRanges(info.machine_id).then(setRanges).catch(() => {});
         return readPresets(aim, info.machine_id);
       })
       .catch((e) => onError(ipc.ipcErrorMessage(e)))
@@ -1145,6 +1157,10 @@ export function CutDialog({
         <div style={{ fontSize: 12, color: "var(--muted)" }}>
           Not cut: {plan?.skippedNotCut ?? 0} shape{(plan?.skippedNotCut ?? 0) === 1 ? "" : "s"} marked No Cut
         </div>
+        <label style={{ fontSize: 12, display: "flex", gap: 6, alignItems: "center" }}>
+          <input type="checkbox" aria-label="Cut mirrored" checked={mirror} onChange={(e) => onMirror(e.target.checked)} />
+          Cut mirrored (heat-transfer vinyl is cut face down)
+        </label>
         {plan?.registered ? (
           <div data-testid="cut-registered" style={{ fontSize: 12 }}>
             {plan.registered}

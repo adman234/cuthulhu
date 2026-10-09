@@ -4,7 +4,7 @@ use geometry::{boolean, ellipse_path, rect_path, text_to_path, Affine, BoolOp, P
 use crate::{node::*, delta::*};
 
 #[derive(Debug, PartialEq)]
-pub enum CmdError { NotFound, NoParent, EmptySelection, Geometry(String), EmptyPresetId }
+pub enum CmdError { NotFound, NoParent, EmptySelection, Geometry(String), EmptyPresetId, RegistrationMarks }
 
 /// What the operator reads when a command refuses: the desktop's `ipc` layer forwards this
 /// string straight into the dialog. It used to forward `{e:?}` instead, so a boolean op on
@@ -35,6 +35,8 @@ impl std::fmt::Display for CmdError {
             // `"preflight: "`).
             CmdError::Geometry(m) => write!(f, "{m}"),
             CmdError::EmptyPresetId => write!(f, "a material assignment needs a preset id"),
+            CmdError::RegistrationMarks => write!(f,
+                "the registration marks are printed, not edited; leave them out of the selection"),
         }
     }
 }
@@ -469,6 +471,7 @@ mod tests {
                 "the operation left no geometry behind",
             ),
             (CmdError::EmptyPresetId, "a material assignment needs a preset id"),
+            (CmdError::RegistrationMarks, "the registration marks are printed, not edited; leave them out of the selection"),
         ];
         for (error, sentence) in cases {
             assert_eq!(error.to_string(), sentence, "{error:?}");

@@ -199,11 +199,11 @@ export function PresetEditor({
               style={{ flex: 1, resize: "vertical", fontFamily: "inherit", fontSize: 12 }}
             />
           </label>
-          {/* Advisory, and said so: the depth is set by hand on the blade and nothing sends it, and
-              mirroring is not applied to the design for the operator. */}
+          {/* The depth is advice — the blade is set by hand and nothing sends it. Mirror is not: the
+              cut path mirrors the job, so flipping the design as well would undo it. */}
           <div style={{ fontSize: 12, color: "var(--muted)" }}>
-            Blade depth and Cut mirrored are reminders shown when this preset is picked; set the blade
-            by hand and flip the design yourself.
+            Blade depth is a reminder: set the blade by hand. Cut mirrored turns the job's mirror on
+            when this preset is picked in the simple window; never flip the design as well.
           </div>
 
           {/* Speed and force stay editable on a cutter that takes them from its own panel, unlike a

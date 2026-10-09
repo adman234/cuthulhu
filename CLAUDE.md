@@ -156,7 +156,7 @@ A pass is not "enabled/disabled": a pass nobody lists in `PlanOptions::passes` i
 - `cutplan::doc_revision(doc)` is what "stale plan" compares against — a cut planned against a
   document that has since changed is refused, not cut.
 - Project file is a zip: `manifest.json` (the source of truth — a `{ version, document }`
-  envelope, currently version 2) plus `design.svg` (a best-effort interchange copy; unsupported
+  envelope, currently version 3) plus `design.svg` (a best-effort interchange copy; unsupported
   node kinds become comments). Load probes `version` before deserializing the document, migrates
   through `fileio`'s ordered step table, and refuses a project from a newer build by name on both
   open and save-over. `Document::snapshot_json()` stays the bare, unversioned IPC shape. Saves are

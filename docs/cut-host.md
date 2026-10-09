@@ -5,6 +5,14 @@
 A Cut Host owns the USB and serial connections to your cutters and runs Jobs on them for clients on
 your network. It owns the cut: once a Job starts, closing the laptop that sent it does not stop it.
 
+## Keep the host on the same build as the desktops
+
+The desktop and the host exchange Jobs without a protocol version. A host on an older build reads
+a newer desktop's Job and silently drops the fields it does not know: registration (a print & cut
+job is cut from the machine origin instead of the marks), the pen tool (drawn with a blade offset)
+and track enhancing. Update the host whenever the desktops are updated.
+<!-- ponytail: a version or capability handshake is the fix; until then this is a procedure. -->
+
 ## Build
 
 Build on the Pi, or cross-compile:

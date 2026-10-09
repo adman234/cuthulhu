@@ -215,7 +215,9 @@ export function SimpleDock(props: Props) {
     if (patch.enabled !== undefined) refreshTravel(plan.revision, rows);
     if (patch.presetId !== undefined) {
       const preset = lookup.presets.find((x) => x.id === patch.presetId);
-      if (shouldAutoMirror(preset, doc?.job?.mirror ?? false)) {
+      // Not while registration is on: a print & cut job is refused mirrored, so turning it on
+      // here would only make the next Start fail.
+      if (!registration?.enabled && shouldAutoMirror(preset, doc?.job?.mirror ?? false)) {
         props.onJobEdit(() => ipc.setMirror(true));
         setNotice(`Mirror turned on: ${preset?.name} is cut face down.`);
       }
@@ -354,7 +356,9 @@ export function SimpleDock(props: Props) {
             onMedia={pickMedia}
             scene={props.scene}
             artboard={doc?.artboard ?? { x: 0, y: 0, w: 0, h: 0 }}
-            registration={caps.supportsRegistration
+            // Shown when it is on even for a machine that cannot register: the refusal that follows
+            // says to turn it off, and the switch has to be here to do that.
+            registration={caps.supportsRegistration || registration?.enabled
               ? { checked: registration?.enabled ?? false, disabled: !canToggle(registration), line: statusLine(registration) }
               : null}
             onRegistration={(on) => props.onJobEdit(() => ipc.setRegistrationEnabled(on))}

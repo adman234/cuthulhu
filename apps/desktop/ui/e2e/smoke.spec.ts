@@ -2648,7 +2648,7 @@ test("a preset's notes, blade depth and mirror are saved and shown where a pass 
   await expect(page.getByTestId("cut-pass-advice")).toHaveCount(0);
   await page.getByLabel("Preset for pass 1").selectOption("preset:flex-htv");
   await expect(page.getByTestId("cut-pass-advice")).toHaveText(
-    "Blade depth 2 · Cut mirrored (flip the design before cutting) · Siser EasyWeed, shiny side down",
+    "Blade depth 2 · Cut mirrored (turn Mirror on for the job; do not flip the design) · Siser EasyWeed, shiny side down",
   );
 });
 
@@ -5397,5 +5397,16 @@ test("on a Cameo 1 the dock offers print & cut, switched on once marks are added
   await expect(page.getByTestId("registration-line")).toHaveText("No registration marks in this document yet.");
   await page.getByRole("button", { name: "Marks…" }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
+});
+
+test("the classic cut dialog shows and switches the job's mirror", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Cut", exact: true }).click();
+  const box = page.getByLabel("Cut mirrored");
+  await expect(box).not.toBeChecked();
+  await box.check();
+  await expect.poll(async () => (JSON.parse((await callFake(page, "snapshot")) as string) as { job?: { mirror: boolean } }).job?.mirror).toBe(true);
+  await expect(box).toBeChecked();
 });
 

@@ -188,7 +188,7 @@ export function presetAdvice(p: Preset | null | undefined): string | null {
   if (!p) return null;
   const parts: string[] = [];
   if (p.blade_depth !== null && p.blade_depth !== undefined) parts.push(`Blade depth ${p.blade_depth}`);
-  if (p.mirror) parts.push("Cut mirrored (flip the design before cutting)");
+  if (p.mirror) parts.push("Cut mirrored (turn Mirror on for the job; do not flip the design)");
   const notes = (p.notes ?? "").trim();
   if (notes !== "") parts.push(notes);
   return parts.length === 0 ? null : parts.join(" · ");

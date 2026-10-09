@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction 
 import { listen } from "@tauri-apps/api/event";
 import * as ipc from "./ipc";
 import { Canvas2DRenderer } from "./render/Canvas2DRenderer";
-import { unionBounds, type Affine6, type Scene, type ShapeGeom } from "./render/hittest";
+import { unionBounds, type Affine6, type Bounds, type Scene, type ShapeGeom } from "./render/hittest";
 import { pathBounds } from "./render/pathdata";
 import { IDENTITY, compose, transformBounds } from "./render/affine";
 import { outermost, shapesUnder, toggleId } from "./interaction/marquee";
@@ -124,6 +124,9 @@ function buildScene(doc: DocSnapshot): Scene {
   walk(doc.root, IDENTITY);
   return { nodes };
 }
+
+/** How far inside the registration marks' outer corners nested pieces start, mm. */
+const MARKS_INSET_MM = 6;
 
 /** Every visible stroke colour of the shapes at or under `ids`. */
 function strokesUnder(doc: DocSnapshot, ids: number[]): number[] {
@@ -619,8 +622,21 @@ export function App() {
       return false;
     }
     if (!doc) return false;
-    const ids = units;
-    const refusal = nestRefusal(nest(unitsOf(interaction.effectiveScene, ids, expand), doc.artboard, gapMm, allowTurn), allowTurn);
+    // With registration on, the marks stay where they were printed and the pieces are packed
+    // inside them, where preflight will accept them; moved marks no longer match the sheet.
+    const reg = doc.job?.registration?.enabled ? doc.job.registration.marks : null;
+    const ids = units.filter((id) => id !== reg);
+    const areaIn = (sc: Scene, artboard: Bounds, ex: (ids: number[]) => number[]): Bounds => {
+      if (reg === null) return artboard;
+      const shapes = new Set(ex([reg]));
+      const boxes = sc.nodes.filter((n) => shapes.has(n.id)).map((n) => n.bounds);
+      if (boxes.length === 0) return artboard;
+      const b = unionBounds(boxes);
+      // ponytail: inset past the corner marks' 5 mm square and arms by a fixed 6 mm rather than
+      // packing around the marks' true outlines.
+      return { x: b.x + MARKS_INSET_MM, y: b.y + MARKS_INSET_MM, w: b.w - 2 * MARKS_INSET_MM, h: b.h - 2 * MARKS_INSET_MM };
+    };
+    const refusal = nestRefusal(nest(unitsOf(interaction.effectiveScene, ids, expand), areaIn(interaction.effectiveScene, doc.artboard, expand), gapMm, allowTurn), allowTurn);
     if (refusal) {
       setError(refusal);
       return false;
@@ -628,7 +644,7 @@ export function App() {
     setError(null);
     interaction.transformEach(`nest:${[...ids].sort((p, q) => p - q).join(",")}`, (sc, now) => {
       if (!now.artboard) return [];
-      const r = nest(unitsOf(sc, ids, now.expand), now.artboard, gapMm, allowTurn);
+      const r = nest(unitsOf(sc, ids, now.expand), areaIn(sc, now.artboard, now.expand), gapMm, allowTurn);
       return nestRefusal(r, allowTurn) ? [] : r.moves;
     });
     return true;
@@ -823,6 +839,8 @@ export function App() {
           status={status}
           refreshDeviceState={refreshDeviceState}
           onConvertMachine={(machineId) => edit(() => ipc.setMachine({ machineId }))}
+          mirror={doc.job?.mirror ?? false}
+          onMirror={(on) => void edit(() => ipc.setMirror(on))}
           onError={setError}
           onClose={() => setCutOpen(false)}
         />

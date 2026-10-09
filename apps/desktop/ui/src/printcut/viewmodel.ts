@@ -51,7 +51,9 @@ export function statusLine(s: RegistrationStatus | null): string {
 /** The switch is offered only once there are marks that can be read: turning it on with none is
  *  refused by the backend, and a switch that is refused when used is a switch that lies. */
 export function canToggle(s: RegistrationStatus | null): boolean {
-  return s !== null && s.marks !== null && s.problem === null;
+  // Turning it off is always allowed: altered or deleted marks refuse every cut until it is off,
+  // and a switch that cannot be turned off is a dead end.
+  return s !== null && (s.enabled || (s.marks !== null && s.problem === null));
 }
 
 /** The cut dialog's notice for a registered plan, or null for one that is not. */

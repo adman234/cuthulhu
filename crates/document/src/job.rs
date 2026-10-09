@@ -5,7 +5,7 @@
 //! Kept beside the tree rather than in it because none of it belongs to a Node: a pass is the
 //! planner's grouping of Nodes (keyed by the same `PassKey` spelling the cut path uses), and it
 //! comes and goes as shapes are recoloured. Settings for a pass that no shape currently makes are
-//! kept, so recolouring a shape back finds its layer as it was left.
+//! kept, so recolouring a shape back finds its pass settings as it left them.
 //!
 //! These are not `Delta`s: like the machine choice, they are panel state an operator sets, not
 //! geometry, and undo walks the drawing.
@@ -109,7 +109,7 @@ mod tests {
     use crate::machine::builtin_profiles;
 
     #[test]
-    fn layer_settings_are_saved_forgotten_and_ordered_without_duplicates() {
+    fn pass_settings_are_saved_forgotten_and_ordered_without_duplicates() {
         let mut ed = Editor::new();
         let s = PassSettings { speed: Some(4), output: false, ..PassSettings::default() };
         ed.set_pass_settings("color:ff0000ff".into(), Some(s.clone()));
@@ -140,7 +140,7 @@ mod tests {
         v.as_object_mut().unwrap().remove("job");
         let back: crate::Document = serde_json::from_value(v).unwrap();
         assert_eq!(back.job, JobSettings::default());
-        let layer: PassSettings = serde_json::from_str("{}").unwrap();
-        assert!(layer.output, "a layer saved with nothing says nothing about output, so it cuts");
+        let saved: PassSettings = serde_json::from_str("{}").unwrap();
+        assert!(saved.output, "a pass saved with nothing says nothing about output, so it cuts");
     }
 }

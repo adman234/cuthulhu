@@ -40,11 +40,14 @@ describe("status", () => {
     );
   });
 
-  it("offers the switch only over marks that can be read", () => {
+  it("offers turning it on only over marks that can be read, and turning it off always", () => {
     expect(canToggle(null)).toBe(false);
     expect(canToggle({ marks: null, enabled: false, area: null, problem: null })).toBe(false);
-    expect(canToggle({ ...placed, area: null, problem: "changed" })).toBe(false);
-    expect(canToggle(placed)).toBe(true);
+    expect(canToggle({ ...placed, enabled: false, area: null, problem: "changed" })).toBe(false);
+    expect(canToggle({ ...placed, enabled: false })).toBe(true);
+    // Altered or deleted marks refuse every cut until registration is off; the switch must allow it.
+    expect(canToggle({ ...placed, enabled: true, area: null, problem: "changed" })).toBe(true);
+    expect(canToggle({ marks: null, enabled: true, area: null, problem: null })).toBe(true);
   });
 
   it("tells the cut dialog when a plan is registered", () => {

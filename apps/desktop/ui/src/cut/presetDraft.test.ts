@@ -201,7 +201,7 @@ describe("the material library fields", () => {
 
   it("say what a pass row should tell the operator, or nothing", () => {
     expect(presetAdvice(FILM)).toBe(
-      "Blade depth 2 · Cut mirrored (flip the design before cutting) · Siser EasyWeed, shiny side down",
+      "Blade depth 2 · Cut mirrored (turn Mirror on for the job; do not flip the design) · Siser EasyWeed, shiny side down",
     );
     expect(presetAdvice(MINE)).toBeNull();
     expect(presetAdvice(undefined)).toBeNull();

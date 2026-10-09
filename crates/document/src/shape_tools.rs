@@ -23,6 +23,15 @@ pub const MAX_OFFSET_MM: f64 = 100.0;
 pub(crate) fn selection_units(doc: &Document, parents: &HashMap<NodeId, NodeId>, ids: &[NodeId])
     -> Result<Vec<NodeId>, CmdError> {
     if ids.is_empty() { return Err(CmdError::EmptySelection); }
+    // The marks are what a printed sheet is cut against: welded, offset, copied or boxed, they
+    // either stop being readable marks or are cut as artwork. Refused by name, since a select-all
+    // is the ordinary way to reach them by accident.
+    if let Some(marks) = doc.job.registration.as_ref().map(|r| r.marks) {
+        let marks_set = HashSet::from([marks]);
+        if ids.iter().any(|&id| id == marks || ancestor_selected(parents, &marks_set, id)) {
+            return Err(CmdError::RegistrationMarks);
+        }
+    }
     let selected: HashSet<NodeId> = ids.iter().copied().collect();
     let mut seen = HashSet::new();
     let mut units = vec![];
@@ -71,6 +80,27 @@ fn path_node(gen: &mut IdGen, world: &Path, to_parent: &Affine) -> Node {
     Node::shape(gen.next(), ShapeKind::Path { d: world.transformed(to_parent).to_svg() })
 }
 
+/// The paint and material of the first shape at or under `unit`, for a shape made from it: a
+/// contour or weed box drawn in the default black would land in a pass of its own with no
+/// settings, and be cut with whatever the machine last had — around a red HTV design, that is a
+/// fresh black row nobody configured.
+fn inherit_from(doc: &Document, unit: NodeId, node: &mut Node) {
+    let mut stack = vec![unit];
+    let mut seen = HashSet::new();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) { continue; }
+        let Some(n) = doc.get(id) else { continue };
+        match &n.kind {
+            NodeKind::Shape(_) => {
+                node.style = n.style.clone();
+                node.material_preset = n.material_preset.clone();
+                return;
+            }
+            _ => stack.extend(n.children.iter().rev().copied()),
+        }
+    }
+}
+
 /// An outline `distance_mm` around the selection (negative: inside it), added as a new cut shape
 /// and leaving the selection as it was — the contour around a sticker, or a border to weed to.
 ///
@@ -103,7 +133,9 @@ pub fn offset_shapes(doc: &Document, gen: &mut IdGen, ids: &[NodeId], distance_m
                 "the inset is deeper than the shape is wide, so nothing is left of it".into(),
             e => e.to_string(),
         }))?;
-        ops.push(NodeOp::Add { parent, node: path_node(gen, &outline, &to_parent), index: usize::MAX });
+        let mut node = path_node(gen, &outline, &to_parent);
+        inherit_from(doc, unit, &mut node);
+        ops.push(NodeOp::Add { parent, node, index: usize::MAX });
     }
     if ops.is_empty() { return Err(CmdError::EmptySelection); }
     Ok(Delta(ops))
@@ -178,6 +210,7 @@ pub fn weed_box(doc: &Document, gen: &mut IdGen, ids: &[NodeId], margin_mm: f64,
     let mut ops = vec![NodeOp::Add { parent, node: group, index: usize::MAX }];
     let mut border = Node::shape(gen.next(), ShapeKind::Rect { w: bx.w, h: bx.h });
     border.transform = Affine::translate(bx.x, bx.y).then(&to_parent);
+    inherit_from(doc, units[0], &mut border);
     ops.push(NodeOp::Add { parent: group_id, node: border, index: usize::MAX });
 
     if let Some(spacing) = line_spacing_mm {
@@ -194,7 +227,9 @@ pub fn weed_box(doc: &Document, gen: &mut IdGen, ids: &[NodeId], margin_mm: f64,
         for y in divisions(bx.y, bx.h, spacing) { rule(Point { x: bx.x, y }, Point { x: bx.x + bx.w, y }); }
         for x in divisions(bx.x, bx.w, spacing) { rule(Point { x, y: bx.y }, Point { x, y: bx.y + bx.h }); }
         if !segs.is_empty() {
-            ops.push(NodeOp::Add { parent: group_id, node: path_node(gen, &Path { segs }, &to_parent), index: usize::MAX });
+            let mut lines = path_node(gen, &Path { segs }, &to_parent);
+            inherit_from(doc, units[0], &mut lines);
+            ops.push(NodeOp::Add { parent: group_id, node: lines, index: usize::MAX });
         }
     }
     Ok(Delta(ops))
@@ -688,5 +723,45 @@ pub(crate) mod tests {
         let node = ed.doc.get(kids[0]).unwrap();
         assert!(matches!(node.kind, NodeKind::Shape(ShapeKind::Path { .. })));
         assert_eq!(outline_of(node).flatten(0.1).len(), 1);
+    }
+
+    /// A select-all welds the marks into the artwork, and a weed box or contour around them is
+    /// cut; every shape tool refuses them by name instead.
+    #[test]
+    fn shape_tools_refuse_the_registration_marks() {
+        let mut ed = Editor::new();
+        ed.add_registration_marks(crate::RegistrationArea::for_paper(crate::Paper::Letter)).unwrap();
+        let marks = ed.doc.job.registration.as_ref().unwrap().marks;
+        let a_mark = ed.doc.get(marks).unwrap().children[0];
+        let mut gen = ed.doc.ids.clone();
+        for ids in [vec![marks], vec![a_mark]] {
+            assert_eq!(weld(&ed.doc, &mut gen, &ids), Err(CmdError::RegistrationMarks));
+            assert_eq!(offset_shapes(&ed.doc, &mut gen, &ids, 2.0, true, Join::Round), Err(CmdError::RegistrationMarks));
+            assert_eq!(weed_box(&ed.doc, &mut gen, &ids, 3.0, None), Err(CmdError::RegistrationMarks));
+        }
+    }
+
+    /// A contour or weed box lands in its source's pass, with its material, rather than in a
+    /// fresh black pass with no settings.
+    #[test]
+    fn a_contour_and_a_weed_box_take_their_sources_paint_and_material() {
+        let mut ed = Editor::new();
+        let id = ed.doc.ids.next();
+        let mut node = Node::shape(id, ShapeKind::Rect { w: 10.0, h: 10.0 });
+        node.style = crate::node::Style { stroke: Some(0xff0000ff), fill: None };
+        node.material_preset = crate::node::PresetAssignment::Preset("htv".into());
+        ed.commit(Delta(vec![NodeOp::Add { parent: ed.doc.root, node, index: usize::MAX }]));
+        let mut gen = ed.doc.ids.clone();
+        for d in [offset_shapes(&ed.doc, &mut gen, &[id], 2.0, true, Join::Round).unwrap(),
+                  weed_box(&ed.doc, &mut gen, &[id], 3.0, Some(5.0)).unwrap()] {
+            for op in &d.0 {
+                if let NodeOp::Add { node, .. } = op {
+                    if matches!(node.kind, NodeKind::Shape(_)) {
+                        assert_eq!(node.style.stroke, Some(0xff0000ff));
+                        assert_eq!(node.material_preset, crate::node::PresetAssignment::Preset("htv".into()));
+                    }
+                }
+            }
+        }
     }
 }
