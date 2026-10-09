@@ -5,13 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Cuthulhu: GPLv3 desktop cutting software for vinyl cutters (Silhouette Cameo 5 Alpha over USB,
-GCC Puma IV over HPGL/serial). A Rust workspace engine behind a Tauri + React shell, plus a CLI
-that shares the same planning path.
-
-`README.md` is stale on status — it claims there is no app and no GUI. Both exist
-(`apps/desktop`, ten crates, a working cut workflow and trace). Trust the code and
-`docs/superpowers/plans/` over the README's status block.
+Cuthulhu: GPLv3 desktop cutting software for vinyl cutters (Silhouette Cameo 5 Alpha and the
+original Cameo over USB, GCC Puma IV over HPGL/serial). A Rust workspace engine behind a Tauri +
+React shell, plus a CLI that shares the same planning path. The desktop has two layouts: the
+simple LightBurn-style shell (`apps/desktop/ui/src/simple/`) and the classic one.
 
 `tools/` is the frozen Python protocol spike (USB decoder, HPGL/GPGL square senders). It is
 research tooling, not the product — do not grow it.
