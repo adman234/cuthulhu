@@ -82,6 +82,14 @@ cargo run -p cli -- cut square.svg --device cameo1 --dry-run   # prints the byte
 **Classic layout** in the top bar switches back to the original layers and properties window.
 The window remembers which layout you used last.
 
+## 4. Usage log
+
+Every cut started from this computer — on a local cutter or through a Cut Host — is recorded in
+`~/.config/cuthulhu/usage.jsonl` with its start and end time, operator, cutter, document, passes
+and settings, cut length and how it ended. Type a name in **Operator** in the cut dialog; it is
+remembered on that computer. **Usage log…** in the top bar lists recent jobs with totals per
+operator and per material, and **Export CSV…** saves the whole log for a spreadsheet.
+
 ## Not supported yet
 
 Track enhancing, pen (sketch) mode, print & cut with registration marks, and media size presets

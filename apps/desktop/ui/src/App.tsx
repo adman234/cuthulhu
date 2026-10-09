@@ -21,6 +21,7 @@ import type { Preset } from "./cut/viewmodel";
 import { StatusBar } from "./panels/StatusBar";
 import { CutDialog } from "./cut/CutDialog";
 import { TraceDialog } from "./trace/TraceDialog";
+import { UsageLogDialog } from "./usage/UsageLogDialog";
 import { TextDialog } from "./text/TextDialog";
 import { SimpleDock } from "./simple/SimpleDock";
 import { ColorPalette } from "./simple/ColorPalette";
@@ -150,6 +151,7 @@ export function App() {
   }, []);
   const [lastPath, setLastPath] = useState<string | null>(null);
   const [cutOpen, setCutOpen] = useState(false);
+  const [usageOpen, setUsageOpen] = useState(false);
   const [layout, setLayout] = useState<Layout>(() => readLayout(layoutStorage()));
   const toggleLayout = () => {
     const next: Layout = layout === "simple" ? "classic" : "simple";
@@ -663,6 +665,7 @@ export function App() {
           onImportFile={onImportFile}
           onCut={() => setCutOpen(true)}
           onTrace={onTrace}
+          onUsageLog={() => setUsageOpen(true)}
           layout={layout}
           onToggleLayout={toggleLayout}
         />
@@ -733,6 +736,7 @@ export function App() {
           onClose={() => setCutOpen(false)}
         />
       ) : null}
+      {usageOpen ? <UsageLogDialog onClose={() => setUsageOpen(false)} /> : null}
       {tracePath !== null ? (
         <TraceDialog path={tracePath} onInsert={onTraceInsert} onClose={() => setTracePath(null)} />
       ) : null}

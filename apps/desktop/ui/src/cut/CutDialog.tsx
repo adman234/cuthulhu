@@ -5,6 +5,7 @@ import { connectedControl, deviceBadge, forgetFrom, groupDevices, sameCutter, st
 import { PairHostDialog } from "../hosts/PairHostDialog";
 import type { Scene } from "../render/hittest";
 import { CutPreview } from "./CutPreview";
+import { loadOperator, operatorForRequest, saveOperator } from "../operator";
 import { PresetEditor } from "./PresetEditor";
 import {
   copyDraft,
@@ -186,6 +187,9 @@ export function CutDialog({
    *  safe — it joins the first rather than starting a second Job — but it would come back
    *  "already accepted", which is a confusing thing to say about a double-click. */
   const [cutInFlight, setCutInFlight] = useState(false);
+  /** Who is cutting, for the usage log: remembered on this computer, so the next person at a shared
+   *  cutter sees the last name and changes it rather than cutting under it unawares. */
+  const [operator, setOperator] = useState(loadOperator);
 
   // The whole device list in one request rather than one per host: `list_devices` already
   // re-reads every paired host in a single call, and `list_hosts` carries why any of them cannot
@@ -679,7 +683,13 @@ export function CutDialog({
     // the previous grouping until the new plan installs, and sending them under the new one
     // would cut whatever that mode happens to key the same way.
     if (!connected || plan === null || replanning) return;
-    const request = toCutRequest(connected.instance_id, plan.revision, plan.grouping, plan.rows);
+    const request = toCutRequest(
+      connected.instance_id,
+      plan.revision,
+      plan.grouping,
+      plan.rows,
+      operatorForRequest(operator),
+    );
     setAlreadyAccepted(false);
     setCutInFlight(true);
     ipc
@@ -1123,6 +1133,21 @@ export function CutDialog({
           {status.phase === "Failed" ? <span style={{ color: "var(--cut)" }}>Cut failed</span> : null}
 
           <div style={{ flex: 1 }} />
+
+          <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+            Operator
+            <input
+              aria-label="Operator"
+              type="text"
+              placeholder="your name"
+              value={operator}
+              onChange={(e) => {
+                setOperator(e.target.value);
+                saveOperator(e.target.value);
+              }}
+              style={{ width: 110 }}
+            />
+          </label>
 
           {status.actions.resume ? (
             <button aria-label="Resume" style={btn} onClick={resume}>

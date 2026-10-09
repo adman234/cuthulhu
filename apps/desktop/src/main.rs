@@ -29,6 +29,7 @@ fn force_quit(app: tauri::AppHandle, dev: tauri::State<DeviceManagerHandle>) {
 
 fn main() {
     let (dev_handle, events) = DeviceManagerHandle::new(std::sync::Arc::new(HardwareBackendFactory));
+    let dev_handle = dev_handle.with_usage_log(desktop::usage::default_usage_path());
 
     // A host that fails to load is not a reason to refuse to start — the desktop still cuts on
     // local hardware, and the operator can re-pair. Say so once rather than failing silently.
@@ -85,6 +86,8 @@ fn main() {
             ipc::settings_ranges,
             ipc::save_preset,
             ipc::delete_preset,
+            ipc::usage_log,
+            ipc::export_usage_csv,
             ipc::list_hosts,
             ipc::probe_host,
             ipc::existing_pairing,
@@ -130,6 +133,9 @@ fn main() {
     std::thread::spawn(move || {
         let mut last_progress: Option<Instant> = None;
         for event in events {
+            // Before the coalescing below, so the usage log sees every ending; the state it keeps
+            // is the device layer's, not this loop's.
+            bridge_handle.state::<DeviceManagerHandle>().observe_event(&event);
             if matches!(event.kind, DeviceEventKind::Progress { .. }) {
                 let now = Instant::now();
                 if last_progress.is_some_and(|last| now.duration_since(last) < Duration::from_millis(100)) {

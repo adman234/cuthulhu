@@ -12,6 +12,7 @@
   "delete_preset": ["id", "machineId"],
   "disconnect_device": [],
   "existing_pairing": ["address", "fingerprint"],
+  "export_usage_csv": ["path"],
   "force_quit": [],
   "forget_host": ["force", "id"],
   "get_connected_device": [],
@@ -50,5 +51,6 @@
   "trace_controls": [],
   "trace_image": ["controls", "path"],
   "travel_for_order": ["docRevision", "grouping", "passes"],
-  "undo": []
+  "undo": [],
+  "usage_log": ["limit"]
 }

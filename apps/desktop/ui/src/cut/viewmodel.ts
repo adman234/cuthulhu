@@ -49,6 +49,8 @@ export type CutRequest = {
   doc_revision: string;
   grouping: Grouping;
   passes: ConfiguredPassDto[];
+  /** Who is cutting, for the usage log. Optional on the wire: the backend defaults it. */
+  operator?: string | null;
 };
 
 // Preset type (mirrors cutplan::MaterialPreset)
@@ -403,9 +405,12 @@ export function toCutRequest(
   deviceInstanceId: string,
   docRevision: string,
   grouping: Grouping,
-  passes: PassVm[]
+  passes: PassVm[],
+  /** Sent only when given, so a caller with no operator field sends the request it always did. */
+  operator?: string | null,
 ): CutRequest {
   return {
+    ...(operator === undefined ? {} : { operator }),
     device_instance_id: deviceInstanceId,
     doc_revision: docRevision,
     grouping,

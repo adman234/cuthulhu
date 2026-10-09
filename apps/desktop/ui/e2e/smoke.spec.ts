@@ -453,8 +453,21 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       force: number | null;
       repeat_count: number | null;
     }[];
+    // Optional on the wire, as `CutRequest::operator` is: serde defaults it.
+    operator?: string | null;
   };
   let lastCutRequest: CutRequest | null = null;
+  // The usage log as `desktop::usage` keeps it, newest last. The fake writes an entry when a cut is
+  // accepted rather than when it ends: pairing a start with its ending is the Rust recorder's job,
+  // tested there; what the e2e tests here is what the dialog sends and how the log is shown.
+  type UsageEntry = {
+    started_at: string; ended_at: string; duration_s: number; operator: string | null;
+    machine_id: string; device_instance_id: string; host: string | null; document: string | null;
+    passes: { key: string; preset_id: string | null; preset_name: string | null; speed: number | null;
+      force: number | null; repeat_count: number; cut_length_mm: number }[];
+    cut_length_mm: number; outcome: "completed" | "cancelled" | "failed" | "unknown"; error: string | null;
+  };
+  const usage: UsageEntry[] = [];
   let failNextResume = false;
   let failNextCut = false;
   let failNextPlan = false;
@@ -897,6 +910,17 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       // Recorded once nothing can still refuse the request, so the hook answers the cut that was
       // accepted rather than the last one attempted.
       lastCutRequest = request;
+      const at = new Date().toISOString();
+      usage.push({
+        started_at: at, ended_at: at, duration_s: 0, operator: request.operator ?? null,
+        machine_id: connected.machine_id, device_instance_id: connected.instance_id, host: null, document: null,
+        passes: request.passes.filter((p) => p.enabled).map((p) => ({
+          key: p.key, preset_id: p.preset_id ?? null,
+          preset_name: effectivePresets(connected!.machine_id).find((x) => x.id === p.preset_id)?.name ?? null,
+          speed: p.speed, force: p.force, repeat_count: p.repeat_count ?? 1, cut_length_mm: 40,
+        })),
+        cut_length_mm: 40 * enabledIndices.length, outcome: "completed", error: null,
+      });
       if (failNextCut) {
         // The opening write dies: Sending and then Failed both go out in this same
         // synchronous burst, so the only status the frontend ever commits is the failed
@@ -1015,6 +1039,8 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       force: { min: 1, max: 33 },
       repeatCount: { min: 1, max: 10 },
     }),
+    usage_log: (a) => usage.slice().reverse().slice(0, a.limit as number),
+    export_usage_csv: () => usage.length,
     // Every refusal `desktop::device::save_preset` makes, because the editor is what must never
     // send one: an entry under a builtin's pair shadows a shipped material with no way back, an
     // id-less entry is dropped on load (a save the operator never gets back), and a setting out of
@@ -1152,7 +1178,9 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
   (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
     invoke: (cmd: string, args: Record<string, unknown> = {}) => {
       if (cmd === "plugin:dialog|save" || cmd === "plugin:dialog|open") {
-        return Promise.resolve("/mock/cuthulhu-project.cut");
+        // A folder picker (the shared presets location) answers with a folder.
+        const options = (args.options ?? {}) as { directory?: boolean };
+        return Promise.resolve(options.directory ? "/mnt/makerspace/cuthulhu" : "/mock/cuthulhu-project.cut");
       }
       if (cmd === "plugin:event|listen") {
         const id = args.handler as number;
@@ -2283,6 +2311,31 @@ test("the whole editor is operable from the keyboard alone", async ({ page }) =>
 
   await expect(page.getByLabel("Preset to manage")).toHaveValue("keyed-card");
   await expect(page.getByTestId("preset-preview")).toHaveText("Cuts at speed 8, force 22, one pass.");
+});
+
+test("the operator's name is remembered and sent with the cut, and the usage log lists the job", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await openDialogOnCameo(page);
+  await page.getByLabel("Operator").fill("Ada");
+  await page.getByRole("button", { name: "Start Cut" }).click();
+  await expect(page.getByText("Waiting for color swap")).toBeVisible();
+  const request = await callFake(page, "__test_last_cut_request") as { operator?: string | null };
+  expect(request.operator).toBe("Ada");
+
+  // Remembered on this computer: the next dialog starts with the last name.
+  await page.getByLabel("Close").click();
+  await page.getByRole("button", { name: "Cut" }).click();
+  await expect(page.getByLabel("Operator")).toHaveValue("Ada");
+  await page.getByLabel("Close").click();
+
+  await page.getByRole("button", { name: "Usage log" }).click();
+  const dialog = page.getByRole("dialog", { name: "Usage log" });
+  await expect(dialog.getByTestId("usage-row")).toHaveCount(1);
+  await expect(dialog.getByTestId("usage-row")).toContainText("Ada");
+  await expect(dialog.getByRole("table", { name: "Totals by operator" })).toContainText("Ada");
+  await dialog.getByLabel("Export CSV").click();
+  await expect(dialog.getByRole("status")).toHaveText("Exported 1 job to /mock/cuthulhu-project.cut");
 });
 
 // Greptile's P1 on the fifth push: a replan that *fails* leaves the previous plan in force —

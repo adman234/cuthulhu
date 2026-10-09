@@ -206,11 +206,11 @@ pub fn travel_for_order(
 // loop keeps the UI (and cancel_cut) responsive while it blocks.
 #[tauri::command(async)]
 pub fn cut(state: tauri::State<AppStateHandle>, dev: tauri::State<DeviceManagerHandle>, request: CutRequest) -> Result<CutStarted, IpcError> {
-    let (planned_for, passes) = {
+    let (planned_for, passes, usage) = {
         let app = state.lock().unwrap();
-        dev.prepare_cut(&app, request)?
+        dev.prepare_logged_cut(&app, request)?
     };
-    dev.execute_cut(planned_for, passes)
+    dev.execute_logged_cut(planned_for, passes, Some(usage))
 }
 
 #[tauri::command(async)]
@@ -270,6 +270,18 @@ pub fn delete_preset(machine_id: String, id: String) -> Result<(), IpcError> {
 fn presets_path() -> Result<PathBuf, IpcError> {
     cutplan::presets::default_presets_path()
         .ok_or_else(|| IpcError::new("no_config_dir", "cannot resolve presets file location"))
+}
+
+/// The newest `limit` cut jobs from the usage log, newest first.
+#[tauri::command]
+pub fn usage_log(dev: tauri::State<DeviceManagerHandle>, limit: usize) -> Result<Vec<crate::usage::UsageEntry>, IpcError> {
+    dev.usage_log(limit)
+}
+
+/// The whole usage log as CSV at `path`; answers how many jobs were written.
+#[tauri::command]
+pub fn export_usage_csv(dev: tauri::State<DeviceManagerHandle>, path: PathBuf) -> Result<usize, IpcError> {
+    dev.export_usage_csv(&path)
 }
 
 // async: reads each paired host's connection in the same order `list_devices` dials them, so

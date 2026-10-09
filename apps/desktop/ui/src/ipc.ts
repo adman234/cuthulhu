@@ -374,6 +374,55 @@ export async function deletePreset(machineId: string, id: string) {
   return invoke("delete_preset", { machineId, id });
 }
 
+// --- usage log (mirrors desktop::usage) ---
+
+export type UsageOutcome = "completed" | "cancelled" | "failed" | "unknown";
+
+/** One pass of a logged job, with the settings it was actually cut with (resolved, not typed). */
+export type UsagePass = {
+  key: PassKey;
+  preset_id: string | null;
+  preset_name: string | null;
+  speed: number | null;
+  force: number | null;
+  repeat_count: number;
+  /** This pass's share of the job's length. */
+  cut_length_mm: number;
+};
+
+/** One line of `<config_dir>/cuthulhu/usage.jsonl`. Times are RFC 3339 in UTC. */
+export type UsageEntry = {
+  started_at: string;
+  ended_at: string;
+  duration_s: number;
+  operator: string | null;
+  machine_id: string;
+  device_instance_id: string;
+  /** The Cut Host's id when the job ran on one. */
+  host: string | null;
+  /** The project's file name when it had been saved or opened. */
+  document: string | null;
+  passes: UsagePass[];
+  /** Blade travel while cutting, counting every repeat. */
+  cut_length_mm: number;
+  outcome: UsageOutcome;
+  error: string | null;
+};
+
+/** The newest `limit` jobs, newest first. */
+export async function usageLog(limit: number): Promise<UsageEntry[]> {
+  return invoke("usage_log", { limit });
+}
+
+/** Writes the whole log as CSV at `path`; answers how many jobs it holds. */
+export async function exportUsageCsv(path: string): Promise<number> {
+  return invoke("export_usage_csv", { path });
+}
+
+export async function pickCsvSavePath(): Promise<string | null> {
+  return dialogSave({ defaultPath: "cuthulhu-usage.csv", filters: [{ name: "CSV", extensions: ["csv"] }] });
+}
+
 const CUT_FILTER = [{ name: "cuthulhu project", extensions: ["cut"] }];
 
 export async function pickSavePath(): Promise<string | null> {
