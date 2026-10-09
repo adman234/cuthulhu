@@ -30,8 +30,9 @@ impl Job {
 }
 
 /// Where printed registration marks sit on the sheet, in millimetres from the Document's origin
-/// (the sheet's top-left corner): `origin` is the top-left mark's outer corner, and `width` and
-/// `length` are the distances from it to the outer edges of the top-right and bottom-left marks.
+/// (the sheet's top-left corner): `origin` is the top-left square's top-left corner, and `width`
+/// and `length` are the distances from it to the corners of the top-right and bottom-left L's —
+/// the mark-to-mark distances the machine searches over.
 /// Once the machine has found them, the mark origin is the origin the Job's geometry is cut from.
 /// [src: inkscape-silhouette sendto_silhouette.py L852-855 (GPL-2.0+)]
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

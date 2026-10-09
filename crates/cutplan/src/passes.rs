@@ -37,10 +37,21 @@ pub struct DocumentPasses {
     /// The machine the document targets, if it names one. Carried here because
     /// preflight checks it and `plan_cut` no longer sees the `Document`.
     pub machine_id: Option<String>,
+    /// The registration marks the cut is made against, when the Document prints some and asks
+    /// for it — the frame every Job of the plan is cut in. Carried for the same reason as
+    /// `machine_id`.
+    #[serde(default)]
+    pub registration: Option<driver_core::Registration>,
 }
 
 #[derive(Debug, PartialEq)]
-pub enum PlanError { BadShape(NodeId, String), MissingNode(NodeId), CycleDetected }
+pub enum PlanError {
+    BadShape(NodeId, String),
+    MissingNode(NodeId),
+    CycleDetected,
+    /// The Document asks for registration against marks that can no longer be read.
+    Registration(document::RegistrationError),
+}
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -53,6 +64,7 @@ impl std::fmt::Display for PlanError {
                 write!(f, "shape #{} is referenced by the document but missing from it", node.0),
             PlanError::CycleDetected =>
                 write!(f, "the document's shapes contain each other in a loop"),
+            PlanError::Registration(e) => write!(f, "{e}"),
         }
     }
 }
@@ -205,11 +217,19 @@ pub fn plan_passes_with(doc: &Document, grouping: Grouping) -> Result<DocumentPa
         }
     }
 
+    // Refused rather than dropped: a sheet printed for registration and cut without it is cut
+    // in the wrong place, which is worse than no cut.
+    let registration = doc.active_registration().map_err(PlanError::Registration)?
+        .map(|a| driver_core::Registration {
+            origin_x_mm: a.origin_x_mm, origin_y_mm: a.origin_y_mm, width_mm: a.width_mm, length_mm: a.length_mm,
+        });
+
     Ok(DocumentPasses {
         passes,
         skipped_not_cut,
         doc_revision: doc_revision(doc),
         machine_id: doc.machine.as_ref().map(|m| m.id.clone()),
+        registration,
     })
 }
 

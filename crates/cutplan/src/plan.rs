@@ -11,7 +11,7 @@ use driver_core::{Job, MachineCaps, MachineProfile, Settings};
 
 use crate::pass_key::PassKey;
 use crate::passes::DocumentPasses;
-use crate::preflight::{preflight, ConfiguredPass, PreflightError};
+use crate::preflight::{preflight, preflight_registration, ConfiguredPass, PreflightError};
 
 /// One pass the caller wants cut, named by the key `plan_passes` gave it. Order within
 /// `PlanOptions::passes` is the order they are cut.
@@ -149,6 +149,8 @@ pub fn plan_cut(
 
     preflight(&configured, profile, caps, planned.machine_id.as_deref(), opts.allow_out_of_bounds)
         .map_err(CutError::Preflight)?;
+    preflight_registration(&configured, planned.registration.as_ref(), profile, caps)
+        .map_err(CutError::Preflight)?;
 
     Ok(CutPlan {
         passes: configured
@@ -158,7 +160,7 @@ pub fn plan_cut(
                 job: Job {
                     polylines: c.pass.shapes.iter().flat_map(|s| s.polylines.iter().cloned()).collect(),
                     settings: c.settings.clone(),
-                    registration: None,
+                    registration: planned.registration,
                 },
             })
             .collect(),
@@ -347,5 +349,60 @@ mod tests {
         let wrapped = CutError::Preflight(PreflightError::NothingToCut);
         assert_eq!(wrapped.code(), "nothing_to_cut");
         assert_eq!(wrapped.to_string(), "no pass selected for this cut has any geometry");
+    }
+
+    /// A 5x5 red rect at (tx, ty) on a Document carrying Letter registration marks.
+    fn registered(tx: f64, ty: f64) -> DocumentPasses {
+        let mut ed = Editor::new();
+        ed.add_registration_marks(document::RegistrationArea::for_paper(document::Paper::Letter)).unwrap();
+        let root = ed.doc.root;
+        let id = ed.doc.ids.next();
+        let mut node = Node::shape(id, ShapeKind::Rect { w: 5.0, h: 5.0 });
+        node.style = Style { stroke: Some(RED), fill: None };
+        node.transform = Affine::translate(tx, ty);
+        ed.commit(Delta(vec![NodeOp::Add { parent: root, node, index: usize::MAX }]));
+        plan_passes(&ed.doc).unwrap()
+    }
+
+    fn registering_caps() -> MachineCaps { MachineCaps { supports_registration: true, ..caps() } }
+
+    /// The marks are printed, not cut — only the rect is a pass — and every Job carries the frame
+    /// the marks define, which is how the Driver learns to search and where to cut from.
+    #[test]
+    fn a_registered_plan_carries_the_marks_to_every_job() {
+        let planned = registered(50.0, 50.0);
+        assert_eq!(planned.skipped_not_cut, 3, "the three marks are not cut");
+        let plan = plan_cut(&planned, &profile(295.0, 2999.0), &registering_caps(), &opts(select(&[RED]))).unwrap();
+        let reg = plan.passes[0].job.registration.expect("registered");
+        assert_eq!((reg.origin_x_mm, reg.origin_y_mm), (10.0, 10.0));
+        assert!((reg.width_mm - 195.9).abs() < 1e-9 && (reg.length_mm - 259.4).abs() < 1e-9);
+        assert!(plan.cut_passes().iter().all(|p| p.job.registration == Some(reg)));
+    }
+
+    #[test]
+    fn registration_on_a_machine_that_cannot_find_marks_is_refused() {
+        let planned = registered(50.0, 50.0);
+        let err = plan_cut(&planned, &profile(330.0, 3000.0), &caps(), &opts(select(&[RED]))).unwrap_err();
+        assert_eq!(err.code(), "registration_unsupported");
+        assert_eq!(err.to_string(), "the Test cannot find registration marks; turn registration off to cut without them");
+    }
+
+    /// Past the marks the machine's cutting area ends, so a shape there is refused by name
+    /// rather than clipped on the material — even with the bed's escape hatch open.
+    #[test]
+    fn a_shape_outside_the_marks_is_refused() {
+        let planned = registered(5.0, 50.0); // left of the marks' x = 10
+        let mut o = opts(select(&[RED]));
+        o.allow_out_of_bounds = true;
+        let err = plan_cut(&planned, &profile(295.0, 2999.0), &registering_caps(), &o).unwrap_err();
+        assert!(matches!(err, CutError::Preflight(PreflightError::OutsideRegistration { .. })), "{err:?}");
+        let narrow = plan_cut(&registered(50.0, 50.0), &profile(150.0, 2999.0), &registering_caps(), &opts(select(&[RED]))).unwrap_err();
+        assert_eq!(narrow.code(), "registration_too_large");
+    }
+
+    #[test]
+    fn a_plan_without_marks_is_not_registered() {
+        let plan = plan_cut(&passes(&[(RED, 0.0, 0.0)]), &profile(500.0, 500.0), &caps(), &opts(select(&[RED]))).unwrap();
+        assert_eq!(plan.passes[0].job.registration, None);
     }
 }

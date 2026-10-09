@@ -25,6 +25,8 @@ pub enum PassFault {
     TooLarge(usize),
     /// An empty dispatch: no Pass to number, so no index.
     NoPasses,
+    /// A print & cut dispatch for a machine that cannot find registration marks.
+    RegistrationUnsupported(usize),
 }
 
 /// Passes are numbered from 1 here, unlike the indices everywhere else in this
@@ -43,6 +45,8 @@ impl std::fmt::Display for PassFault {
                 write!(f, "the encoded cut is about {} MB, over the {} MB limit",
                        bytes.div_ceil(1024 * 1024), MAX_ENCODED_BYTES / (1024 * 1024)),
             PassFault::NoPasses => write!(f, "this cut has no passes"),
+            PassFault::RegistrationUnsupported(i) =>
+                write!(f, "pass {} is registered against printed marks, which this cutter cannot find", i + 1),
         }
     }
 }
@@ -82,6 +86,13 @@ pub fn check_passes(
                     });
                 }
             }
+        }
+    }
+    // The desktop's Preflight judged registration against its own idea of this machine; the
+    // machine actually attached is the one that has to find the marks.
+    for (i, pass) in passes.iter().enumerate() {
+        if pass.job.registration.is_some() && !caps.supports_registration {
+            return Err(PassFault::RegistrationUnsupported(i));
         }
     }
     for (i, pass) in passes.iter().enumerate() {
@@ -196,5 +207,16 @@ mod tests {
         let f = PassFault::OutOfBounds { pass: 2, bounds: (300.0, 300.0) };
         assert_eq!(f.to_string(), "pass 3 lies outside the 300 x 300 mm cutting area");
         assert_eq!(PassFault::NonFinite(0).to_string(), "pass 1 has a coordinate that is not a finite number");
+    }
+
+    #[test]
+    fn a_registered_dispatch_needs_a_machine_that_registers() {
+        let registration = Some(driver_core::Registration { origin_x_mm: 10.0, origin_y_mm: 10.0, width_mm: 100.0, length_mm: 100.0 });
+        let p = CutPass { job: Job { polylines: vec![square()], settings: Settings::default(), registration } };
+        assert_eq!(check_passes(std::slice::from_ref(&p), &profile(), &caps()), Err(PassFault::RegistrationUnsupported(0)));
+        assert_eq!(PassFault::RegistrationUnsupported(0).to_string(),
+            "pass 1 is registered against printed marks, which this cutter cannot find");
+        let registers = MachineCaps { supports_registration: true, ..caps() };
+        assert!(check_passes(&[p], &profile(), &registers).is_ok());
     }
 }
