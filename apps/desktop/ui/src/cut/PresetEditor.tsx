@@ -161,6 +161,51 @@ export function PresetEditor({
             </label>
           </div>
 
+          <div style={rowStyle}>
+            <label>
+              Blade depth
+              <input
+                aria-label="Preset blade depth"
+                type="number"
+                min={ranges.bladeDepth?.min}
+                max={ranges.bladeDepth?.max}
+                disabled={mode === "builtin" || busy}
+                value={draft.bladeDepth ?? ""}
+                placeholder="not set"
+                onChange={(e) => onChange({ bladeDepth: numeric(e.target.value) })}
+                style={{ width: 60, marginLeft: 4 }}
+              />
+            </label>
+            <label>
+              <input
+                aria-label="Preset cut mirrored"
+                type="checkbox"
+                disabled={mode === "builtin" || busy}
+                checked={draft.mirror}
+                onChange={(e) => onChange({ mirror: e.target.checked })}
+              />
+              Cut mirrored (HTV)
+            </label>
+          </div>
+          <label style={{ ...rowStyle, alignItems: "flex-start" }}>
+            Notes
+            <textarea
+              aria-label="Preset notes"
+              disabled={mode === "builtin" || busy}
+              value={draft.notes}
+              placeholder="brand, which side up, anything the next person should know"
+              rows={2}
+              onChange={(e) => onChange({ notes: e.target.value })}
+              style={{ flex: 1, resize: "vertical", fontFamily: "inherit", fontSize: 12 }}
+            />
+          </label>
+          {/* Advisory, and said so: the depth is set by hand on the blade and nothing sends it, and
+              mirroring is not applied to the design for the operator. */}
+          <div style={{ fontSize: 12, color: "var(--muted)" }}>
+            Blade depth and Cut mirrored are reminders shown when this preset is picked; set the blade
+            by hand and flip the design yourself.
+          </div>
+
           {/* Speed and force stay editable on a cutter that takes them from its own panel, unlike a
               pass row's: the preset is stored for that machine and outlives this session, and a
               disabled field is one an operator cannot correct a value out of. What the machine

@@ -10,6 +10,7 @@ import {
   freshPresetId,
   isDirty,
   newDraft,
+  presetAdvice,
   presetPreview,
   selectAfterDelete,
   toPreset,
@@ -162,6 +163,48 @@ describe("toPreset", () => {
     expect(p.name).toBe("Card");
     expect(p.machine_id).toBe("puma");
     expect(p.settings.repeat_count).toBe(1);
+  });
+});
+
+describe("the material library fields", () => {
+  const FILM = preset({ id: "film", notes: "Siser EasyWeed, shiny side down", blade_depth: 2, mirror: true });
+
+  it("read from a stored entry, default on an older one, and count as edits", () => {
+    const draft = draftOf(FILM);
+    expect([draft.notes, draft.bladeDepth, draft.mirror]).toEqual(["Siser EasyWeed, shiny side down", 2, true]);
+    expect([draftOf(MINE).notes, draftOf(MINE).bladeDepth, draftOf(MINE).mirror]).toEqual(["", null, false]);
+    expect(isDirty({ ...draft, notes: "x" }, draft)).toBe(true);
+    expect(isDirty({ ...draft, bladeDepth: 3 }, draft)).toBe(true);
+    expect(isDirty({ ...draft, mirror: false }, draft)).toBe(true);
+  });
+
+  it("refuses a blade depth off the dial the backend published, and only then", () => {
+    const withDial = { ...RANGES, bladeDepth: { min: 1, max: 10 } };
+    expect(draftFault({ ...draftOf(FILM), bladeDepth: 11 }, [FILM], withDial)).toBe(
+      "Blade depth must be a whole number from 1 to 10.",
+    );
+    expect(draftFault({ ...draftOf(FILM), bladeDepth: 2.5 }, [FILM], withDial)).not.toBeNull();
+    expect(draftFault({ ...draftOf(FILM), bladeDepth: null }, [FILM], withDial)).toBeNull();
+    // An older backend publishes no dial and refuses a bad depth itself.
+    expect(draftFault({ ...draftOf(FILM), bladeDepth: 11 }, [FILM], RANGES)).toBeNull();
+  });
+
+  it("are written, with the notes trimmed and the stored entry's other settings kept", () => {
+    const tracked = preset({ id: "t", settings: { speed: 5, force: 20, repeat_count: 1, track_enhancing: true, tool: "Pen" } });
+    const written = toPreset({ ...draftOf(tracked), notes: "  matte  ", bladeDepth: 3, mirror: true }, "cameo1", [tracked], tracked);
+    expect(written.notes).toBe("matte");
+    expect(written.blade_depth).toBe(3);
+    expect(written.mirror).toBe(true);
+    expect(written.settings.track_enhancing).toBe(true);
+    expect(written.settings.tool).toBe("Pen");
+  });
+
+  it("say what a pass row should tell the operator, or nothing", () => {
+    expect(presetAdvice(FILM)).toBe(
+      "Blade depth 2 · Cut mirrored (flip the design before cutting) · Siser EasyWeed, shiny side down",
+    );
+    expect(presetAdvice(MINE)).toBeNull();
+    expect(presetAdvice(undefined)).toBeNull();
   });
 });
 

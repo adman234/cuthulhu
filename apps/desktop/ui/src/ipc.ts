@@ -320,7 +320,14 @@ export async function machineCaps(machineId: string) {
  *  `traceControls` is: `cutplan::preflight` is what refuses a cut whose settings sit outside
  *  these, so the preset editor asks it for the bounds instead of keeping a second copy to drift. */
 export type SettingRange = { min: number; max: number };
-export type SettingsRanges = { speed: SettingRange; force: SettingRange; repeatCount: SettingRange };
+export type SettingsRanges = {
+  speed: SettingRange;
+  force: SettingRange;
+  repeatCount: SettingRange;
+  /** A preset's advisory ratchet-blade depth. Absent from an older backend, which then refuses an
+   *  out-of-range depth itself. */
+  bladeDepth?: SettingRange;
+};
 
 /** The shared ranges, or — given a machine — the ranges that machine admits (its own speed
  *  ceiling). */

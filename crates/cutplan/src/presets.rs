@@ -223,6 +223,12 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
         // Cameo 1 presets: the speed and force of inkscape-silhouette's media table, which it took
         // from robocut's cut dialog. No HTV row because that table has none; the pen row waits
         // for a pen tool (it needs `FC0`, not the blade offset).
+        //
+        // No `blade_depth` either, though the table has a depth column: it is 1 on every cutting
+        // row, card and magnetic sheet included, which is the auto-blade command's placeholder
+        // rather than a ratchet-blade setting anyone measured. Shipping it would tell an operator
+        // to cut magnet sheet at the depth for thin film. No `mirror` for the same reason as no
+        // HTV row: nothing here is a heat-transfer material.
         // [src: inkscape-silhouette silhouette/Graphtec.py L84-118 (GPL-2.0+)]
         MaterialPreset {
             id: "cameo1-vinyl-sticker".into(),
@@ -980,6 +986,17 @@ mod tests {
         // Verify at least one builtin is present
         let has_builtin = loaded.iter().any(|p| p.builtin);
         assert!(has_builtin);
+    }
+
+    /// The material library's fields stay empty on what ships until a source states them — see
+    /// the comment over the Cameo 1 rows for why the media table's depth column does not.
+    #[test]
+    fn builtins_carry_no_unsourced_notes_depth_or_mirror() {
+        for p in builtin_presets() {
+            assert!(p.notes.is_empty(), "{} ships notes", p.id);
+            assert_eq!(p.blade_depth, None, "{} ships a blade depth", p.id);
+            assert!(!p.mirror, "{} ships mirrored", p.id);
+        }
     }
 
     #[test]

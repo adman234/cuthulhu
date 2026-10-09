@@ -487,6 +487,7 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     id: string; name: string; machine_id: string;
     settings: { speed: number | null; force: number | null; repeat_count: number };
     builtin: boolean;
+    notes?: string; blade_depth?: number | null; mirror?: boolean;
   };
   const BUILTIN_PRESETS: MaterialPreset[] = [
     { id: "cameo5-htv", name: "HTV", machine_id: "cameo5",
@@ -1047,6 +1048,7 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       speed: { min: 1, max: 30 },
       force: { min: 1, max: 33 },
       repeatCount: { min: 1, max: 10 },
+      bladeDepth: { min: 1, max: 10 },
     }),
     // Mirrors `desktop::settings`: a folder means `presets.json` inside it, and a location whose
     // folder is not there is refused before anything is saved.
@@ -1092,6 +1094,9 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
         if (v !== null && (v < range[field][0] || v > range[field][1])) {
           throw ipcError("invalid_preset", `${field} must be ${range[field][0]}..=${range[field][1]}`);
         }
+      }
+      if (p.blade_depth != null && (p.blade_depth < 1 || p.blade_depth > 10)) {
+        throw ipcError("invalid_preset", `blade depth must be 1..=10, not ${p.blade_depth}`);
       }
       if (presetsPath !== null && !shareMounted) throw unreachable();
       // Last, because the file is the last thing production touches: every refusal above is
@@ -2338,6 +2343,33 @@ test("the whole editor is operable from the keyboard alone", async ({ page }) =>
 
   await expect(page.getByLabel("Preset to manage")).toHaveValue("keyed-card");
   await expect(page.getByTestId("preset-preview")).toHaveText("Cuts at speed 8, force 22, one pass.");
+});
+
+test("a preset's notes, blade depth and mirror are saved and shown where a pass picks it", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await openDialogOnCameo(page);
+
+  await page.getByLabel("New preset").click();
+  await page.getByLabel("Preset name").fill("Flex HTV");
+  await page.getByLabel("Preset blade depth").fill("11");
+  // Refused before anything is written, against the dial the backend published.
+  await expect(page.getByTestId("preset-error")).toHaveText("Blade depth must be a whole number from 1 to 10.");
+  await expect(page.getByLabel("Save preset", { exact: true })).toBeDisabled();
+  await page.getByLabel("Preset blade depth").fill("2");
+  await page.getByLabel("Preset cut mirrored").check();
+  await page.getByLabel("Preset notes").fill("Siser EasyWeed, shiny side down");
+  await page.getByLabel("Save preset", { exact: true }).click();
+  await expect(page.getByLabel("Preset to manage")).toHaveValue("flex-htv");
+  // Re-read from what was stored, not left over from what was typed.
+  await expect(page.getByLabel("Preset blade depth")).toHaveValue("2");
+  await expect(page.getByLabel("Preset cut mirrored")).toBeChecked();
+
+  await expect(page.getByTestId("cut-pass-advice")).toHaveCount(0);
+  await page.getByLabel("Preset for pass 1").selectOption("preset:flex-htv");
+  await expect(page.getByTestId("cut-pass-advice")).toHaveText(
+    "Blade depth 2 · Cut mirrored (flip the design before cutting) · Siser EasyWeed, shiny side down",
+  );
 });
 
 test("the operator's name is remembered and sent with the cut, and the usage log lists the job", async ({ page }) => {

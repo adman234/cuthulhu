@@ -104,6 +104,13 @@ folder itself, so an unmounted share is not silently replaced by a local copy. T
 a preset in the same second can still overwrite each other's change; edit presets from one
 computer at a time.
 
+### Notes, blade depth and mirror
+
+A preset can carry **Notes** (brand, which side up), an advisory **Blade depth** (1–10, for the
+Cameo 1's hand-set ratchet blade — Cuthulhu never sends it) and **Cut mirrored (HTV)**. All three
+are shown under the material picker when a pass uses that preset. Cut mirrored is a reminder: the
+design is not flipped for you yet.
+
 ## Not supported yet
 
 Track enhancing, pen (sketch) mode, print & cut with registration marks, and media size presets

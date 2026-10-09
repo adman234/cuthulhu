@@ -15,6 +15,7 @@ import {
   editorMode,
   isDirty,
   newDraft,
+  presetAdvice,
   selectAfterDelete,
   toPreset,
   type PresetDraft,
@@ -605,7 +606,8 @@ export function CutDialog({
 
   const savePresetDraft = (then?: () => void) => {
     if (draft === null || connected === null || presetFault !== null) return;
-    writePreset(toPreset(draft, connected.machine_id, presets), then);
+    const stored = draft.id === "" ? undefined : presets.find((p) => p.id === draft.id);
+    writePreset(toPreset(draft, connected.machine_id, presets, stored), then);
   };
 
   /** A copy is written at once rather than opened as a draft: copying is the only way to edit what
@@ -614,7 +616,7 @@ export function CutDialog({
   const copyPreset = () => {
     const source = draft === null ? undefined : presets.find((p) => p.id === draft.id);
     if (source === undefined || connected === null) return;
-    writePreset(toPreset(copyDraft(source, presets), connected.machine_id, presets));
+    writePreset(toPreset(copyDraft(source, presets), connected.machine_id, presets, source));
   };
 
   const deletePresetDraft = () => {
@@ -1050,11 +1052,16 @@ export function CutDialog({
              *  a pass: a bare-id picker has to spend the empty string as its "no preset" sentinel,
              *  and an id can be any string an operator typed, that one included. */
             const picker = presetPicker(row.presetId, presetLookup);
+            /** What the picked material says beyond its settings — the depth to set the blade to,
+             *  whether to mirror, the notes — shown where the material is chosen. */
+            const advice = presetAdvice(
+              row.presetId === null ? null : presetLookup.presets.find((p) => p.id === row.presetId),
+            );
             return (
+              <div key={row.key} style={{ border: "1px solid var(--border)", padding: 6 }}>
               <div
-                key={row.key}
                 data-testid="cut-pass-row"
-                style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, border: "1px solid var(--border)", padding: 6 }}
+                style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}
               >
                 {label.swatch !== null ? (
                   <span
@@ -1074,6 +1081,7 @@ export function CutDialog({
                 </label>
                 <select
                   aria-label={`Preset for pass ${i + 1}`}
+                  title={advice ?? undefined}
                   disabled={replanning}
                   value={picker.selected}
                   onChange={(e) => updateRow(i, { presetId: presetIdForKey(e.target.value) })}
@@ -1119,6 +1127,12 @@ export function CutDialog({
                 <button style={btn} onClick={() => movePass(i, 1)} disabled={replanning || i === (plan?.rows.length ?? 0) - 1}>
                   Down
                 </button>
+              </div>
+              {advice !== null ? (
+                <div data-testid="cut-pass-advice" style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
+                  {advice}
+                </div>
+              ) : null}
               </div>
             );
           })}

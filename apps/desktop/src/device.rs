@@ -1611,6 +1611,17 @@ pub fn save_preset(path: &Path, preset: MaterialPreset) -> Result<(), IpcError> 
     if preset.name.trim().is_empty() {
         return Err(IpcError::new("invalid_preset", "a material preset needs a name"));
     }
+    // The depth is advice the operator reads, never sent, so a value off the blade's dial is a typo
+    // that would send them hunting for a setting that does not exist.
+    if let Some(depth) = preset.blade_depth {
+        let dial = cutplan::preflight::SETTINGS_RANGES.blade_depth;
+        if !dial.admits(u32::from(depth)) {
+            return Err(IpcError::new(
+                "invalid_preset",
+                format!("blade depth must be {}..={}, not {depth}", dial.min, dial.max),
+            ));
+        }
+    }
     // Preflight refuses these settings at the cut, so storing them makes a material the operator
     // can pick from the dialog and never cut with.
     if let Some(reason) = cutplan::preflight::preset_settings_out_of_range(&preset.settings) {
@@ -3829,6 +3840,27 @@ mod tests {
         }
         assert!(user_entries(&path).unwrap().is_empty(),
             "a refused save still wrote an entry to the file");
+    }
+
+    /// The material library's fields: a depth off the ratchet blade's 1–10 dial is refused, and a
+    /// preset carrying notes, a depth and the mirror flag keeps all three through a save and a read.
+    #[test]
+    fn a_blade_depth_off_the_dial_is_refused_and_the_library_fields_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("presets.json");
+        for depth in [0u8, 11] {
+            let p = MaterialPreset { blade_depth: Some(depth), ..a_user_preset("cameo1", "htv", 10) };
+            assert_eq!(save_preset(&path, p).unwrap_err().code, "invalid_preset", "depth {depth} was saved");
+        }
+        let htv = MaterialPreset {
+            notes: "Siser EasyWeed, shiny side down".into(),
+            blade_depth: Some(2),
+            mirror: true,
+            ..a_user_preset("cameo1", "htv", 10)
+        };
+        save_preset(&path, htv.clone()).unwrap();
+        let listed = list_presets(&path, "cameo1").unwrap();
+        assert_eq!(listed.iter().find(|p| p.id == "htv"), Some(&htv));
     }
 
     /// A frontend that sends no operator — the simple dock, an older build — still cuts.
