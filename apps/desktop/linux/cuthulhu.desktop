@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Tauri renders this with handlebars ({{exec}}, {{icon}}) into the .deb and .rpm desktop entry.
+# Tauri renders this with handlebars (exec and icon are filled in) into the .deb and .rpm entry.
 # Written out rather than left to `bundle.category`, which can name one category, not Engineering
 # beside Graphics. StartupWMClass is the binary name because GTK takes the window class from it.
 [Desktop Entry]
