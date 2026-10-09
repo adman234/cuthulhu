@@ -27,6 +27,8 @@ type Props = {
   onDistribute: (axis: Axis) => void;
   onChangeCutLineType: (v: CutLineTypeJson) => void;
   onChangeMaterialPreset: (v: PresetAssignmentJson) => void;
+  /** Opens the text editor on the one selected Text node; null when the selection is not that. */
+  onEditText: (() => void) | null;
 };
 
 /** What the material row reads for each state. Exported for its own test: it is the consumer
@@ -51,7 +53,7 @@ export function materialLabel(
 
 export function PropertiesPanel({ bounds, cutLineType, materialPreset, effectiveMaterial, presets,
                                   onChangeX, onChangeY, onChangeW, onChangeH, unitCount, editsLocked, distributeBlocked, onAlign, onDistribute,
-                                  onChangeCutLineType, onChangeMaterialPreset }: Props) {
+                                  onChangeCutLineType, onChangeMaterialPreset, onEditText }: Props) {
   return (
     <div style={{ padding: 8, display: "flex", flexDirection: "column", gap: 6, overflowY: "auto" }}>
       <div style={{ fontSize: 11, color: "var(--muted)", textTransform: "uppercase" }}>Properties</div>
@@ -62,6 +64,17 @@ export function PropertiesPanel({ bounds, cutLineType, materialPreset, effective
           <NumberField label="W" value={bounds.w} min={0} disabled={editsLocked !== null} onChange={onChangeW} />
           <NumberField label="H" value={bounds.h} min={0} disabled={editsLocked !== null} onChange={onChangeH} />
         </>
+      ) : null}
+      {onEditText ? (
+        <button
+          aria-label="Edit text…"
+          disabled={editsLocked !== null}
+          title={editsLocked ?? undefined}
+          onClick={onEditText}
+          style={{ background: "var(--panel)", color: "var(--text)", border: "1px solid var(--border)", padding: "4px 8px", cursor: "pointer" }}
+        >
+          Edit text…
+        </button>
       ) : null}
       {/* Also outside it, since aligning is mostly for multi-node selections. Always shown, disabled
           when it cannot act, so the buttons do not jump the rows below them in and out. */}

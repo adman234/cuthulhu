@@ -15,14 +15,21 @@ const FLATTEN_TOL: f64 = 0.1;
 
 type Contour = Vec<[f64; 2]>;
 type Shape = Vec<Contour>; // one shape: outer contour(s) + holes, all fed through NonZero fill
+/// What the overlay hands back: separate shapes, each an outer contour followed by its holes.
+pub(crate) type Shapes = Vec<Shape>;
 
-fn path_to_shape(p: &Path) -> Shape {
+pub(crate) fn path_to_shape(p: &Path) -> Shape {
     p.flatten(FLATTEN_TOL).into_iter().filter_map(|poly| {
         let mut pts: Vec<[f64; 2]> = poly.iter().map(|pt| [pt.x, pt.y]).collect();
         // flatten() closes polylines by repeating the start point; i_overlay auto-closes contours.
         if pts.len() > 1 && pts.first() == pts.last() { pts.pop(); }
         if pts.len() < 3 { None } else { Some(pts) }
     }).collect()
+}
+
+pub(crate) fn shapes_to_path(shapes: &Shapes) -> Path {
+    let flat: Shape = shapes.iter().flatten().cloned().collect();
+    shape_to_path(&flat)
 }
 
 fn shape_to_path(shape: &Shape) -> Path {

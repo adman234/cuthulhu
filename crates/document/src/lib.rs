@@ -12,3 +12,4 @@ pub use machine::*;
 pub mod job;
 pub use job::*;
 pub mod snapshot;
+pub mod shape_tools;

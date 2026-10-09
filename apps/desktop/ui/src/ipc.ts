@@ -36,6 +36,36 @@ export async function addText(args: Args) {
   return invoke("add_text", args);
 }
 
+/** A new contour `distanceMm` around the selection (negative insets), one undo. */
+export async function offsetShapes(args: { ids: number[]; distanceMm: number; union: boolean; join: "Round" | "Miter" | "Bevel" }) {
+  return invoke("offset_shapes", args);
+}
+
+/** A box `marginMm` around the selection, with weed lines `lineSpacingMm` apart (null: none). */
+export async function weedBox(args: { ids: number[]; marginMm: number; lineSpacingMm: number | null }) {
+  return invoke("weed_box", args);
+}
+
+/** The selection repeated into a `cols` × `rows` grid, gaps measured between boxes; one undo. */
+export async function arrayCopies(args: { ids: number[]; cols: number; rows: number; gapXMm: number; gapYMm: number }) {
+  return invoke("array_copies", args);
+}
+
+/** Rewrite a Text node's words, size and family in place; one undo. */
+export async function updateText(args: { id: number; family: string; sizeMm: number; text: string }) {
+  return invoke("update_text", args);
+}
+
+/** Every selected shape (and every shape under a selected container) becomes a Path of its outline. */
+export async function convertToPath(args: { ids: number[] }) {
+  return invoke("convert_to_path", args);
+}
+
+/** The selection unioned into one Path, replacing it; one undo. */
+export async function weld(args: { ids: number[] }) {
+  return invoke("weld", args);
+}
+
 export async function deleteNodes(args: Args) {
   return invoke("delete", args);
 }

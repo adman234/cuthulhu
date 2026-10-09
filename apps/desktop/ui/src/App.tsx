@@ -22,9 +22,14 @@ import { StatusBar } from "./panels/StatusBar";
 import { CutDialog } from "./cut/CutDialog";
 import { TraceDialog } from "./trace/TraceDialog";
 import { TextDialog } from "./text/TextDialog";
+import { selectedText, type TextSource } from "./text/viewmodel";
 import { SimpleDock } from "./simple/SimpleDock";
 import { ColorPalette } from "./simple/ColorPalette";
 import { readLayout, writeLayout, type Layout } from "./simple/layout";
+import { ShapeToolDialog } from "./shapes/ShapeToolDialog";
+import { COPIES_FORM, NEST_FORM, OFFSET_FORM, WEED_FORM, nestRefusal, type NestRequest } from "./shapes/viewmodel";
+import { nest } from "./interaction/nest";
+import type { ShapeTool } from "./panels/ToolRail";
 
 /** `window.localStorage` itself can throw (blocked site data), not just its methods. */
 function layoutStorage(): Storage | null {
@@ -43,7 +48,9 @@ export type { Affine6 };
 export type ShapeKindJson =
   | { Rect: { w: number; h: number } }
   | { Ellipse: { rx: number; ry: number } }
-  | { Text: { family: string; size_mm: number; text: string } }
+  // `d` is the outline the text was last drawn with; empty only in a document from before it was
+  // cached (see `ShapeKind::Text`), which then shows no geometry until it is edited.
+  | { Text: { family: string; size_mm: number; text: string; d?: string } }
   | { Path: { d: string } };
 
 export type NodeKindJson = "Layer" | "Group" | { Shape: ShapeKindJson };
@@ -84,16 +91,15 @@ function shapeBounds(kind: ShapeKindJson) {
     // Ellipse's local space is centered at (rx, ry), bounds 0..2rx / 0..2ry.
     return { x: 0, y: 0, w: kind.Ellipse.rx * 2, h: kind.Ellipse.ry * 2 };
   }
-  // Text nodes are converted server-side into a Path before insertion (add_text mints a
-  // Path node), so this is the real Path bounds path too.
   if ("Path" in kind) return pathBounds(kind.Path.d) ?? { x: 0, y: 0, w: 0, h: 0 };
-  return { x: 0, y: 0, w: 0, h: 0 }; // bare Text kind shouldn't reach here at runtime
+  return pathBounds(kind.Text.d ?? "") ?? { x: 0, y: 0, w: 0, h: 0 };
 }
 
 function shapeGeom(kind: ShapeKindJson): ShapeGeom | undefined {
   if ("Rect" in kind) return { t: "rect", w: kind.Rect.w, h: kind.Rect.h };
   if ("Ellipse" in kind) return { t: "ellipse", rx: kind.Ellipse.rx, ry: kind.Ellipse.ry };
   if ("Path" in kind) return { t: "path", d: kind.Path.d };
+  if ("Text" in kind && kind.Text.d) return { t: "path", d: kind.Text.d };
   return undefined;
 }
 
@@ -179,7 +185,9 @@ export function App() {
     writeLayout(layoutStorage(), next);
     setLayout(next);
   };
-  const [textOpen, setTextOpen] = useState(false);
+  // Which text the dialog is for: a new one, or the Text node it is rewriting.
+  const [textOpen, setTextOpen] = useState<null | "new" | TextSource>(null);
+  const [shapeTool, setShapeTool] = useState<"offset" | "weed" | "copies" | "nest" | null>(null);
   const [tracePath, setTracePath] = useState<string | null>(null);
   const [status, setStatus] = useState<ipc.CutStatus>(ipc.DISCONNECTED_STATUS);
   /** The machine's material presets, for the properties panel's control. Loaded here rather
@@ -536,6 +544,7 @@ export function App() {
   );
 
   const cutLineType = doc ? selectionCutLineType(doc.nodes, selected) : null;
+  const textSelected = doc ? selectedText(doc.nodes, selected) : null;
 
   const setStrokeColor = (rgba: number) => {
     if (selected.length === 0) return;
@@ -586,6 +595,51 @@ export function App() {
     [edit, selected],
   );
 
+  // Commands that add shapes select what they added, so the next move or delete acts on it.
+  // Only the outermost of them: a weed box's Group carries its border and lines along.
+  const selectAdded = (delta: unknown) => {
+    if (!Array.isArray(delta)) return;
+    const adds = (delta as NodeOpJson[]).flatMap((o) => ("Add" in o ? [o.Add] : []));
+    const ids = new Set(adds.map((a) => a.node.id));
+    const outer = adds.filter((a) => !ids.has(a.parent)).map((a) => a.node.id);
+    if (outer.length > 0) setSelected(outer);
+  };
+  const noSelection = selected.length === 0 ? "Select shapes first" : null;
+  // Through the canvas queue, like align: every piece's move is one batch and one undo, and a nest
+  // clicked while a drag's commit is on the wire packs the pieces from where that drag left them.
+  // Checked against the scene on screen first, so a nest that cannot place every piece moves none.
+  const onNest = async ({ gapMm, allowTurn }: NestRequest): Promise<boolean> => {
+    const lock = interaction.editsLockNow();
+    if (lock !== null) {
+      refuseEdit(lock);
+      return false;
+    }
+    if (!doc) return false;
+    const ids = units;
+    const refusal = nestRefusal(nest(unitsOf(interaction.effectiveScene, ids, expand), doc.artboard, gapMm, allowTurn), allowTurn);
+    if (refusal) {
+      setError(refusal);
+      return false;
+    }
+    setError(null);
+    interaction.transformEach(`nest:${[...ids].sort((p, q) => p - q).join(",")}`, (sc, now) => {
+      if (!now.artboard) return [];
+      const r = nest(unitsOf(sc, ids, now.expand), now.artboard, gapMm, allowTurn);
+      return nestRefusal(r, allowTurn) ? [] : r.moves;
+    });
+    return true;
+  };
+  const shapeTools: ShapeTool[] = [
+    { label: "Offset…", disabled: noSelection, onClick: () => setShapeTool("offset") },
+    { label: "Weed box…", disabled: noSelection, onClick: () => setShapeTool("weed") },
+    { label: "Copies…", disabled: noSelection, onClick: () => setShapeTool("copies") },
+    // Replaces the selection, so what is selected afterwards is the one welded Path.
+    { label: "Weld", disabled: noSelection, onClick: () => edit(async () => selectAdded(await ipc.weld({ ids: selected }))) },
+    { label: "To path", disabled: noSelection, onClick: () => edit(() => ipc.convertToPath({ ids: selected })) },
+    { label: "Nest…", disabled: unitCount === 0 ? "Select the pieces to nest" : null, onClick: () => setShapeTool("nest") },
+  ];
+  const selectionNote = `${unitCount} piece${unitCount === 1 ? "" : "s"} selected`;
+
   const onImportFile = (file: File) => {
     edit(async () => {
       const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
@@ -635,6 +689,7 @@ export function App() {
           effectiveMaterial={effectiveMaterial}
           presets={presets}
           onChangeMaterialPreset={setMaterialPreset}
+          onEditText={textSelected ? () => setTextOpen(textSelected) : null}
         />
     </>
   );
@@ -699,9 +754,10 @@ export function App() {
         onSelectTool={setTool}
         onAddRect={() => edit(() => ipc.addPrimitive({ parent: root, kind: { Rect: { w: 20, h: 20 } } }))}
         onAddEllipse={() => edit(() => ipc.addPrimitive({ parent: root, kind: { Ellipse: { rx: 10, ry: 10 } } }))}
-        onAddText={() => setTextOpen(true)}
+        onAddText={() => setTextOpen("new")}
         onBoolean={onBooleanOp}
         onDelete={deleteSelected}
+        shapeTools={shapeTools}
       />
       {/* The wrapper is what lets the canvas fill its grid cell: a canvas sized 100% directly in
           the grid adds its intrinsic 300×150 to the track minimum and never shrinks. `data-view`
@@ -713,6 +769,8 @@ export function App() {
           data-view={`${interaction.view.scale} ${interaction.view.tx} ${interaction.view.ty}`}
           style={{ position: "absolute", inset: 0, width: "100%", height: "100%", display: "block", background: "var(--workspace)", touchAction: "none" }}
           {...interaction.handlers}
+          // The second click of a double-click has already selected what is under it.
+          onDoubleClick={() => { if (textSelected) setTextOpen(textSelected); }}
         />
       </div>
       {layout === "simple" ? (
@@ -765,15 +823,42 @@ export function App() {
       {tracePath !== null ? (
         <TraceDialog path={tracePath} onInsert={onTraceInsert} onClose={() => setTracePath(null)} />
       ) : null}
-      {textOpen ? (
+      {shapeTool === "offset" ? (
+        <ShapeToolDialog
+          form={OFFSET_FORM}
+          note={selectionNote}
+          onApply={(r) => edit(async () => selectAdded(await ipc.offsetShapes({ ids: selected, ...r })))}
+          onClose={() => setShapeTool(null)}
+        />
+      ) : null}
+      {shapeTool === "weed" ? (
+        <ShapeToolDialog
+          form={WEED_FORM}
+          note={selectionNote}
+          onApply={(r) => edit(async () => selectAdded(await ipc.weedBox({ ids: selected, ...r })))}
+          onClose={() => setShapeTool(null)}
+        />
+      ) : null}
+      {shapeTool === "nest" ? (
+        <ShapeToolDialog form={NEST_FORM} note={`${selectionNote}, packed across the media from its top`} onApply={onNest} onClose={() => setShapeTool(null)} />
+      ) : null}
+      {shapeTool === "copies" ? (
+        <ShapeToolDialog
+          form={COPIES_FORM}
+          note={selectionNote}
+          onApply={(r) => edit(async () => { await ipc.arrayCopies({ ids: selected, ...r }); })}
+          onClose={() => setShapeTool(null)}
+        />
+      ) : null}
+      {textOpen !== null ? (
         <TextDialog
-          onInsert={(family) => {
-            setTextOpen(false);
-            // ponytail: content and size are fixed until #33 grows this dialog into real
-            // text editing; the family is the only choice the backend can act on today.
-            edit(() => ipc.addText({ parent: root, family, sizeMm: 10, text: "Text" }));
-          }}
-          onClose={() => setTextOpen(false)}
+          editing={textOpen === "new" ? undefined : textOpen}
+          onSubmit={(t) =>
+            textOpen === "new"
+              ? edit(async () => selectAdded(await ipc.addText({ parent: root, family: t.family, sizeMm: t.sizeMm, text: t.text })))
+              : edit(() => ipc.updateText({ id: textOpen.id, family: t.family, sizeMm: t.sizeMm, text: t.text }))
+          }
+          onClose={() => setTextOpen(null)}
         />
       ) : null}
     </div>

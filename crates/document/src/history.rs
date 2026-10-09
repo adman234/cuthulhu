@@ -18,6 +18,17 @@ impl Editor {
         self.redo_stack.clear();
         forward
     }
+    /// Commit the Delta `make` builds, as one undoable step, lending it the document's id
+    /// generator. The generator is a copy kept only on success, so a refused command leaves no
+    /// gap in the ids — not that a gap would matter, but nothing about a refusal should show.
+    pub fn commit_minted(&mut self, make: impl FnOnce(&Document, &mut crate::node::IdGen) -> Result<Delta, CmdError>)
+        -> Result<Delta, CmdError> {
+        let mut ids = self.doc.ids.clone();
+        let d = make(&self.doc, &mut ids)?;
+        self.doc.ids = ids;
+        Ok(self.commit(d))
+    }
+
     pub fn undo(&mut self) -> Option<Delta> {
         let inverse = self.undo_stack.pop()?;
         let redo = self.doc.apply(inverse.clone());

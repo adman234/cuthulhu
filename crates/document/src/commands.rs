@@ -263,7 +263,7 @@ pub fn transform_each(doc: &Document, moves: &[(Vec<NodeId>, Affine)]) -> Result
 }
 
 /// Child → parent for every node, in one pass over the document.
-fn parent_index(doc: &Document) -> HashMap<NodeId, NodeId> {
+pub(crate) fn parent_index(doc: &Document) -> HashMap<NodeId, NodeId> {
     doc.nodes.iter().flat_map(|(&pid, n)| n.children.iter().map(move |&c| (c, pid))).collect()
 }
 
@@ -271,7 +271,7 @@ fn parent_index(doc: &Document) -> HashMap<NodeId, NodeId> {
 /// per-subtree (transform, delete) skip such nodes so that exactly one operation applies per
 /// selected subtree: the ancestor carries them along. Takes an index built once by the caller,
 /// since `parent_of` scans the whole document per level.
-fn ancestor_selected(parents: &HashMap<NodeId, NodeId>, selected: &HashSet<NodeId>, id: NodeId) -> bool {
+pub(crate) fn ancestor_selected(parents: &HashMap<NodeId, NodeId>, selected: &HashSet<NodeId>, id: NodeId) -> bool {
     let mut cur = id;
     while let Some(&pid) = parents.get(&cur) {
         if selected.contains(&pid) { return true; }
@@ -282,7 +282,7 @@ fn ancestor_selected(parents: &HashMap<NodeId, NodeId>, selected: &HashSet<NodeI
 
 /// `world_transform` against a parent index built once by the caller; transforms are read from
 /// `doc` as it stands.
-fn world_via(doc: &Document, parents: &HashMap<NodeId, NodeId>, id: NodeId) -> Option<Affine> {
+pub(crate) fn world_via(doc: &Document, parents: &HashMap<NodeId, NodeId>, id: NodeId) -> Option<Affine> {
     let mut m = doc.get(id)?.transform.clone();
     let mut cur = id;
     while let Some(&pid) = parents.get(&cur) {
@@ -292,7 +292,7 @@ fn world_via(doc: &Document, parents: &HashMap<NodeId, NodeId>, id: NodeId) -> O
     Some(m)
 }
 
-fn parent_of(doc: &Document, id: NodeId) -> Option<NodeId> {
+pub(crate) fn parent_of(doc: &Document, id: NodeId) -> Option<NodeId> {
     doc.nodes.iter().find(|(_, n)| n.children.contains(&id)).map(|(pid, _)| *pid)
 }
 
@@ -313,7 +313,11 @@ pub fn shape_outline(node: &Node) -> Result<Option<Path>, String> {
         // `to_string`, not `{e:?}`: this string is carried verbatim into `PlanError::BadShape`
         // and `CmdError::Geometry`, and both of those reach an operator (#91).
         NodeKind::Shape(ShapeKind::Path { d }) => Path::from_svg(d).map(Some).map_err(|e| e.to_string()),
-        NodeKind::Shape(ShapeKind::Text { family, size_mm, text }) =>
+        // The cached outline when there is one, so what is cut is what was drawn (see
+        // `ShapeKind::Text`); the font only for a document from before the cache.
+        NodeKind::Shape(ShapeKind::Text { d, .. }) if !d.is_empty() =>
+            Path::from_svg(d).map(Some).map_err(|e| e.to_string()),
+        NodeKind::Shape(ShapeKind::Text { family, size_mm, text, .. }) =>
             text_to_path(family, *size_mm, text).map(Some).map_err(|e| e.to_string()),
         _ => Ok(None),
     }
@@ -371,14 +375,75 @@ pub fn boolean_op(doc: &Document, ids: &[NodeId], op: BoolOp) -> Result<Delta, C
     Ok(Delta(ops))
 }
 
-/// Append a text node's glyph outlines (as a single Path) under `parent`. Mints
-/// `NodeId(u64::MAX)` as a placeholder — `Editor::add_text` overwrites it before commit.
-pub fn add_text(doc: &Document, parent: NodeId, family: &str, size_mm: f64, text: &str) -> Result<Delta, CmdError> {
-    doc.get(parent).ok_or(CmdError::NotFound)?;
+/// The largest text size accepted, in mm: a letter a metre tall is past any cutter's width.
+pub const MAX_TEXT_SIZE_MM: f64 = 1000.0;
+
+/// A Text kind for `text` set in `family` at `size_mm`, its outline drawn now and cached in `d`.
+/// Refuses text with nothing to draw: an invisible node plans as an empty job, and an operator who
+/// emptied the box meant to delete it, which Delete does.
+fn text_kind(family: &str, size_mm: f64, text: &str) -> Result<ShapeKind, CmdError> {
+    if !size_mm.is_finite() || size_mm <= 0.0 || size_mm > MAX_TEXT_SIZE_MM {
+        return Err(CmdError::Geometry(format!("a text size must be more than 0 and at most {MAX_TEXT_SIZE_MM} mm")));
+    }
+    if text.trim().is_empty() {
+        return Err(CmdError::Geometry("the text has no characters to draw".into()));
+    }
     // `to_string`, not `{e:?}`: same operator-facing contract as `shape_outline` (#91).
     let path = text_to_path(family, size_mm, text).map_err(|e| CmdError::Geometry(e.to_string()))?;
-    let node = Node::shape(NodeId(u64::MAX), ShapeKind::Path { d: path.to_svg() });
+    Ok(ShapeKind::Text { family: family.into(), size_mm, text: text.into(), d: path.to_svg() })
+}
+
+/// Append an editable Text node under `parent`. Mints `NodeId(u64::MAX)` as a placeholder —
+/// `Editor::add_text` overwrites it before commit.
+///
+/// Placed one size down from the parent's origin: glyphs are drawn above their baseline, so a
+/// node at the origin put its first line above the top of the mat, out of reach of the cutter.
+pub fn add_text(doc: &Document, parent: NodeId, family: &str, size_mm: f64, text: &str) -> Result<Delta, CmdError> {
+    doc.get(parent).ok_or(CmdError::NotFound)?;
+    let mut node = Node::shape(NodeId(u64::MAX), text_kind(family, size_mm, text)?);
+    node.transform = Affine::translate(0.0, size_mm);
     Ok(Delta(vec![NodeOp::Add { parent, node, index: usize::MAX }]))
+}
+
+/// Rewrite the Text node `id` — its words, face and size — keeping where it is, how it is turned
+/// and everything else it carries. One Update, so one undo puts the old words back.
+pub fn update_text(doc: &Document, id: NodeId, family: &str, size_mm: f64, text: &str) -> Result<Delta, CmdError> {
+    let node = doc.get(id).ok_or(CmdError::NotFound)?;
+    if !matches!(node.kind, NodeKind::Shape(ShapeKind::Text { .. })) {
+        return Err(CmdError::Geometry("only text can be edited as text".into()));
+    }
+    let before = node.clone();
+    let mut after = before.clone();
+    after.kind = NodeKind::Shape(text_kind(family, size_mm, text)?);
+    if after == before { return Ok(Delta(vec![])); }
+    Ok(Delta(vec![NodeOp::Update { id, before, after }]))
+}
+
+/// Turn every shape in `ids` — and every shape under a container in `ids` — into a plain Path of
+/// its own outline, in place: same id, transform, paint and cut attributes. Text stops being
+/// editable as words, which is the point when its letters are about to be welded or reshaped.
+/// Shapes that are already paths emit no op.
+pub fn convert_to_path(doc: &Document, ids: &[NodeId]) -> Result<Delta, CmdError> {
+    if ids.is_empty() { return Err(CmdError::EmptySelection); }
+    let mut ops = vec![];
+    let mut seen = HashSet::new();
+    let mut stack: Vec<NodeId> = ids.iter().rev().copied().collect();
+    while let Some(id) = stack.pop() {
+        let node = doc.get(id).ok_or(CmdError::NotFound)?;
+        if !seen.insert(id) { continue; }
+        match &node.kind {
+            NodeKind::Group | NodeKind::Layer => stack.extend(node.children.iter().rev().copied()),
+            NodeKind::Shape(ShapeKind::Path { .. }) => {}
+            NodeKind::Shape(_) => {
+                let outline = shape_outline(node).map_err(CmdError::Geometry)?.expect("a shape has an outline");
+                let before = node.clone();
+                let mut after = before.clone();
+                after.kind = NodeKind::Shape(ShapeKind::Path { d: outline.to_svg() });
+                ops.push(NodeOp::Update { id, before, after });
+            }
+        }
+    }
+    Ok(Delta(ops))
 }
 
 #[cfg(test)]
@@ -742,7 +807,7 @@ mod tests {
     }
 
     #[test]
-    fn add_text_appends_a_path_shape_under_parent() {
+    fn add_text_appends_an_editable_text_shape_under_parent() {
         let mut ed = Editor::new();
         let parent = ed.doc.root;
         match any_available_family() {
@@ -750,8 +815,13 @@ mod tests {
                 Ok(_) => {
                     let kids = &ed.doc.get(parent).unwrap().children;
                     assert_eq!(kids.len(), 1);
-                    assert!(matches!(ed.doc.get(kids[0]).unwrap().kind,
-                        NodeKind::Shape(ShapeKind::Path { .. })));
+                    let node = ed.doc.get(kids[0]).unwrap();
+                    let NodeKind::Shape(ShapeKind::Text { text, d, .. }) = &node.kind else {
+                        panic!("added {:?}", node.kind)
+                    };
+                    assert_eq!(text, "Hi");
+                    assert!(!d.is_empty(), "the outline is cached");
+                    assert_eq!(node.transform.apply(0.0, 0.0), (0.0, 10.0), "baseline one size down");
                 }
                 Err(e) => panic!("unexpected error for family {family:?}: {e:?}"),
             },
@@ -1191,5 +1261,68 @@ mod tests {
         assert_eq!(set_stroke_color(&doc, &[id, id], 0x00ff00ff).unwrap().0.len(), 1);
         assert_eq!(set_stroke_color(&doc, &[], 0x00ff00ff), Err(CmdError::EmptySelection));
         assert_eq!(set_stroke_color(&doc, &[NodeId(9999)], 0x00ff00ff), Err(CmdError::NotFound));
+    }
+
+    fn text_node(ed: &mut Editor, d: &str) -> NodeId {
+        let id = ed.doc.ids.next();
+        let kind = ShapeKind::Text { family: "X".into(), size_mm: 10.0, text: "hi".into(), d: d.into() };
+        let mut node = Node::shape(id, kind);
+        node.transform = Affine::translate(3.0, 4.0);
+        node.style.stroke = Some(0xFF0000FF);
+        ed.commit(Delta(vec![NodeOp::Add { parent: ed.doc.root, node, index: usize::MAX }]));
+        id
+    }
+
+    #[test]
+    fn a_text_outline_is_its_cached_drawing_not_the_font() {
+        let node = Node::shape(NodeId(1), ShapeKind::Text {
+            family: "no such family".into(), size_mm: 10.0, text: "x".into(), d: "M0,0 L1,0 L1,1 Z".into() });
+        assert_eq!(shape_outline(&node).unwrap().unwrap(), Path::from_svg("M0,0 L1,0 L1,1 Z").unwrap());
+    }
+
+    #[test]
+    fn update_text_rewrites_the_words_in_place_as_one_undo() {
+        let Some(family) = any_available_family() else { return };
+        let mut ed = Editor::new();
+        let id = text_node(&mut ed, "M0,0 L1,0 L1,1 Z");
+        let before = ed.doc.get(id).unwrap().clone();
+        let d = update_text(&ed.doc, id, &family, 20.0, "Hello\nthere").unwrap();
+        ed.commit(d);
+        let after = ed.doc.get(id).unwrap();
+        let NodeKind::Shape(ShapeKind::Text { text, size_mm, d, .. }) = &after.kind else { panic!() };
+        assert_eq!((text.as_str(), *size_mm), ("Hello\nthere", 20.0));
+        assert_ne!(d, "M0,0 L1,0 L1,1 Z", "the outline is redrawn");
+        assert_eq!((after.transform, after.style.stroke), (before.transform, before.style.stroke), "kept in place");
+        ed.undo();
+        assert_eq!(ed.doc.get(id).unwrap(), &before);
+    }
+
+    #[test]
+    fn update_text_refuses_a_non_text_node_empty_text_and_a_bad_size() {
+        let mut ed = Editor::new();
+        let id = text_node(&mut ed, "M0,0 L1,0 L1,1 Z");
+        let rect = ed.doc.ids.next();
+        ed.commit(Delta(vec![NodeOp::Add { parent: ed.doc.root, node: Node::shape(rect, ShapeKind::Rect { w: 1.0, h: 1.0 }), index: 0 }]));
+        assert_eq!(update_text(&ed.doc, rect, "X", 10.0, "a").unwrap_err().to_string(), "only text can be edited as text");
+        assert_eq!(update_text(&ed.doc, id, "X", 10.0, " \n ").unwrap_err().to_string(), "the text has no characters to draw");
+        for size in [0.0, -1.0, f64::INFINITY, 5000.0] {
+            assert!(update_text(&ed.doc, id, "X", size, "a").unwrap_err().to_string().starts_with("a text size"));
+        }
+        assert_eq!(update_text(&ed.doc, NodeId(999), "X", 10.0, "a").unwrap_err(), CmdError::NotFound);
+    }
+
+    #[test]
+    fn convert_to_path_keeps_the_node_and_its_place_and_skips_paths() {
+        let mut ed = Editor::new();
+        let id = text_node(&mut ed, "M0,0 L1,0 L1,1 Z");
+        let path = ed.doc.ids.next();
+        ed.commit(Delta(vec![NodeOp::Add { parent: ed.doc.root, node: Node::shape(path, ShapeKind::Path { d: "M0,0 L1,1".into() }), index: 0 }]));
+        let d = convert_to_path(&ed.doc, &[id, path, id]).unwrap();
+        assert_eq!(d.0.len(), 1, "the path and the repeat emit nothing");
+        ed.commit(d);
+        let node = ed.doc.get(id).unwrap();
+        assert_eq!(node.kind, NodeKind::Shape(ShapeKind::Path { d: "M0,0 L1,0 L1,1 Z".into() }));
+        assert_eq!(node.transform, Affine::translate(3.0, 4.0));
+        assert_eq!(node.style.stroke, Some(0xFF0000FF));
     }
 }

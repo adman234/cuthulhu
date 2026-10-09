@@ -11,7 +11,12 @@ type Props = {
   onAddText: () => void;
   onBoolean: (op: BoolOp) => void;
   onDelete: () => void;
+  /** The tools that make new shapes from the selection, in the order they are listed. */
+  shapeTools: ShapeTool[];
 };
+
+/** `disabled` carries the reason, shown as the button's tooltip, or null when it can act. */
+export type ShapeTool = { label: string; disabled: string | null; onClick: () => void };
 
 const btn = (active: boolean): CSSProperties => ({
   background: active ? "var(--accent)" : "var(--panel)",
@@ -24,7 +29,7 @@ const btn = (active: boolean): CSSProperties => ({
 
 const BOOL_OPS: BoolOp[] = ["Union", "Subtract", "Intersect", "Exclude"];
 
-export function ToolRail({ tool, selectionCount, onSelectTool, onAddRect, onAddEllipse, onAddText, onBoolean, onDelete }: Props) {
+export function ToolRail({ tool, selectionCount, onSelectTool, onAddRect, onAddEllipse, onAddText, onBoolean, onDelete, shapeTools }: Props) {
   const canBoolean = selectionCount >= 2;
   return (
     <div
@@ -36,6 +41,10 @@ export function ToolRail({ tool, selectionCount, onSelectTool, onAddRect, onAddE
         width: 96,
         background: "var(--panel)",
         borderRight: "1px solid var(--border)",
+        // The shape tools make the rail taller than a small window; it scrolls rather than
+        // pushing the status bar off screen.
+        overflowY: "auto",
+        minHeight: 0,
       }}
     >
       <button aria-label="Select" style={btn(tool === "select")} onClick={() => onSelectTool("select")}>
@@ -54,6 +63,12 @@ export function ToolRail({ tool, selectionCount, onSelectTool, onAddRect, onAddE
       {BOOL_OPS.map((op) => (
         <button key={op} aria-label={op} disabled={!canBoolean} style={btn(false)} onClick={() => onBoolean(op)}>
           {op}
+        </button>
+      ))}
+      <div style={{ height: 1, background: "var(--border)", margin: "4px 0" }} />
+      {shapeTools.map((t) => (
+        <button key={t.label} aria-label={t.label} title={t.disabled ?? undefined} disabled={t.disabled !== null} style={btn(false)} onClick={t.onClick}>
+          {t.label}
         </button>
       ))}
       <div style={{ height: 1, background: "var(--border)", margin: "4px 0" }} />

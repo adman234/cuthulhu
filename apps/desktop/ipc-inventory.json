@@ -1,12 +1,14 @@
 {
   "add_primitive": ["kind", "parent"],
   "add_text": ["family", "parent", "sizeMm", "text"],
+  "array_copies": ["cols", "gapXMm", "gapYMm", "ids", "rows"],
   "boolean_op": ["ids", "op"],
   "cancel_cut": [],
   "commit_transform": ["ids", "m"],
   "commit_transforms": ["moves"],
   "confirm_pass_done": [],
   "connect_device": ["info"],
+  "convert_to_path": ["ids"],
   "cut": ["request"],
   "delete": ["ids"],
   "delete_preset": ["id", "machineId"],
@@ -26,6 +28,7 @@
   "load_project": ["path"],
   "machine_caps": ["machineId"],
   "new_doc": [],
+  "offset_shapes": ["distanceMm", "ids", "join", "union"],
   "pair_host": ["address", "fingerprint", "name", "token"],
   "pick_image": [],
   "plan_cut": ["grouping"],
@@ -51,5 +54,8 @@
   "trace_controls": [],
   "trace_image": ["controls", "path"],
   "travel_for_order": ["docRevision", "grouping", "passes"],
-  "undo": []
+  "undo": [],
+  "update_text": ["family", "id", "sizeMm", "text"],
+  "weed_box": ["ids", "lineSpacingMm", "marginMm"],
+  "weld": ["ids"]
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::path::Path;
-use document::{CmdError, CutLineType, Delta, Editor, MachineProfile, NodeId, PresetAssignment, ShapeKind, commands};
+use document::{CmdError, CutLineType, Delta, Editor, MachineProfile, NodeId, PresetAssignment, ShapeKind, commands, shape_tools};
 use fileio::IoError;
 use geometry::{Affine, BoolOp};
 
@@ -57,6 +57,38 @@ impl AppState {
 
     pub fn add_text(&mut self, parent: NodeId, family: String, size_mm: f64, text: String) -> Result<Delta, CmdError> {
         self.editor.add_text(parent, &family, size_mm, &text)
+    }
+
+    pub fn offset_shapes(&mut self, ids: Vec<NodeId>, distance_mm: f64, union: bool, join: geometry::Join)
+        -> Result<Delta, CmdError> {
+        self.editor.commit_minted(|doc, gen| shape_tools::offset_shapes(doc, gen, &ids, distance_mm, union, join))
+    }
+
+    pub fn weed_box(&mut self, ids: Vec<NodeId>, margin_mm: f64, line_spacing_mm: Option<f64>)
+        -> Result<Delta, CmdError> {
+        self.editor.commit_minted(|doc, gen| shape_tools::weed_box(doc, gen, &ids, margin_mm, line_spacing_mm))
+    }
+
+    pub fn array_copies(&mut self, ids: Vec<NodeId>, cols: u32, rows: u32, gap_x_mm: f64, gap_y_mm: f64)
+        -> Result<Delta, CmdError> {
+        self.editor.commit_minted(|doc, gen| shape_tools::array_copies(doc, gen, &ids, cols, rows, gap_x_mm, gap_y_mm))
+    }
+
+    pub fn update_text(&mut self, id: NodeId, family: String, size_mm: f64, text: String) -> Result<Delta, CmdError> {
+        let d = commands::update_text(&self.editor.doc, id, &family, size_mm, &text)?;
+        // An edit that changes nothing is not an undo step, as with `set_cut_line_type`.
+        if d.0.is_empty() { return Ok(d); }
+        Ok(self.editor.commit(d))
+    }
+
+    pub fn convert_to_path(&mut self, ids: Vec<NodeId>) -> Result<Delta, CmdError> {
+        let d = commands::convert_to_path(&self.editor.doc, &ids)?;
+        if d.0.is_empty() { return Ok(d); }
+        Ok(self.editor.commit(d))
+    }
+
+    pub fn weld(&mut self, ids: Vec<NodeId>) -> Result<Delta, CmdError> {
+        self.editor.commit_minted(|doc, gen| shape_tools::weld(doc, gen, &ids))
     }
 
     pub fn delete(&mut self, ids: Vec<NodeId>) -> Result<Delta, CmdError> {
@@ -320,5 +352,17 @@ mod tests {
         let xs: Vec<f64> = planned.passes[0].shapes.iter().flat_map(|s| s.polylines.iter().flatten().map(|p| p.x)).collect();
         assert!(xs.iter().all(|x| (5.0..=15.0).contains(x)), "{xs:?}");
         assert_eq!(app.editor.doc.nodes.len(), 2, "the operator's document is untouched");
+    }
+
+    /// The shape tools go through `commit_minted`: one undo each, and the nodes they add are new.
+    #[test]
+    fn app_state_offset_adds_one_undoable_contour() {
+        let mut app = AppState::new();
+        let id = app.add_rect(10.0, 10.0);
+        let d = app.offset_shapes(vec![id], 1.0, true, geometry::Join::Round).unwrap();
+        assert_eq!(d.0.len(), 1);
+        assert_eq!(app.editor.doc.get(app.editor.doc.root).unwrap().children.len(), 2);
+        app.undo().unwrap();
+        assert_eq!(app.editor.doc.get(app.editor.doc.root).unwrap().children, vec![id]);
     }
 }

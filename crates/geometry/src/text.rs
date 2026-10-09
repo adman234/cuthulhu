@@ -82,6 +82,20 @@ fn resolve_face(db: &fontdb::Database, family: &str) -> Option<fontdb::ID> {
     .or_else(|| db.faces().next().map(|f| f.id))
 }
 
+/// Baseline to baseline, in ems. ponytail: one fixed leading for every face, rather than the
+/// face's own ascender + descender + line gap, which is what a typesetter would use; upgrade by
+/// reading `face.line_gap()` and the hhea metrics when a font's lines visibly collide.
+pub const LINE_HEIGHT: f64 = 1.2;
+
+fn shift_seg(seg: &mut Seg, dy: f64) {
+    let mv = |p: &mut Point| p.y += dy;
+    match seg {
+        Seg::Move(p) | Seg::Line(p) => mv(p),
+        Seg::Cubic(a, b, c) => { mv(a); mv(b); mv(c); }
+        Seg::Close => {}
+    }
+}
+
 /// Split out of `text_to_path`'s closure so the BadFont branch is testable: fontdb
 /// parses files on insert and refuses corrupt ones, so garbage face data can only be
 /// fed in through this seam.
@@ -89,19 +103,29 @@ fn outline_with_face(data: &[u8], face_index: u32, size_mm: f64, text: &str) -> 
     let face = Face::parse(data, face_index).map_err(|_| GeomError::BadFont)?;
     let scale = size_mm / face.units_per_em() as f64;
     let mut segs = vec![];
-    let mut x = 0.0f64;
-    for ch in text.chars() {
-        let gid = match face.glyph_index(ch) {
-            Some(g) if g != GlyphId(0) => g,
-            _ => { x += size_mm * 0.3; continue; } // missing glyph: skip outline, advance a fallback space
-        };
-        let mut builder = GlyphOutline {
-            segs: &mut segs, origin_x: x, scale,
-            cur: Point { x: 0.0, y: 0.0 }, start: Point { x: 0.0, y: 0.0 },
-        };
-        face.outline_glyph(gid, &mut builder);
-        let adv = face.glyph_hor_advance(gid).unwrap_or(0) as f64;
-        x += adv * scale;
+    // `lines`, not `split('\n')`: a Windows paste brings `\r\n`, and a stray `\r` would draw as
+    // a missing glyph's fallback space at the end of every line.
+    for (row, line) in text.lines().enumerate() {
+        let start = segs.len();
+        let mut x = 0.0f64;
+        for ch in line.chars() {
+            let gid = match face.glyph_index(ch) {
+                Some(g) if g != GlyphId(0) => g,
+                _ => { x += size_mm * 0.3; continue; } // missing glyph: skip outline, advance a fallback space
+            };
+            let mut builder = GlyphOutline {
+                segs: &mut segs, origin_x: x, scale,
+                cur: Point { x: 0.0, y: 0.0 }, start: Point { x: 0.0, y: 0.0 },
+            };
+            face.outline_glyph(gid, &mut builder);
+            let adv = face.glyph_hor_advance(gid).unwrap_or(0) as f64;
+            x += adv * scale;
+        }
+        // Each line's baseline a fixed LINE_HEIGHT em below the last, left-aligned.
+        let dy = row as f64 * LINE_HEIGHT * size_mm;
+        if dy != 0.0 {
+            for seg in &mut segs[start..] { shift_seg(seg, dy); }
+        }
     }
     // A face that drew nothing for text that asked for something (a symbol font and
     // Latin letters, a bitmap-only face) would otherwise persist as an invisible empty
@@ -173,6 +197,15 @@ mod tests {
                 Err(GeomError::NoFont)
             ),
         }
+    }
+
+    #[test]
+    fn each_line_sits_one_line_height_below_the_last() {
+        if any_available_family().is_none() { return; }
+        let one = text_to_path("Whatever", 10.0, "H").unwrap().bounds();
+        let two = text_to_path("Whatever", 10.0, "H\r\nH").unwrap().bounds();
+        assert!((two.h - (one.h + LINE_HEIGHT * 10.0)).abs() < 1e-6, "{one:?} {two:?}");
+        assert!((two.w - one.w).abs() < 1e-6, "left-aligned, and no glyph for the \\r: {one:?} {two:?}");
     }
 
     #[test]

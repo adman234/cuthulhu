@@ -127,6 +127,80 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     doc.nodes[doc.root].children.push(groupId);
   }
 
+  // ── Shape tools (offset, weed box, copies, weld, text) ──
+  // The fake does not do geometry: it mirrors each command's refusals and the nodes it adds, with
+  // boxes standing in for outlines, which is all the canvas and the layers panel read back.
+  type Box = { x: number; y: number; w: number; h: number };
+  const shapeCall = (cmd: string, a: Record<string, unknown>) => {
+    const hooks = window as unknown as { __shapeCalls?: { cmd: string; args: unknown }[] };
+    (hooks.__shapeCalls ??= []).push({ cmd, args: JSON.parse(JSON.stringify(a)) });
+  };
+  const parentOf = (id: number) => Object.values(doc.nodes).find((n) => n.children.includes(id))?.id;
+  const localBox = (kind: Record<string, Record<string, unknown>>): Box => {
+    if ("Rect" in kind) return { x: 0, y: 0, w: kind.Rect.w as number, h: kind.Rect.h as number };
+    if ("Ellipse" in kind) return { x: 0, y: 0, w: 2 * (kind.Ellipse.rx as number), h: 2 * (kind.Ellipse.ry as number) };
+    const d = String((kind.Path ?? kind.Text)?.d ?? "");
+    const nums = (d.match(/-?[\d.]+(e-?\d+)?/g) ?? []).map(Number);
+    const xs = nums.filter((_, i) => i % 2 === 0);
+    const ys = nums.filter((_, i) => i % 2 === 1);
+    if (xs.length === 0) return { x: 0, y: 0, w: 0, h: 0 };
+    return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+  };
+  const worldOfNode = (id: number): number[] => {
+    let m = doc.nodes[id].transform;
+    for (let p = parentOf(id); p !== undefined; p = parentOf(p)) {
+      const [a1, b1, c1, d1, e1, f1] = m;
+      const [a2, b2, c2, d2, e2, f2] = doc.nodes[p].transform;
+      m = [a2 * a1 + c2 * b1, b2 * a1 + d2 * b1, a2 * c1 + c2 * d1, b2 * c1 + d2 * d1, a2 * e1 + c2 * f1 + e2, b2 * e1 + d2 * f1 + f2];
+    }
+    return m;
+  };
+  const worldBox = (id: number): Box | null => {
+    const n = doc.nodes[id];
+    if (typeof n.kind === "object" && n.kind !== null && "Shape" in (n.kind as object)) {
+      const b = localBox((n.kind as { Shape: Record<string, Record<string, unknown>> }).Shape);
+      const [a, bb, c, d, e, f] = worldOfNode(id);
+      const pts = [[b.x, b.y], [b.x + b.w, b.y], [b.x, b.y + b.h], [b.x + b.w, b.y + b.h]].map(([x, y]) => [a * x + c * y + e, bb * x + d * y + f]);
+      const xs = pts.map((p) => p[0]);
+      const ys = pts.map((p) => p[1]);
+      return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+    }
+    const boxes = n.children.map(worldBox).filter((b): b is Box => b !== null);
+    if (boxes.length === 0) return null;
+    const x = Math.min(...boxes.map((b) => b.x));
+    const y = Math.min(...boxes.map((b) => b.y));
+    return { x, y, w: Math.max(...boxes.map((b) => b.x + b.w)) - x, h: Math.max(...boxes.map((b) => b.y + b.h)) - y };
+  };
+  /** Mirrors shape_tools::selection_units: each id once, every one present, none under another. */
+  const unitsOf = (ids: number[]): number[] => {
+    if (ids.length === 0) throw new Error("the selection has nothing this command can act on");
+    if (ids.some((id) => !doc.nodes[id])) throw new Error("the node or machine this command names is not there");
+    const under = (id: number) => { for (let p = parentOf(id); p !== undefined; p = parentOf(p)) if (ids.includes(p)) return true; return false; };
+    return [...new Set(ids)].filter((id) => !under(id));
+  };
+  const unionBox = (ids: number[]): Box => {
+    const boxes = ids.map(worldBox).filter((b): b is Box => b !== null);
+    const x = Math.min(...boxes.map((b) => b.x));
+    const y = Math.min(...boxes.map((b) => b.y));
+    return { x, y, w: Math.max(...boxes.map((b) => b.x + b.w)) - x, h: Math.max(...boxes.map((b) => b.y + b.h)) - y };
+  };
+  const boxPath = (b: Box) => `M${b.x},${b.y} L${b.x + b.w},${b.y} L${b.x + b.w},${b.y + b.h} L${b.x},${b.y + b.h} Z`;
+  const addNode = (parent: number, kind: unknown): number => {
+    const id = nextId++;
+    doc.nodes[id] = { id, kind, transform: [1, 0, 0, 1, 0, 0], style: DEFAULT_STYLE, children: [], cut_line_type: "Cut", material_preset: { state: "inherit" } };
+    doc.nodes[parent].children.push(id);
+    return id;
+  };
+  const fakeText = (family: string, size: number, text: string) => {
+    if (!(size > 0 && size <= 1000)) throw new Error("a text size must be more than 0 and at most 1000 mm");
+    if (text.trim() === "") throw new Error("the text has no characters to draw");
+    const lines = text.split("\n");
+    const w = Math.max(...lines.map((l) => l.length)) * size * 0.6;
+    const h = size * 0.7 + (lines.length - 1) * size * 1.2;
+    return { family, size_mm: size, text, d: boxPath({ x: 0, y: -size * 0.7, w, h }) };
+  };
+  const addedDelta = (ids: number[]) => ids.map((id) => ({ Add: { parent: parentOf(id), node: doc.nodes[id], index: 0 } }));
+
   const unimplemented = (cmd: string): never => {
     throw new Error(`${cmd}: mocked command the e2e fake does not perform; implement it here to test it`);
   };
@@ -165,10 +239,23 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       // selected family actually crosses the IPC boundary.
       if (typeof a.family !== "string" || a.family.length === 0) throw new Error("add_text: missing family");
       if (typeof a.sizeMm !== "number" || typeof a.text !== "string") throw new Error("add_text: missing sizeMm/text");
-      const id = nextId++;
-      doc.nodes[id] = { id, kind: { Shape: { Path: { d: "" } } }, transform: [1, 0, 0, 1, 0, 0], style: DEFAULT_STYLE, children: [], cut_line_type: "Cut", material_preset: { state: "inherit" } };
-      doc.nodes[a.parent as number].children.push(id);
-      return {};
+      shapeCall("add_text", a);
+      // Mirrors commands::add_text: an editable Text node carrying the outline it was drawn with
+      // (a box per line here), one size down from the origin.
+      const id = addNode(a.parent as number, { Shape: { Text: fakeText(a.family as string, a.sizeMm as number, a.text as string) } });
+      doc.nodes[id].transform = [1, 0, 0, 1, 0, a.sizeMm as number];
+      return addedDelta([id]);
+    },
+    // Mirrors commands::update_text: the same node, new words, kept in place.
+    update_text: (a) => {
+      shapeCall("update_text", a);
+      const n = doc.nodes[a.id as number];
+      if (!n) throw new Error("the node or machine this command names is not there");
+      if (!(typeof n.kind === "object" && n.kind !== null && "Shape" in (n.kind as object) && "Text" in ((n.kind as { Shape: object }).Shape))) {
+        throw new Error("only text can be edited as text");
+      }
+      n.kind = { Shape: { Text: fakeText(a.family as string, a.sizeMm as number, a.text as string) } };
+      return [{ Update: { id: n.id, before: null, after: n } }];
     },
     commit_transform: (a) => {
       // Composed in full: handles send scale and rotation, and a fake that kept only the
@@ -225,6 +312,96 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       return answer(() => applyTransforms(moves));
       })();
       return answered.finally(() => { inFlightCommits -= 1; });
+    },
+    // Mirrors shape_tools::offset_shapes' refusals; the contour is the box grown by the distance.
+    offset_shapes: (a) => {
+      shapeCall("offset_shapes", a);
+      const d = a.distanceMm as number;
+      if (!Number.isFinite(d) || d === 0 || Math.abs(d) > 100) throw new Error("an offset distance must be a number of mm other than zero, at most 100 either way");
+      const units = unitsOf(a.ids as number[]);
+      const groups = a.union ? [units] : units.map((u) => [u]);
+      const added = groups.map((g) => {
+        const b = unionBox(g);
+        if (b.w + 2 * d <= 0 || b.h + 2 * d <= 0) throw new Error("the inset is deeper than the shape is wide, so nothing is left of it");
+        return addNode(parentOf(g[0])!, { Shape: { Path: { d: boxPath({ x: b.x - d, y: b.y - d, w: b.w + 2 * d, h: b.h + 2 * d }) } } });
+      });
+      return addedDelta(added);
+    },
+    // Mirrors shape_tools::weed_box: a Group holding the border and, given a spacing, one Path of
+    // lines. The fake's lines are not clipped; the Rust tests hold that.
+    weed_box: (a) => {
+      shapeCall("weed_box", a);
+      const margin = a.marginMm as number;
+      const spacing = a.lineSpacingMm as number | null;
+      if (!Number.isFinite(margin) || margin < 0 || margin > 100) throw new Error("a weed box margin must be between 0 and 100 mm");
+      if (spacing !== null && (!Number.isFinite(spacing) || spacing < 2)) throw new Error("weed lines must be at least 2 mm apart");
+      const units = unitsOf(a.ids as number[]);
+      const b = unionBox(units);
+      const box = { x: b.x - margin, y: b.y - margin, w: b.w + 2 * margin, h: b.h + 2 * margin };
+      const group = addNode(parentOf(units[0])!, "Group");
+      const border = addNode(group, { Shape: { Rect: { w: box.w, h: box.h } } });
+      doc.nodes[border].transform = [1, 0, 0, 1, box.x, box.y];
+      const added = [group, border];
+      if (spacing !== null) added.push(addNode(group, { Shape: { Path: { d: `M${box.x},${box.y + box.h / 2} L${box.x + box.w},${box.y + box.h / 2}` } } }));
+      return addedDelta(added);
+    },
+    // Mirrors shape_tools::array_copies: deep copies with new ids, each cell offset by the
+    // selection's box plus the gap.
+    array_copies: (a) => {
+      shapeCall("array_copies", a);
+      const cols = a.cols as number;
+      const rows = a.rows as number;
+      if (cols < 1 || rows < 1 || cols * rows < 2) throw new Error("copies need at least two cells: more than one column or row");
+      if (cols * rows > 500) throw new Error("at most 500 cells of copies can be made at once");
+      const units = unitsOf(a.ids as number[]);
+      const b = unionBox(units);
+      const copy = (id: number, parent: number, dx: number, dy: number): number => {
+        const n = doc.nodes[id];
+        const cid = nextId++;
+        const [ta, tb, tc, td, te, tf] = n.transform;
+        doc.nodes[cid] = { ...JSON.parse(JSON.stringify(n)), id: cid, children: [], transform: [ta, tb, tc, td, te + dx, tf + dy] };
+        doc.nodes[parent].children.push(cid);
+        for (const c of n.children) copy(c, cid, 0, 0);
+        return cid;
+      };
+      const added: number[] = [];
+      for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+        if (r === 0 && c === 0) continue;
+        for (const u of units) added.push(copy(u, parentOf(u)!, c * (b.w + (a.gapXMm as number)), r * (b.h + (a.gapYMm as number))));
+      }
+      return addedDelta(added);
+    },
+    // Mirrors shape_tools::weld: the selection's subtrees go, one Path of their union comes.
+    weld: (a) => {
+      shapeCall("weld", a);
+      const units = unitsOf(a.ids as number[]);
+      const b = unionBox(units);
+      const parent = parentOf(units[0])!;
+      const first = doc.nodes[units[0]];
+      const drop = (id: number) => { for (const c of doc.nodes[id].children) drop(c); delete doc.nodes[id]; };
+      for (const u of units) {
+        doc.nodes[parentOf(u)!].children = doc.nodes[parentOf(u)!].children.filter((c) => c !== u);
+        drop(u);
+      }
+      const id = addNode(parent, { Shape: { Path: { d: boxPath(b) } } });
+      doc.nodes[id].style = first.style;
+      return addedDelta([id]);
+    },
+    // Mirrors commands::convert_to_path: same node, its outline as a Path; containers descended.
+    convert_to_path: (a) => {
+      shapeCall("convert_to_path", a);
+      const ids = a.ids as number[];
+      if (ids.length === 0) throw new Error("the selection has nothing this command can act on");
+      const visit = (id: number) => {
+        const n = doc.nodes[id];
+        if (!n) throw new Error("the node or machine this command names is not there");
+        if (typeof n.kind === "object" && n.kind !== null && "Shape" in (n.kind as object)) {
+          const shape = (n.kind as { Shape: Record<string, Record<string, unknown>> }).Shape;
+          if (!("Path" in shape)) n.kind = { Shape: { Path: { d: boxPath(localBox(shape)) } } };
+        } else n.children.forEach(visit);
+      };
+      ids.forEach(visit);
+      return [];
     },
     delete: (a) => {
       for (const id of a.ids as number[]) {
@@ -3026,6 +3203,96 @@ test("text dialog: picking a family and Insert adds a shape", async ({ page }) =
   await expect(page.getByTestId("layer-row")).toHaveCount(1);
 });
 
+test("text dialog: the words, size and family typed are what is added, and the text is selected", async ({ page }) => {
+  await page.addInitScript(installMockTauri);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Text" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add text" });
+  await dialog.getByLabel("Text content").fill("Hello\nmakers");
+  await dialog.getByLabel("Text size").fill("25");
+  await dialog.getByLabel("Font family").selectOption("Arial");
+  await dialog.getByRole("button", { name: "Insert" }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByTestId("layer-row")).toHaveText(["Text"]);
+  await expect(page.getByTestId("layer-row").first()).toHaveAttribute("data-selected", "true");
+  const [call] = await shapeCalls(page);
+  expect(call.args).toEqual({ parent: 1, family: "Arial", sizeMm: 25, text: "Hello\nmakers" });
+});
+
+test("text dialog: blank text or a bad size cannot be inserted, and says why", async ({ page }) => {
+  await page.addInitScript(installMockTauri);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Text" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add text" });
+  await dialog.getByLabel("Text content").fill("   ");
+  await expect(dialog.getByRole("alert")).toHaveText("Type some text");
+  await expect(dialog.getByRole("button", { name: "Insert" })).toBeDisabled();
+  await dialog.getByLabel("Text content").fill("Hi");
+  await dialog.getByLabel("Text size").fill("0");
+  await expect(dialog.getByRole("alert")).toHaveText("Size must be a number of mm above zero");
+});
+
+test("Edit text… reopens the dialog on the selected text, prefilled, and rewrites it in place", async ({ page }) => {
+  await page.addInitScript(installMockTauri);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Text" }).click();
+  const add = page.getByRole("dialog", { name: "Add text" });
+  await add.getByLabel("Text content").fill("Helo");
+  await add.getByLabel("Font family").selectOption("Comic Sans MS");
+  await add.getByRole("button", { name: "Insert" }).click();
+  await expect(add).not.toBeVisible();
+
+  await page.getByRole("button", { name: "Edit text…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Edit text" });
+  await expect(dialog.getByLabel("Text content")).toHaveValue("Helo");
+  await expect(dialog.getByLabel("Text size")).toHaveValue("10");
+  await expect(dialog.getByLabel("Font family")).toHaveValue("Comic Sans MS");
+  await dialog.getByLabel("Text content").fill("Hello");
+  await dialog.getByRole("button", { name: "Apply" }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByTestId("layer-row")).toHaveCount(1);
+  const calls = await shapeCalls(page);
+  expect(calls[1]).toEqual({ cmd: "update_text", args: { id: 2, family: "Comic Sans MS", sizeMm: 10, text: "Hello" } });
+});
+
+test("double-clicking text on the canvas opens its editor, in the simple layout too", async ({ page }) => {
+  await useSimpleLayout(page);
+  await page.addInitScript(installMockTauri);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Text" }).click();
+  const add = page.getByRole("dialog", { name: "Add text" });
+  await add.getByLabel("Text content").fill("BIG");
+  await add.getByLabel("Text size").fill("200");
+  await add.getByRole("button", { name: "Insert" }).click();
+  await expect(add).not.toBeVisible();
+  // The fake draws the text as a box 360 x 140 mm with its top at y = 60 (200 down, 0.7 em up).
+  const at = await toPage(page, await fittedView(page), { x: 180, y: 130 });
+  await page.mouse.dblclick(at.x, at.y);
+  const dialog = page.getByRole("dialog", { name: "Edit text" });
+  await expect(dialog.getByLabel("Text content")).toHaveValue("BIG");
+});
+
+test("Weld replaces the selection with one Path and selects it", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await selectRows(page, [0, 1]);
+  await page.getByRole("button", { name: "Weld", exact: true }).click();
+  await expect(page.getByTestId("layer-row")).toHaveText(["Path"]);
+  await expect(page.getByTestId("layer-row").first()).toHaveAttribute("data-selected", "true");
+  expect(await shapeCalls(page)).toEqual([{ cmd: "weld", args: { ids: [2, 3] } }]);
+});
+
+test("To path turns text into a plain Path in place", async ({ page }) => {
+  await page.addInitScript(installMockTauri);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Text" }).click();
+  await page.getByRole("dialog", { name: "Add text" }).getByRole("button", { name: "Insert" }).click();
+  await expect(page.getByTestId("layer-row")).toHaveText(["Text"]);
+  await page.getByRole("button", { name: "To path" }).click();
+  await expect(page.getByTestId("layer-row")).toHaveText(["Path"]);
+  await expect(page.getByRole("button", { name: "Edit text…" })).toHaveCount(0);
+});
+
 test("text dialog: an empty font list says so and disables Insert", async ({ page }) => {
   await page.addInitScript(installMockTauri, { noFonts: true });
   await page.goto("/");
@@ -4554,12 +4821,158 @@ test("a second Open or Reload while one is still loading is refused, and edits s
   await expect(page.getByRole("button", { name: "Align horizontal centres" })).toBeEnabled();
 });
 
+// ── Shape tools ───────────────────────────────────────────────────────────────────────────────
+
+const shapeCalls = (page: Page) =>
+  page.evaluate(() => (window as unknown as { __shapeCalls?: { cmd: string; args: Record<string, unknown> }[] }).__shapeCalls ?? []);
+
+test("Offset adds a contour around the selection and selects it", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Offset…" })).toBeDisabled();
+  await page.getByTestId("layer-row").first().click();
+  await page.getByRole("button", { name: "Offset…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Offset" });
+  await dialog.getByLabel("Distance (negative insets)").fill("3");
+  await dialog.getByLabel("Corners").selectOption("Miter");
+  await dialog.getByRole("button", { name: "Create offset" }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByTestId("layer-row")).toHaveCount(3);
+  await expect(page.getByTestId("layer-row").nth(2)).toHaveAttribute("data-selected", "true");
+  const [call] = await shapeCalls(page);
+  expect(call).toEqual({ cmd: "offset_shapes", args: { ids: [2], distanceMm: 3, union: true, join: "Miter" } });
+});
+
+test("an Offset the backend refuses keeps the dialog open and says why", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  await page.getByRole("button", { name: "Offset…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Offset" });
+  await dialog.getByLabel("Distance (negative insets)").fill("");
+  await expect(dialog.getByRole("alert")).toHaveText("Distance must be a number");
+  await expect(dialog.getByRole("button", { name: "Create offset" })).toBeDisabled();
+  await dialog.getByLabel("Distance (negative insets)").fill("-20");
+  await dialog.getByRole("button", { name: "Create offset" }).click();
+  await expect(page.getByText("the inset is deeper than the shape is wide")).toBeVisible();
+  await expect(dialog).toBeVisible();
+  await expect(page.getByTestId("layer-row")).toHaveCount(2);
+});
+
+test("Weed box adds a border and weed lines in one Group, and selects the Group", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await selectRows(page, [0, 1]);
+  await page.getByRole("button", { name: "Weed box…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Weed box" });
+  await expect(dialog.getByText("2 pieces selected")).toBeVisible();
+  await dialog.getByLabel("Margin").fill("5");
+  await dialog.getByLabel("Line spacing").fill("10");
+  await dialog.getByRole("button", { name: "Add weed box" }).click();
+  await expect(dialog).not.toBeVisible();
+  // Red, green, then the Group with its border and its lines.
+  await expect(page.getByTestId("layer-row")).toHaveCount(5);
+  await expect(page.getByTestId("layer-row").nth(2)).toHaveText("Group");
+  await expect(page.getByTestId("layer-row").nth(2)).toHaveAttribute("data-selected", "true");
+  await expect(page.getByTestId("layer-row").nth(3)).toHaveAttribute("data-selected", "false");
+  const [call] = await shapeCalls(page);
+  expect(call).toEqual({ cmd: "weed_box", args: { ids: [2, 3], marginMm: 5, lineSpacingMm: 10 } });
+});
+
+test("Weed box without lines sends no spacing, in the simple layout too", async ({ page }) => {
+  await useSimpleLayout(page);
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Objects" }).click();
+  await page.getByTestId("layer-row").first().click();
+  await page.getByRole("button", { name: "Weed box…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Weed box" });
+  await dialog.getByLabel("Weed lines across the box").uncheck();
+  await dialog.getByRole("button", { name: "Add weed box" }).click();
+  await expect(page.getByTestId("layer-row")).toHaveCount(4);
+  const [call] = await shapeCalls(page);
+  expect(call.args).toEqual({ ids: [2], marginMm: 3, lineSpacingMm: null });
+});
+
+test("Copies repeats the selection into a grid spaced by the gap", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  await page.getByRole("button", { name: "Copies…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Copies" });
+  await dialog.getByLabel("Columns").fill("3");
+  await dialog.getByLabel("Rows").fill("2");
+  await dialog.getByLabel("Gap across").fill("5");
+  await dialog.getByRole("button", { name: "Make copies" }).click();
+  await expect(dialog).not.toBeVisible();
+  // Two seeded rects plus five copies of the red one.
+  await expect(page.getByTestId("layer-row")).toHaveCount(7);
+  const [call] = await shapeCalls(page);
+  expect(call).toEqual({ cmd: "array_copies", args: { ids: [2], cols: 3, rows: 2, gapXMm: 5, gapYMm: 3 } });
+  // The last copy sits two cells across (10 mm box + 5 mm gap) and one down (10 + 3).
+  const last = await page.evaluate(async () => {
+    const internals = window as unknown as { __TAURI_INTERNALS__: { invoke: (c: string, a?: unknown) => Promise<string> } };
+    const d = JSON.parse(await internals.__TAURI_INTERNALS__.invoke("snapshot", {}));
+    const ids = d.nodes[d.root].children as number[];
+    return d.nodes[ids[ids.length - 1]].transform;
+  });
+  expect(last).toEqual([1, 0, 0, 1, 30, 13]);
+});
+
+test("Copies with one cell is refused before anything is sent", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  await page.getByRole("button", { name: "Copies…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Copies" });
+  await dialog.getByLabel("Columns").fill("1");
+  await expect(dialog.getByRole("alert")).toHaveText("Copies need more than one column or row");
+  await expect(dialog.getByRole("button", { name: "Make copies" })).toBeDisabled();
+  expect(await shapeCalls(page)).toEqual([]);
+});
+
+test("Nest packs the selected pieces across the media in one batch", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedAlignExtras: true, seedTwoColorRects: true });
+  await page.goto("/");
+  // The red rect and the Group of two (50..80 x 20..50).
+  await selectRows(page, [0, 2]);
+  await page.getByRole("button", { name: "Nest…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Nest" });
+  await dialog.getByLabel("Gap between pieces").fill("5");
+  await dialog.getByLabel("Turn pieces a quarter when it saves media").uncheck();
+  await dialog.getByRole("button", { name: "Nest pieces" }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  const log = await commitLog(page);
+  expect(new Set(log.map((c) => c.batch))).toEqual(new Set([1]));
+  // Tallest first: the Group's 30 x 30 box to (5, 5), then the red rect beside it at (40, 5).
+  const byId = Object.fromEntries(log.map((c) => [c.ids[0], c.m]));
+  expect(byId[4]).toEqual([1, 0, 0, 1, -45, -15]);
+  expect(byId[2]).toEqual([1, 0, 0, 1, 40, 5]);
+});
+
+test("a Nest with a piece too wide for the media moves nothing and says why", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  await page.getByLabel("W", { exact: true }).fill("400");
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  await page.getByRole("button", { name: "Nest…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Nest" });
+  await dialog.getByLabel("Turn pieces a quarter when it saves media").uncheck();
+  await dialog.getByRole("button", { name: "Nest pieces" }).click();
+  await expect(page.getByText("Not nested: a piece is wider than the media")).toBeVisible();
+  await expect(dialog).toBeVisible();
+  expect((await commitLog(page)).length).toBe(1);
+});
+
 // ── Simple (LightBurn-style) shell ─────────────────────────────────────────────────────────────
 
 const useSimpleLayout = (page: Page) =>
   page.addInitScript(() => {
     try { localStorage.setItem("cuthulhu.layout", "simple"); } catch { /* opaque origin */ }
   });
+
 
 test("the simple shell cuts a two-colour design from the docked Cutter panel", async ({ page }) => {
   await useSimpleLayout(page);
