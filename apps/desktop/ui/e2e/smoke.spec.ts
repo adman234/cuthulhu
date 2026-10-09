@@ -253,6 +253,25 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
           try { resolve(apply()); } catch (e) { reject(e); }
         }));
     },
+    // Mirrors commands::set_stroke_color: descends into containers like set_cut_line_type, because
+    // the planner reads paint only off shapes.
+    set_stroke_color: (a) => {
+      const ids = a.ids as number[];
+      if (ids.length === 0) throw new Error("set_stroke_color: EmptySelection");
+      const seen = new Set<number>();
+      const stack = [...ids];
+      while (stack.length > 0) {
+        const id = stack.pop()!;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const n = doc.nodes[id];
+        if (!n) throw new Error("set_stroke_color: NotFound");
+        if (typeof n.kind === "object" && n.kind !== null && "Shape" in (n.kind as object)) {
+          n.style = { ...n.style, stroke: a.rgba as number };
+        } else stack.push(...n.children);
+      }
+      return {};
+    },
     // Mirrors commands::set_material_preset: writes the selection and nothing else, because a
     // material inherits and the planner resolves it. Descending here would be the bug the real
     // command was written to avoid.
@@ -1207,6 +1226,11 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
 // `opts` already has it, and because the fake is serialized into the page and so can close over
 // nothing outside itself — including this import.
 test.beforeEach(async ({ page }) => {
+  // Every test written before the simple shell drives the classic layout; the simple shell's own
+  // tests switch back with `useSimpleLayout`, whose init script runs after this one.
+  await page.addInitScript(() => {
+    try { localStorage.setItem("cuthulhu.layout", "classic"); } catch { /* opaque origin */ }
+  });
   await page.addInitScript((inventory) => {
     const injected = window as unknown as { __IPC_INVENTORY__: unknown };
     // Prototype-less: a lookup table, so `Object.prototype`'s members are not commands.
@@ -4478,4 +4502,80 @@ test("a second Open or Reload while one is still loading is refused, and edits s
   // Once the first load's snapshot renders, editing works.
   await page.getByTestId("layer-row").first().click();
   await expect(page.getByRole("button", { name: "Align horizontal centres" })).toBeEnabled();
+});
+
+// ── Simple (LightBurn-style) shell ─────────────────────────────────────────────────────────────
+
+const useSimpleLayout = (page: Page) =>
+  page.addInitScript(() => {
+    try { localStorage.setItem("cuthulhu.layout", "simple"); } catch { /* opaque origin */ }
+  });
+
+test("the simple shell cuts a two-colour design from the docked Cutter panel", async ({ page }) => {
+  await useSimpleLayout(page);
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+
+  // One Cuts row per colour, planned without opening anything.
+  await expect(page.getByTestId("cuts-row")).toHaveCount(2);
+  await expect(page.getByTestId("start-reason")).toHaveText("Connect a cutter first");
+
+  await page.getByRole("button", { name: "Connect cutter" }).click();
+  await expect(page.getByTestId("cutter-badge")).toBeVisible();
+  await page.getByRole("button", { name: "Start", exact: true }).click();
+
+  // The fake parks between colours; the dock offers Resume from `actions`, and the job finishes.
+  await page.getByRole("button", { name: "Resume", exact: true }).click();
+  await expect(page.getByText(/· Ready/)).toBeVisible();
+
+  const request = (await callFake(page, "__test_last_cut_request")) as { grouping: string; passes: { enabled: boolean }[] };
+  expect(request.grouping).toBe("Color");
+  expect(request.passes.map((p) => p.enabled)).toEqual([true, true]);
+});
+
+test("a layer with Output off is sent disabled, and its settings survive a replan", async ({ page }) => {
+  await useSimpleLayout(page);
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await expect(page.getByTestId("cuts-row")).toHaveCount(2);
+
+  await page.getByLabel("Output Red").uncheck();
+  await page.getByLabel("Speed for Red").fill("4");
+
+  // Any edit replans the panel; the red layer's choices must still be there afterwards.
+  await page.getByRole("tab", { name: "Objects" }).click();
+  await page.getByTestId("layer-row").nth(1).click();
+  await page.getByRole("button", { name: "Put selection on Blue" }).click();
+  await page.getByRole("tab", { name: "Cuts / Layers" }).click();
+  await expect(page.getByTestId("cuts-row").filter({ hasText: "Blue" })).toHaveCount(1);
+  await expect(page.getByLabel("Output Red")).not.toBeChecked();
+  await expect(page.getByLabel("Speed for Red")).toHaveValue("4");
+
+  await page.getByRole("button", { name: "Connect cutter" }).click();
+  await page.getByRole("button", { name: "Start", exact: true }).click();
+  await expect.poll(() => callFake(page, "__test_last_cut_request")).not.toBeNull();
+  const request = (await callFake(page, "__test_last_cut_request")) as {
+    passes: { key: string; enabled: boolean; speed: number | null }[];
+  };
+  const red = request.passes.find((p) => p.key === "color:ff0000ff");
+  expect(red).toMatchObject({ enabled: false, speed: 4 });
+});
+
+test("a palette swatch is withheld until something is selected", async ({ page }) => {
+  await useSimpleLayout(page);
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Put selection on Blue" })).toBeDisabled();
+});
+
+test("the layout switch brings back the classic panels and is remembered", async ({ page }) => {
+  await useSimpleLayout(page);
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await expect(page.getByRole("region", { name: "Cuts" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Switch to classic layout" }).click();
+  await expect(page.getByRole("region", { name: "Cuts" })).toHaveCount(0);
+  await expect(page.getByTestId("layer-row")).toHaveCount(2);
+  expect(await page.evaluate(() => localStorage.getItem("cuthulhu.layout"))).toBe("classic");
 });

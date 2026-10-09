@@ -167,3 +167,15 @@ the device and the date it was verified on. The upstream PR for Cameo 1 support 
       rather than on top of it.
 - [ ] Cancel mid-cut, and unplug mid-cut, end as they do on the Cameo 5 (see SP4).
 - [ ] Each builtin `cameo1-*` preset cuts its material cleanly with the standard ratchet blade.
+
+## Simple (LightBurn-style) shell — fork only, not yet verified in the real app
+
+Covered headless by vitest (`src/simple/*.test.ts`) and the e2e fake. These boxes are for the real
+Tauri window.
+- [ ] The window opens on the simple shell: Cuts / Layers and Cutter on the right, Layer swatches under the canvas.
+- [ ] Selecting shapes and clicking a swatch recolours them in one undo step, and a Cuts row appears for that colour.
+- [ ] A speed typed on a layer survives moving a shape (the panel replans and keeps it).
+- [ ] With a cutter plugged in, Connect cutter, then Start, cuts every layer with Output on, in row order.
+- [ ] Stop during a cut ends it, and the badge goes back to Ready.
+- [ ] Connecting from the full cut dialog is reflected in the dock without reopening it.
+- [ ] Classic layout switches back and is remembered across launches.

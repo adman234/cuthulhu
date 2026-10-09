@@ -78,6 +78,14 @@ impl AppState {
         Ok(self.editor.commit(d))
     }
 
+    pub fn set_stroke_color(&mut self, ids: Vec<NodeId>, rgba: u32) -> Result<Delta, CmdError> {
+        let d = commands::set_stroke_color(&self.editor.doc, &ids, rgba)?;
+        // Same rule as `set_cut_line_type`: re-picking the swatch a selection already has is a
+        // no-op, not an undo step.
+        if d.0.is_empty() { return Ok(d); }
+        Ok(self.editor.commit(d))
+    }
+
     pub fn set_material_preset(&mut self, ids: Vec<NodeId>, value: PresetAssignment)
         -> Result<Delta, CmdError> {
         let d = commands::set_material_preset(&self.editor.doc, &ids, value)?;
@@ -229,6 +237,18 @@ mod tests {
 
         let d = app.set_cut_line_type(vec![id], CutLineType::Cut).unwrap();
         assert!(d.0.is_empty(), "premise: the rect already cuts");
+        assert!(app.redo().is_some(), "a no-op must not throw away redoable work");
+    }
+
+    #[test]
+    fn app_state_set_stroke_color_no_op_keeps_redo_stack() {
+        let mut app = AppState::new();
+        let id = app.add_rect(1.0, 1.0);
+        app.add_rect(2.0, 2.0);
+        app.undo();
+
+        let d = app.set_stroke_color(vec![id], 0x000000ff).unwrap();
+        assert!(d.0.is_empty(), "premise: a new rect is stroked black");
         assert!(app.redo().is_some(), "a no-op must not throw away redoable work");
     }
 }

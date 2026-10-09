@@ -55,6 +55,7 @@ fn main() {
             ipc::delete,
             ipc::reorder,
             ipc::set_cut_line_type,
+            ipc::set_stroke_color,
             ipc::set_material_preset,
             ipc::undo,
             ipc::redo,

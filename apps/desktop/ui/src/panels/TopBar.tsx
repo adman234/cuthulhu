@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { useRef, type CSSProperties } from "react";
 import type { MachineProfile } from "../App";
+import type { Layout } from "../simple/layout";
 
 type Props = {
   machines: MachineProfile[];
@@ -15,6 +16,9 @@ type Props = {
   onImportFile: (file: File) => void;
   onCut: () => void;
   onTrace: () => void;
+  /** The shell on screen, and how to switch it. Absent, no switch is offered. */
+  layout?: Layout;
+  onToggleLayout?: () => void;
 };
 
 const btn: CSSProperties = {
@@ -38,6 +42,8 @@ export function TopBar({
   onImportFile,
   onCut,
   onTrace,
+  layout,
+  onToggleLayout,
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   return (
@@ -103,6 +109,15 @@ export function TopBar({
       <button aria-label="Cut" style={btn} onClick={onCut}>
         Cut
       </button>
+      {layout && onToggleLayout ? (
+        <button
+          aria-label={layout === "simple" ? "Switch to classic layout" : "Switch to simple layout"}
+          style={btn}
+          onClick={onToggleLayout}
+        >
+          {layout === "simple" ? "Classic layout" : "Simple layout"}
+        </button>
+      ) : null}
     </div>
   );
 }

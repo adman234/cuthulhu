@@ -39,6 +39,7 @@
   "set_cut_line_type": ["ids", "value"],
   "set_machine": ["machineId"],
   "set_material_preset": ["ids", "value"],
+  "set_stroke_color": ["ids", "rgba"],
   "settings_ranges": [],
   "snapshot": [],
   "test_host": ["address", "fingerprint", "token"],

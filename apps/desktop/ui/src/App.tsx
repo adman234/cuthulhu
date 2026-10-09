@@ -22,6 +22,18 @@ import { StatusBar } from "./panels/StatusBar";
 import { CutDialog } from "./cut/CutDialog";
 import { TraceDialog } from "./trace/TraceDialog";
 import { TextDialog } from "./text/TextDialog";
+import { SimpleDock } from "./simple/SimpleDock";
+import { ColorPalette } from "./simple/ColorPalette";
+import { readLayout, writeLayout, type Layout } from "./simple/layout";
+
+/** `window.localStorage` itself can throw (blocked site data), not just its methods. */
+function layoutStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
 
 // Shapes mirroring the Rust `document` crate's serde JSON. Loose but sufficient for the
 // paths this UI actually reads — see crates/document/src/{node,delta,machine}.rs.
@@ -136,6 +148,12 @@ export function App() {
   }, []);
   const [lastPath, setLastPath] = useState<string | null>(null);
   const [cutOpen, setCutOpen] = useState(false);
+  const [layout, setLayout] = useState<Layout>(() => readLayout(layoutStorage()));
+  const toggleLayout = () => {
+    const next: Layout = layout === "simple" ? "classic" : "simple";
+    writeLayout(layoutStorage(), next);
+    setLayout(next);
+  };
   const [textOpen, setTextOpen] = useState(false);
   const [tracePath, setTracePath] = useState<string | null>(null);
   const [status, setStatus] = useState<ipc.CutStatus>(ipc.DISCONNECTED_STATUS);
@@ -493,6 +511,13 @@ export function App() {
 
   const cutLineType = doc ? selectionCutLineType(doc.nodes, selected) : null;
 
+  const setStrokeColor = (rgba: number) => {
+    if (selected.length === 0) return;
+    edit(() => ipc.setStrokeColor({ ids: selected, rgba }));
+  };
+  const paletteDisabled =
+    lockReason(interaction.editsLock) ?? (selected.length === 0 ? "Select shapes to put them on a layer" : null);
+
   const setCutLineType = (value: CutLineTypeJson) => {
     if (selected.length === 0) return;
     edit(() => ipc.setCutLineType({ ids: selected, value }));
@@ -556,12 +581,42 @@ export function App() {
     setTracePath(null);
   };
 
+  // The layers tree and the selection's properties. The classic layout docks them on the right;
+  // the simple one puts them behind the dock's Objects tab.
+  const objects = (
+    <>
+        <LayersPanel
+          doc={doc}
+          selected={selected}
+          onSelect={(id, shiftKey) => setSelected((prev) => (shiftKey ? toggleId(prev, id) : [id]))}
+        />
+        <PropertiesPanel
+          bounds={selectedBounds}
+          onChangeX={(v) => commitAxis("x", v)}
+          onChangeY={(v) => commitAxis("y", v)}
+          onChangeW={(v) => commitScale("w", v)}
+          onChangeH={(v) => commitScale("h", v)}
+          unitCount={unitCount}
+          distributeBlocked={distributeBlocked}
+          editsLocked={lockReason(interaction.editsLock)}
+          onAlign={align}
+          onDistribute={distribute}
+          cutLineType={cutLineType}
+          onChangeCutLineType={setCutLineType}
+          materialPreset={materialPreset}
+          effectiveMaterial={effectiveMaterial}
+          presets={presets}
+          onChangeMaterialPreset={setMaterialPreset}
+        />
+    </>
+  );
+
   return (
     <div
       style={{
         display: "grid",
-        gridTemplateRows: "auto 1fr auto",
-        gridTemplateColumns: "auto 1fr 280px",
+        gridTemplateRows: layout === "simple" ? "auto 1fr auto auto" : "auto 1fr auto",
+        gridTemplateColumns: layout === "simple" ? "auto 1fr 360px" : "auto 1fr 280px",
         height: "100%",
       }}
     >
@@ -606,6 +661,8 @@ export function App() {
           onImportFile={onImportFile}
           onCut={() => setCutOpen(true)}
           onTrace={onTrace}
+          layout={layout}
+          onToggleLayout={toggleLayout}
         />
       </div>
       <ToolRail
@@ -630,31 +687,28 @@ export function App() {
           {...interaction.handlers}
         />
       </div>
-      <div style={{ display: "grid", gridTemplateRows: "1fr 1fr", borderLeft: "1px solid var(--border)", minHeight: 0 }}>
-        <LayersPanel
+      {layout === "simple" ? (
+        <SimpleDock
           doc={doc}
-          selected={selected}
-          onSelect={(id, shiftKey) => setSelected((prev) => (shiftKey ? toggleId(prev, id) : [id]))}
+          docMachineId={doc?.machine?.id ?? null}
+          status={status}
+          refreshDeviceState={refreshDeviceState}
+          onError={setError}
+          onConvertMachine={(machineId) => edit(() => ipc.setMachine({ machineId }))}
+          onOpenCutDialog={() => setCutOpen(true)}
+          objects={objects}
+          gridRow="2 / 4"
         />
-        <PropertiesPanel
-          bounds={selectedBounds}
-          onChangeX={(v) => commitAxis("x", v)}
-          onChangeY={(v) => commitAxis("y", v)}
-          onChangeW={(v) => commitScale("w", v)}
-          onChangeH={(v) => commitScale("h", v)}
-          unitCount={unitCount}
-          distributeBlocked={distributeBlocked}
-          editsLocked={lockReason(interaction.editsLock)}
-          onAlign={align}
-          onDistribute={distribute}
-          cutLineType={cutLineType}
-          onChangeCutLineType={setCutLineType}
-          materialPreset={materialPreset}
-          effectiveMaterial={effectiveMaterial}
-          presets={presets}
-          onChangeMaterialPreset={setMaterialPreset}
-        />
-      </div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateRows: "1fr 1fr", borderLeft: "1px solid var(--border)", minHeight: 0 }}>
+          {objects}
+        </div>
+      )}
+      {layout === "simple" ? (
+        <div style={{ gridRow: "3", gridColumn: "2 / 3" }}>
+          <ColorPalette disabledReason={paletteDisabled} onPick={setStrokeColor} />
+        </div>
+      ) : null}
       <div style={{ gridColumn: "1 / -1" }}>
         <StatusBar
           machine={doc?.machine ?? null}

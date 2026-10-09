@@ -71,6 +71,12 @@ pub fn set_cut_line_type(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>, 
 }
 
 #[tauri::command]
+pub fn set_stroke_color(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>, rgba: u32)
+    -> Result<Delta, String> {
+    state.lock().unwrap().set_stroke_color(ids, rgba).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn set_material_preset(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>, value: PresetAssignment)
     -> Result<Delta, String> {
     state.lock().unwrap().set_material_preset(ids, value).map_err(|e| e.to_string())

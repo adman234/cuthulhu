@@ -132,6 +132,35 @@ pub fn set_cut_line_type(doc: &Document, ids: &[NodeId], value: CutLineType)
     Ok(Delta(ops))
 }
 
+/// Give every shape in `ids` the stroke colour `rgba` (`0xRRGGBBAA`), descending into containers.
+///
+/// This is how a shape is put on a colour pass: `cutplan::plan_passes_with` groups by stroke
+/// under `Grouping::Color` and `Grouping::Stroke`. It descends for the reason
+/// `set_cut_line_type` does — paint is read only off the shape that carries it, so a colour on a
+/// Group alone would be a swatch that visibly does nothing. Unchanged shapes emit no op.
+pub fn set_stroke_color(doc: &Document, ids: &[NodeId], rgba: u32) -> Result<Delta, CmdError> {
+    if ids.is_empty() { return Err(CmdError::EmptySelection); }
+    let mut ops = vec![];
+    let mut seen = HashSet::new();
+    let mut stack: Vec<NodeId> = ids.iter().rev().copied().collect();
+    while let Some(id) = stack.pop() {
+        let node = doc.get(id).ok_or(CmdError::NotFound)?;
+        // A group and a shape inside it are both ordinary selections; skip the revisit.
+        if !seen.insert(id) { continue; }
+        match &node.kind {
+            NodeKind::Group | NodeKind::Layer => stack.extend(node.children.iter().rev().copied()),
+            NodeKind::Shape(_) => {
+                if node.style.stroke == Some(rgba) { continue; }
+                let before = node.clone();
+                let mut after = before.clone();
+                after.style.stroke = Some(rgba);
+                ops.push(NodeOp::Update { id, before, after });
+            }
+        }
+    }
+    Ok(Delta(ops))
+}
+
 /// Assign `value` to every Node in `ids`, and to nothing else.
 ///
 /// Deliberately *not* `set_cut_line_type`'s walk. That command descends into containers
@@ -1124,5 +1153,43 @@ mod tests {
         let (mut ed, _, _, g, c) = batch_doc();
         ed.commit(transform_each(&ed.doc, &[(vec![g], Affine::translate(5.0, 0.0)), (vec![c], Affine::translate(5.0, 0.0))]).unwrap());
         assert_eq!(world_transform(&ed.doc, c).unwrap().apply(0.0, 0.0), (5.0, 0.0));
+    }
+
+    /// A swatch on a Group has to recolour the shapes under it: the planner reads paint only
+    /// off shapes, so colouring the container alone would leave every pass as it was.
+    #[test]
+    fn a_stroke_colour_reaches_the_shapes_under_a_container_and_undoes_in_one_step() {
+        let mut ed = Editor::new();
+        let gid = ed.doc.ids.next();
+        ed.commit(Delta(vec![NodeOp::Add { parent: ed.doc.root,
+            node: Node::container(gid, NodeKind::Group), index: 0 }]));
+        let a = ed.doc.ids.next();
+        let b = ed.doc.ids.next();
+        ed.commit(Delta(vec![
+            NodeOp::Add { parent: gid, node: Node::shape(a, ShapeKind::Rect { w: 1.0, h: 1.0 }), index: 0 },
+            NodeOp::Add { parent: gid, node: Node::shape(b, ShapeKind::Rect { w: 1.0, h: 1.0 }), index: 1 },
+        ]));
+
+        ed.commit(set_stroke_color(&ed.doc, &[gid], 0xff0000ff).unwrap());
+        assert_eq!(ed.doc.get(a).unwrap().style.stroke, Some(0xff0000ff));
+        assert_eq!(ed.doc.get(b).unwrap().style.stroke, Some(0xff0000ff));
+        assert_eq!(ed.doc.get(gid).unwrap().style, Node::container(gid, NodeKind::Group).style,
+            "the container's own paint is not what the planner reads, so it is left alone");
+
+        ed.undo();
+        assert_eq!(ed.doc.get(a).unwrap().style.stroke, Some(0x000000ff), "one undo restores both");
+        assert_eq!(ed.doc.get(b).unwrap().style.stroke, Some(0x000000ff));
+    }
+
+    #[test]
+    fn a_stroke_colour_a_shape_already_has_produces_no_ops() {
+        let mut doc = Document::new();
+        let shape = Node::shape(doc.ids.next(), ShapeKind::Rect { w: 1.0, h: 1.0 });
+        let id = shape.id;
+        doc.apply(Delta(vec![NodeOp::Add { parent: doc.root, node: shape, index: usize::MAX }]));
+        assert_eq!(set_stroke_color(&doc, &[id], 0x000000ff).unwrap(), Delta(vec![]));
+        assert_eq!(set_stroke_color(&doc, &[id, id], 0x00ff00ff).unwrap().0.len(), 1);
+        assert_eq!(set_stroke_color(&doc, &[], 0x00ff00ff), Err(CmdError::EmptySelection));
+        assert_eq!(set_stroke_color(&doc, &[NodeId(9999)], 0x00ff00ff), Err(CmdError::NotFound));
     }
 }
