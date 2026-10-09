@@ -36,6 +36,18 @@ Nothing has been released yet, so there is no history before `Unreleased`.
 
 ### Added
 
+- **Shape tools on the tool rail**, each one undo: **Offset…** outlines the selection at a
+  distance (negative insets) with round, sharp or bevelled corners; **Weed box…** puts a border a
+  margin around the selection with optional weed lines that stop 1 mm short of every shape's
+  outline; **Copies…** repeats the selection into a columns × rows grid spaced by the gap between
+  boxes; **Weld** unions the selection, text included, into one Path; **To path** turns shapes
+  into plain Paths; **Nest…** packs the selected pieces across the media from its top, turning
+  them a quarter when that saves length (bounding boxes on shelves, not true-shape nesting).
+- **Text is editable.** The Text dialog takes the words (several lines allowed), a size in mm and
+  the font, and reopens prefilled from "Edit text…" in the properties panel or a double-click.
+  A Text node keeps the outline it was drawn with, so a project opened where its font is missing
+  still cuts the letters that were designed.
+
 - **The cut dialog manages the operator's own material presets** for the cutter it is aimed at:
   create, duplicate, rename, edit and delete, with speed, force and repeat count validated against
   the ranges `cutplan` refuses a cut over, and a readout of what a pass cut with the preset would
