@@ -158,6 +158,7 @@ pub fn plan_cut(
                 job: Job {
                     polylines: c.pass.shapes.iter().flat_map(|s| s.polylines.iter().cloned()).collect(),
                     settings: c.settings.clone(),
+                    registration: None,
                 },
             })
             .collect(),

@@ -719,6 +719,7 @@ mod tests {
                     Point { x: 10.0, y: 10.0 }, Point { x: 0.0, y: 0.0 },
                 ]],
                 settings: Settings::default(),
+                registration: None,
             },
         }
     }
@@ -771,6 +772,7 @@ mod tests {
             job: Job {
                 polylines: vec![vec![Point { x: 0.0, y: 0.0 }, Point { x: 400.0, y: 0.0 }]],
                 settings: Settings::default(),
+                registration: None,
             },
         };
         let refusal = host

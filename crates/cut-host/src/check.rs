@@ -119,7 +119,7 @@ mod tests {
         MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false, ..Default::default() }
     }
     fn pass_with(polylines: Vec<Vec<Point>>, settings: Settings) -> CutPass {
-        CutPass { job: Job { polylines, settings } }
+        CutPass { job: Job { polylines, settings, registration: None } }
     }
     fn square() -> Vec<Point> {
         vec![

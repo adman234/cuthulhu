@@ -99,6 +99,7 @@ fn a_refusal_reaches_the_client_as_its_sentence() {
         job: Job {
             polylines: vec![vec![Point { x: 0.0, y: 0.0 }, Point { x: 400.0, y: 0.0 }]],
             settings: Settings::default(),
+            registration: None,
         },
     };
     match client.dispatch(&DispatchId("d-1".into()), CAMEO, "cameo5", vec![off_the_bed]) {

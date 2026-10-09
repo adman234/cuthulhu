@@ -146,6 +146,7 @@ mod tests {
                     Point { x: 0.0, y: 0.0 },
                 ]],
                 settings: Settings::default(),
+                registration: None,
             },
         }
     }

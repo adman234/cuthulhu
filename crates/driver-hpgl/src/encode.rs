@@ -50,7 +50,7 @@ mod tests {
             .iter()
             .map(|&(x, y)| Point { x, y })
             .collect();
-        let job = Job { polylines: vec![poly], settings: Settings::default() };
+        let job = Job { polylines: vec![poly], settings: Settings::default(), registration: None };
         let mut bytes = d.session_begin();
         bytes.extend(d.encode_pass(&job).unwrap());
         bytes.extend(d.session_end());
@@ -63,7 +63,7 @@ mod tests {
     fn session_framing_has_one_prologue_and_one_epilogue_across_two_passes() {
         let d = HpglDriver::new();
         let job = |x: f64| Job { polylines: vec![vec![Point{x:0.0,y:0.0}, Point{x, y:0.0}]],
-                                settings: Settings { speed: None, force: None, repeat_count: 1, ..Default::default() } };
+                                settings: Settings { speed: None, force: None, repeat_count: 1, ..Default::default() }, registration: None };
         let mut bytes = d.session_begin();
         bytes.extend(d.encode_pass(&job(10.0)).unwrap());
         bytes.extend(d.pass_park());
@@ -80,7 +80,7 @@ mod tests {
     fn single_pass_session_is_byte_identical_to_sp2_encoding() {
         let d = HpglDriver::new();
         let job = Job { polylines: vec![vec![Point{x:1.0,y:2.0}, Point{x:3.0,y:4.0}]],
-                        settings: Settings { speed: None, force: None, repeat_count: 2, ..Default::default() } };
+                        settings: Settings { speed: None, force: None, repeat_count: 2, ..Default::default() }, registration: None };
         let mut session = d.session_begin();
         session.extend(d.encode_pass(&job).unwrap());
         session.extend(d.session_end());

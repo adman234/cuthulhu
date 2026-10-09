@@ -2538,6 +2538,7 @@ mod tests {
                             geometry::Point { x: 0.0, y: 0.0 },
                         ]],
                         settings: driver_core::Settings::default(),
+                        registration: None,
                     },
                 }],
             )
@@ -2897,6 +2898,7 @@ mod tests {
                     geometry::Point { x: 0.0, y: 0.0 },
                 ]],
                 settings: driver_core::Settings::default(),
+                registration: None,
             },
         }]
     }
