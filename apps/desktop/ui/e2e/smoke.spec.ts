@@ -11,7 +11,7 @@ import ipcInventory from "../../ipc-inventory.json" with { type: "json" };
 // can't close over anything outside itself) and mirrors the JSON shape produced by
 // crates/document's Document::snapshot_json() — see App.tsx's DocSnapshot/buildScene,
 // which is what actually parses this on the JS side.
-function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview?: boolean; dropTraceControl?: string; seedBusyHost?: boolean; seedRemoteConnected?: boolean; slowList?: boolean; failList?: boolean; noFonts?: boolean; seedMachine?: boolean; seedUserPreset?: boolean; seedEmptyPresetAssignment?: boolean; seedGroup?: boolean }) {
+function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview?: boolean; dropTraceControl?: string; seedBusyHost?: boolean; seedRemoteConnected?: boolean; slowList?: boolean; failList?: boolean; noFonts?: boolean; seedMachine?: boolean; seedUserPreset?: boolean; seedEmptyPresetAssignment?: boolean; seedGroup?: boolean; seedAlignExtras?: boolean; seedCollapsedGroup?: boolean; collapsedScale?: number }) {
   type Style = { stroke: number | null; fill: number | null };
   type PresetAssignment = { state: "inherit" } | { state: "unassigned" } | { state: "preset"; id: string };
   type Node = { id: number; kind: unknown; transform: number[]; style: Style; children: number[]; cut_line_type: "Cut" | "NoCut"; material_preset: PresetAssignment };
@@ -91,6 +91,32 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     doc.nodes[doc.root].children.push(redId, greenId);
   }
 
+  // After the rects: a Group of two 10 mm rects at (50, 20) and (70, 40), so its bounds are
+  // 50..80 × 20..50 and no single shape gives them, and an empty Group with nothing to line up.
+  if (opts?.seedAlignExtras) {
+    const groupId = nextId++;
+    const leftId = nextId++;
+    const rightId = nextId++;
+    const emptyId = nextId++;
+    const rect = (id: number, x: number, y: number): Node => ({ id, kind: { Shape: { Rect: { w: 10, h: 10 } } }, transform: [1, 0, 0, 1, x, y], style: { stroke: 0x0000ffff, fill: null }, children: [], cut_line_type: "Cut", material_preset: { state: "inherit" } });
+    doc.nodes[groupId] = { id: groupId, kind: "Group", transform: [1, 0, 0, 1, 0, 0], style: { stroke: null, fill: null }, children: [leftId, rightId], cut_line_type: "Cut", material_preset: { state: "inherit" } };
+    doc.nodes[leftId] = rect(leftId, 50, 20);
+    doc.nodes[rightId] = rect(rightId, 70, 40);
+    doc.nodes[emptyId] = { id: emptyId, kind: "Group", transform: [1, 0, 0, 1, 0, 0], style: { stroke: null, fill: null }, children: [], cut_line_type: "Cut", material_preset: { state: "inherit" } };
+    doc.nodes[doc.root].children.push(groupId, emptyId);
+  }
+
+  // A Group scaled to nothing, holding one rect: a move beneath it cannot be put into its space,
+  // which is the geometry refusal `transform_nodes` makes after earlier entries already succeeded.
+  if (opts?.seedCollapsedGroup) {
+    const groupId = nextId++;
+    const childId = nextId++;
+    const k = opts.collapsedScale ?? 0;
+    doc.nodes[groupId] = { id: groupId, kind: "Group", transform: [k, 0, 0, k, 0, 0], style: { stroke: null, fill: null }, children: [childId], cut_line_type: "Cut", material_preset: { state: "inherit" } };
+    doc.nodes[childId] = { id: childId, kind: { Shape: { Rect: { w: 10, h: 10 } } }, transform: [1, 0, 0, 1, 0, 0], style: { stroke: 0xff0000ff, fill: null }, children: [], cut_line_type: "Cut", material_preset: { state: "inherit" } };
+    doc.nodes[doc.root].children.push(groupId);
+  }
+
   const unimplemented = (cmd: string): never => {
     throw new Error(`${cmd}: mocked command the e2e fake does not perform; implement it here to test it`);
   };
@@ -107,7 +133,11 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
         failNextSnapshot = false;
         throw new Error("snapshot unavailable");
       }
-      return JSON.stringify(doc);
+      // Read when the command runs, as the backend does, so a held answer still shows the document
+      // as it stood then, even if a load has replaced it before the answer arrives.
+      const json = JSON.stringify(doc);
+      if (holdingSnapshots) return new Promise((resolve) => heldSnapshots.push(() => resolve(json)));
+      return json;
     },
     add_primitive: (a) => {
       const id = nextId++;
@@ -139,46 +169,52 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
         throw new Error("transform refused");
       }
       const m = a.m as number[];
-      const hooks = window as unknown as { __commitTransforms?: { ids: number[]; m: number[] }[] };
+      const hooks = window as unknown as { __commitTransforms?: { ids: number[]; m: number[]; batch?: number }[] };
       hooks.__commitTransforms ??= [];
       hooks.__commitTransforms.push({ ids: a.ids as number[], m });
-      // Mirrors crates/document/src/commands.rs transform_nodes (L53-77): `m` is world-space, so
-      // each node's local transform becomes local · parentWorld · m · parentWorld⁻¹, and a node
-      // whose ancestor is also selected is skipped, since the ancestor already carries it.
-      // Composing `m` straight onto a nested node's local transform lands it where the real
-      // backend never would (Copilot on #298).
-      const cmp = (p: number[], q: number[]) => [
-        q[0] * p[0] + q[2] * p[1], q[1] * p[0] + q[3] * p[1],
-        q[0] * p[2] + q[2] * p[3], q[1] * p[2] + q[3] * p[3],
-        q[0] * p[4] + q[2] * p[5] + q[4], q[1] * p[4] + q[3] * p[5] + q[5],
-      ];
-      const inv = (p: number[]) => {
-        const det = p[0] * p[3] - p[1] * p[2];
-        const [ia, ib, ic, id] = [p[3] / det, -p[1] / det, -p[2] / det, p[0] / det];
-        return [ia, ib, ic, id, -(ia * p[4] + ic * p[5]), -(ib * p[4] + id * p[5])];
-      };
-      const parentOf = (id: number) => Object.values(doc.nodes).find((n) => n.children.includes(id))?.id;
-      const worldOf = (id: number | undefined): number[] =>
-        id === undefined ? [1, 0, 0, 1, 0, 0] : cmp(doc.nodes[id].transform, worldOf(parentOf(id)));
-      const selectedIds = new Set(a.ids as number[]);
-      const hasSelectedAncestor = (id: number) => {
-        for (let p = parentOf(id); p !== undefined; p = parentOf(p)) if (selectedIds.has(p)) return true;
-        return false;
-      };
-      const applyIt = () => {
-        for (const id of selectedIds) {
-          const node = doc.nodes[id];
-          if (!node || hasSelectedAncestor(id)) continue;
-          const pw = worldOf(parentOf(id));
-          node.transform = cmp(cmp(cmp(node.transform, pw), m), inv(pw));
-        }
-        return {};
-      };
-      // Answered on a later task, as a real IPC round trip is: resolving in the same microtask burst
-      // let a whole chain of queued commits finish before React rendered between them, which hid
-      // the window where an intermediate snapshot renders while the next commit is on the wire.
-      if (!holdingCommits) return new Promise((resolve) => setTimeout(() => resolve(applyIt()), 0));
-      return new Promise((resolve) => heldCommits.push(() => resolve(applyIt())));
+      return answer(() => applyTransforms([{ ids: a.ids as number[], m }]));
+    },
+    commit_transforms: (a) => {
+      // Counted while unanswered: the real backend serialises commands, so two batches on the wire
+      // at once is a frontend that stopped holding its queue (CodeRabbit on #301).
+      const hooks = window as unknown as { __maxInFlightCommits?: number };
+      inFlightCommits += 1;
+      hooks.__maxInFlightCommits = Math.max(hooks.__maxInFlightCommits ?? 0, inFlightCommits);
+      const answered = ((): Promise<unknown> => {
+      // Mirrors commands::transform_each: every move in one undo, all or nothing, each entry on
+      // what the earlier ones left, and nothing moved twice. Each entry is recorded with its batch,
+      // so a test can tell one click from several. A refusal waits on a hold like an answer does,
+      // so a test can queue edits behind a commit that will be refused.
+      if (failNextCommit) {
+        failNextCommit = false;
+        return answer(() => { throw new Error("transform refused"); });
+      }
+      const moves = a.moves as { ids: number[]; m: number[] }[];
+      // Checked before anything is recorded (all or nothing), and answered in turn like every
+      // other outcome: the real backend serialises commands, so a refusal never overtakes a held
+      // commit ahead of it (CodeRabbit on #301).
+      // An empty batch or entry is EmptySelection in transform_each, refused whole (Copilot on #301).
+      if (moves.length === 0 || moves.some((mv) => mv.ids.length === 0)) {
+        return answer(() => { throw new Error("the selection has nothing this command can act on"); });
+      }
+      if (moves.some((mv) => mv.ids.some((id) => !doc.nodes[id]))) {
+        return answer(() => { throw new Error("the node or machine this command names is not there"); });
+      }
+      // So is a transform that cannot be reversed, against the document as it stands, as the missing
+      // node is: a batch Rust refuses whole must not reach the log and take a batch number. It is
+      // staged again when answered, since a held commit ahead of it can still change the document.
+      try {
+        stageTransforms(moves);
+      } catch (e) {
+        return answer(() => { throw e; });
+      }
+      const hooks = window as unknown as { __commitTransforms?: { ids: number[]; m: number[]; batch?: number }[]; __batches?: number };
+      hooks.__commitTransforms ??= [];
+      hooks.__batches = (hooks.__batches ?? 0) + 1;
+      for (const mv of moves) hooks.__commitTransforms.push({ ids: mv.ids, m: mv.m, batch: hooks.__batches });
+      return answer(() => applyTransforms(moves));
+      })();
+      return answered.finally(() => { inFlightCommits -= 1; });
     },
     delete: (a) => {
       for (const id of a.ids as number[]) {
@@ -190,21 +226,32 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     // Mirrors commands::set_cut_line_type: descends into containers, because the attribute is
     // read only on the shape that carries it — setting it on a Group alone would do nothing.
     set_cut_line_type: (a) => {
-      const value = a.value as "Cut" | "NoCut";
-      const ids = a.ids as number[];
-      if (ids.length === 0) throw new Error("set_cut_line_type: EmptySelection");
-      const seen = new Set<number>();
-      const stack = [...ids];
-      while (stack.length > 0) {
-        const id = stack.pop()!;
-        if (seen.has(id)) continue;
-        seen.add(id);
-        const n = doc.nodes[id];
-        if (!n) throw new Error("set_cut_line_type: NotFound");
-        if (typeof n.kind === "object" && n.kind !== null && "Shape" in (n.kind as object)) n.cut_line_type = value;
-        else stack.push(...n.children);
-      }
-      return {};
+      const apply = () => {
+        const value = a.value as "Cut" | "NoCut";
+        const ids = a.ids as number[];
+        if (ids.length === 0) throw new Error("set_cut_line_type: EmptySelection");
+        const seen = new Set<number>();
+        const stack = [...ids];
+        while (stack.length > 0) {
+          const id = stack.pop()!;
+          if (seen.has(id)) continue;
+          seen.add(id);
+          const n = doc.nodes[id];
+          if (!n) throw new Error("set_cut_line_type: NotFound");
+          if (typeof n.kind === "object" && n.kind !== null && "Shape" in (n.kind as object)) n.cut_line_type = value;
+          else stack.push(...n.children);
+        }
+        return {};
+      };
+      // Held, it stands for any edit still on its way when a load is asked for (an import reading
+      // its file): applied on release, so a load that did not wait for it lands first.
+      if (!holdingEdits) return apply();
+      inFlightEdits++;
+      return new Promise((resolve, reject) =>
+        heldEdits.push(() => {
+          inFlightEdits--;
+          try { resolve(apply()); } catch (e) { reject(e); }
+        }));
     },
     // Mirrors commands::set_material_preset: writes the selection and nothing else, because a
     // material inherits and the planner resolves it. Descending here would be the bug the real
@@ -229,6 +276,7 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     redo: () => unimplemented("redo"),
     boolean_op: () => unimplemented("boolean_op"),
     import_svg: (a) => {
+      (window as unknown as { __docOrder?: string[] }).__docOrder?.push("import_svg");
       const id = nextId++;
       doc.nodes[id] = { id, kind: { Shape: { Path: { d: "" } } }, transform: [1, 0, 0, 1, 0, 0], style: DEFAULT_STYLE, children: [], cut_line_type: "Cut", material_preset: { state: "inherit" } };
       doc.nodes[a.parent as number].children.push(id);
@@ -239,8 +287,20 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       return null;
     },
     load_project: () => {
-      if (saved) doc = JSON.parse(JSON.stringify(saved));
-      return JSON.stringify(doc);
+      // The real backend runs commands one at a time, but only a frontend that waits keeps a load
+      // from landing between a commit and the document it named (CodeRabbit on #301).
+      const loads = window as unknown as { __loadDuringCommit?: boolean; __loadDuringEdit?: boolean; __loads?: number };
+      if (inFlightCommits > 0) loads.__loadDuringCommit = true;
+      if (inFlightEdits > 0) loads.__loadDuringEdit = true;
+      loads.__loads = (loads.__loads ?? 0) + 1;
+      (window as unknown as { __docOrder?: string[] }).__docOrder?.push("load_project");
+      const load = () => {
+        if (saved) doc = JSON.parse(JSON.stringify(saved));
+        return JSON.stringify(doc);
+      };
+      // A real load takes as long as the project is big; held, a test can act while it runs.
+      if (holdingLoads) return new Promise((resolve) => heldLoads.push(() => resolve(load())));
+      return load();
     },
     set_machine: (a) => {
       const m = machines.find((p) => p.id === a.machineId);
@@ -433,16 +493,97 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
   let holdingCommits = false;
   const heldCommits: (() => void)[] = [];
   let failNextCommit = false;
+  let inFlightCommits = 0;
+  let holdingLoads = false;
+  const heldLoads: (() => void)[] = [];
   let failNextSnapshot = false;
+  let holdingEdits = false;
+  const heldEdits: (() => void)[] = [];
+  let inFlightEdits = 0;
+  let holdingSnapshots = false;
+  const heldSnapshots: (() => void)[] = [];
   Object.assign(window, {
+    __holdSnapshots: () => { holdingSnapshots = true; },
+    __holdEdits: () => { holdingEdits = true; },
+    __releaseEdits: () => { holdingEdits = false; return release(heldEdits); },
+    // Oldest first, one at a time: the race is which document's answer renders last.
+    __releaseSnapshot: () => release(heldSnapshots.splice(0, 1)),
+    __releaseLatestSnapshot: () => release(heldSnapshots.splice(-1, 1)),
     __failNextCommit: () => { failNextCommit = true; },
     __failNextSnapshot: () => { failNextSnapshot = true; },
     __holdCommits: () => { holdingCommits = true; },
+    __holdLoad: () => { holdingLoads = true; },
+    __releaseLoad: () => { holdingLoads = false; return release(heldLoads); },
     __releaseCommits: () => { holdingCommits = false; return release(heldCommits); },
     __armHold: () => { holding = true; },
     __releasePlans: () => release(heldPlans),
     __releaseTravel: () => release(heldTravel),
   });
+
+  // Mirrors crates/document/src/commands.rs transform_nodes_in, which transform_nodes and
+  // transform_each share: `m` is world-space, so each node's local transform becomes
+  // local · parentWorld · m · parentWorld⁻¹, and a node whose ancestor any entry selects is skipped,
+  // since the ancestor already carries it. Composing `m` straight onto a nested node's local
+  // transform lands it where the real backend never would (Copilot on #298).
+  function applyTransforms(moves: { ids: number[]; m: number[] }[]) {
+    for (const [id, t] of stageTransforms(moves)) doc.nodes[id].transform = t;
+    return {};
+  }
+
+  // Every entry's result, or a throw for the whole batch. Nothing is written here.
+  function stageTransforms(moves: { ids: number[]; m: number[] }[]) {
+    const cmp = (p: number[], q: number[]) => [
+      q[0] * p[0] + q[2] * p[1], q[1] * p[0] + q[3] * p[1],
+      q[0] * p[2] + q[2] * p[3], q[1] * p[2] + q[3] * p[3],
+      q[0] * p[4] + q[2] * p[5] + q[4], q[1] * p[4] + q[3] * p[5] + q[5],
+    ];
+    const inv = (p: number[]) => {
+      const det = p[0] * p[3] - p[1] * p[2];
+      // As Rust's `pw.inverse()` refusing: the whole batch goes, not just this entry. Exactly zero,
+      // as `Affine::inverse` checks: a tolerance refused tiny scales Rust accepts (Copilot on #301).
+      if (det === 0) throw new Error("something in the selection sits under a transform that cannot be reversed");
+      const [ia, ib, ic, id] = [p[3] / det, -p[1] / det, -p[2] / det, p[0] / det];
+      return [ia, ib, ic, id, -(ia * p[4] + ic * p[5]), -(ib * p[4] + id * p[5])];
+    };
+    // Staged, then published only if every entry succeeds: Rust collects every entry's update and
+    // commits none on any refusal, so a later entry's failure must leave the earlier ones unwritten
+    // (Copilot on #301). Later entries read the staged transforms, as Rust's read the transforms
+    // the earlier ones wrote.
+    const staged = new Map<number, number[]>();
+    const transformOf = (id: number) => staged.get(id) ?? doc.nodes[id].transform;
+    const parentOf = (id: number) => Object.values(doc.nodes).find((n) => n.children.includes(id))?.id;
+    const worldOf = (id: number | undefined): number[] =>
+      id === undefined ? [1, 0, 0, 1, 0, 0] : cmp(transformOf(id), worldOf(parentOf(id)));
+    const selectedIds = new Set(moves.flatMap((mv) => mv.ids));
+    const hasSelectedAncestor = (id: number) => {
+      for (let p = parentOf(id); p !== undefined; p = parentOf(p)) if (selectedIds.has(p)) return true;
+      return false;
+    };
+    for (const { ids, m } of moves) {
+      for (const id of new Set(ids)) {
+        // Checked again when answered: a node deleted while the batch was held is NotFound in
+        // Rust, which refuses the whole batch rather than skipping it (Copilot on #301).
+        if (!doc.nodes[id]) throw new Error("the node or machine this command names is not there");
+        if (hasSelectedAncestor(id)) continue;
+        const pw = worldOf(parentOf(id));
+        staged.set(id, cmp(cmp(cmp(transformOf(id), pw), m), inv(pw)));
+      }
+    }
+    return staged;
+  }
+
+  // Answered on a later task, as a real IPC round trip is: resolving in the same microtask burst
+  // let a whole chain of queued commits finish before React rendered between them, which hid the
+  // window where an intermediate snapshot renders while the next commit is on the wire.
+  function answer<T>(run: () => T): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const settle = () => {
+        try { resolve(run()); } catch (e) { reject(e); }
+      };
+      if (holdingCommits) heldCommits.push(settle);
+      else setTimeout(settle, 0);
+    });
+  }
 
   function ipcError(code: string, message: string) {
     return { code, message };
@@ -2222,8 +2363,9 @@ test("a doc edited after planning refuses the cut until replan", async ({ page }
   await page.getByRole("button", { name: "Connect", exact: true }).first().click();
   await expect(page.getByTestId("cut-pass-row")).toHaveCount(2);
 
-  // Reaches past the UI on purpose: the canvas drag that issues this command is behind
-  // the open dialog, and the backend contract under test is the same either way.
+  // Reaches past the UI on purpose: the canvas drag that would edit the document (through
+  // commit_transforms) is behind the open dialog, and the backend contract under test, geometry
+  // that changes with no node added or removed, is the same either way.
   await page.evaluate(() =>
     (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> } }).__TAURI_INTERNALS__.invoke(
       "commit_transform",
@@ -2981,7 +3123,7 @@ test("a drag pressed while the previous commit is in flight does not commit", as
   await expect.poll(commits).toBe(2);
 });
 
-type CommitRecord = { ids: number[]; m: number[] };
+type CommitRecord = { ids: number[]; m: number[]; batch?: number };
 
 async function commitLog(page: Page): Promise<CommitRecord[]> {
   return page.evaluate(() => (window as unknown as { __commitTransforms?: CommitRecord[] }).__commitTransforms ?? []);
@@ -3273,9 +3415,10 @@ test("scaling a shape inside a moved Group keeps it where the real backend would
   await expect.poll(async () => nodeTransform(page, 3)).toEqual([2, 0, 0, 1.5, 0, 0].map((x) => expect.closeTo(x, 1)));
 });
 
-// Queued edits drain one per settled commit, and the snapshot of one can render while the next is
-// on the wire. That intermediate snapshot must not retire the in-flight preview, or the edit after
-// it is computed from geometry the backend has already left (Copilot on #298).
+// Queued edits drain one per settled commit, each built from the geometry the one before it left:
+// W scales about where X put the shape, not where the drag did (Copilot on #298). They drain after
+// the snapshot before them has rendered, so this no longer shows a snapshot rendering while a commit
+// is on the wire; the test after it does.
 test("queued X then W behind a move scale about where X put the shape", async ({ page }) => {
   await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
   await page.goto("/");
@@ -3295,6 +3438,26 @@ test("queued X then W behind a move scale about where X put the shape", async ({
     const [a, , , , e] = await nodeTransform(page, 2);
     return [a, e];
   }).toEqual([expect.closeTo(2, 1), expect.closeTo(5, 1)]);
+});
+
+// A snapshot can render while a commit is on the wire, one the backend answered before the commit
+// arrived: a run() command's refresh. It must not retire that commit's preview, or the canvas and
+// fields jump back and the next edit is built from geometry the backend has left (Copilot on #298).
+// The fake runs a held commit on release, so the machine switch's snapshot here is that older one.
+test("a snapshot rendered while a commit is on the wire keeps that commit's preview", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click(); // red, at 0
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await page.getByLabel("X", { exact: true }).fill("20"); // on the wire
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+
+  const before = (await readView(page)).scale;
+  await page.getByLabel("Machine").selectOption("puma"); // its refresh renders a new document now
+  await expect.poll(async () => (await readView(page)).scale).not.toBeCloseTo(before, 6);
+  await expect(page.getByLabel("X", { exact: true })).toHaveValue("20");
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(20, 6);
 });
 
 // Snapping (spec 2026-10-07). With both seeds: the Group's rect at 30..40 mm (id 3) and the red
@@ -3382,4 +3545,937 @@ test("an Alt edge scale snaps the dragged edge and mirrors the other", async ({ 
   const [a, , , , e] = (await commitLog(page))[0].m;
   expect(a).toBeCloseTo(5, 2);
   expect(e).toBeCloseTo(-20, 1);
+});
+
+// Align and distribute (spec 2026-10-07). With both seeds: the Group (id 2) holds a rect at 30..40
+// mm, and the red (id 4) and green (id 5) rects sit at 0..10 mm. Layer rows run Group, its rect,
+// red, green.
+async function selectRows(page: Page, rows: number[]) {
+  const [first, ...rest] = rows;
+  await page.getByTestId("layer-row").nth(first).click();
+  for (const r of rest) await page.getByTestId("layer-row").nth(r).click({ modifiers: ["Shift"] });
+}
+
+test("align left on two rects and a Group commits one batch that moves only the Group", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await selectRows(page, [2, 3, 0]);
+  await page.getByRole("button", { name: "Align left edges" }).click();
+
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  const [{ ids, m, batch }] = await commitLog(page);
+  expect(ids).toEqual([2]);
+  expect(m).toEqual([1, 0, 0, 1, -30, 0]);
+  expect(batch).toBe(1);
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(0, 6);
+});
+
+test("align on a single rect centres it on the artboard", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await selectRows(page, [2]);
+  await page.getByRole("button", { name: "Align horizontal centres" }).click();
+
+  // The 330 mm bed is centred at 165; the rect's centre is at 5.
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  const [{ ids, m }] = await commitLog(page);
+  expect(ids).toEqual([4]);
+  expect(m[4]).toBeCloseTo(160, 6);
+  expect(m[5]).toBe(0);
+});
+
+test("distribute equalises the gaps and breaks a tie by document order, not click order", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await selectRows(page, [0, 3, 2]); // Group, green, red: the reverse of document order
+  await page.getByRole("button", { name: "Distribute horizontal spacing" }).click();
+
+  // Span 0..40 holding 30 mm of shapes leaves two 5 mm gaps. Red and green both start at 0, so
+  // document order makes red first and green the one that moves, to 15.
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  const [{ ids, m }] = await commitLog(page);
+  expect(ids).toEqual([5]);
+  expect(m[4]).toBeCloseTo(15, 6);
+});
+
+test("align and distribute are disabled when they cannot act", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  const alignLeft = page.getByRole("button", { name: "Align left edges" });
+  const distribute = page.getByRole("button", { name: "Distribute horizontal spacing" });
+  await expect(alignLeft).toBeDisabled();
+  await expect(distribute).toBeDisabled();
+
+  // The Group, its own rect and red are two units, since the rect moves with the Group: still too
+  // few to distribute.
+  await selectRows(page, [0, 1, 2]);
+  await expect(alignLeft).toBeEnabled();
+  await expect(distribute).toBeDisabled();
+
+  await page.getByTestId("layer-row").nth(3).click({ modifiers: ["Shift"] });
+  await expect(distribute).toBeEnabled();
+});
+
+test("an align clicked while a drag's commit is on the wire lines up from where the drag left", async ({ page }) => {
+  const v = await selectRedBesideGroup(page);
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // red to 5..15, parked
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+
+  await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] });
+  await page.getByRole("button", { name: "Align left edges" }).click();
+  expect((await commitLog(page)).length).toBe(1); // queued behind the drag, not sent
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // From the stale scene the Group would go to 0 (−30); from the drag's result it goes to 5.
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  const { ids, m } = (await commitLog(page))[1];
+  expect(ids).toEqual([2]);
+  expect(m[4]).toBeCloseTo(-25, 6);
+});
+
+// With seedAlignExtras beside the rects: red (id 2) and green (id 3) at 0..10, the two-rect Group
+// (id 4) spanning 50..80 × 20..50, and the empty Group (id 7). Rows run red, green, Group, its two
+// rects, the empty Group.
+async function seedAlignExtras(page: Page) {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedAlignExtras: true });
+  await page.goto("/");
+}
+
+test("a Group aligns by the bounds of all its shapes, on both axes", async ({ page }) => {
+  await seedAlignExtras(page);
+  await selectRows(page, [0, 2]);
+
+  // The Group's right edge is its second rect's, at 80; its first rect alone would say 60.
+  await page.getByRole("button", { name: "Align right edges" }).click();
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  expect((await commitLog(page))[0]).toMatchObject({ ids: [2], m: [1, 0, 0, 1, 70, 0] });
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(70, 6);
+
+  // Its bottom is 50, again from the second rect.
+  await page.getByRole("button", { name: "Align bottom edges" }).click();
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  expect((await commitLog(page))[1]).toMatchObject({ ids: [2], m: [1, 0, 0, 1, 0, 40] });
+});
+
+test("distribute vertical spacing moves the middle unit on y only", async ({ page }) => {
+  await seedAlignExtras(page);
+  await selectRows(page, [0, 1, 2]);
+  // Red and green at 0..10, the Group at 20..50: span 0..50 holds 50 mm, so the gaps are 0 and
+  // green, second in document order, goes to 10.
+  await page.getByRole("button", { name: "Distribute vertical spacing" }).click();
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  expect((await commitLog(page))[0]).toMatchObject({ ids: [3], m: [1, 0, 0, 1, 0, 10] });
+});
+
+test("an empty Group is not a unit, so it does not enable distribute", async ({ page }) => {
+  await seedAlignExtras(page);
+  await selectRows(page, [0, 1, 5]);
+  await expect(page.getByRole("button", { name: "Distribute horizontal spacing" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Distribute vertical spacing" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Align left edges" })).toBeEnabled();
+});
+
+test("a refused align puts every unit back and the next click starts from there", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await selectRows(page, [2, 0]); // red and the Group: centres 5 and 35, so both move to 20
+  await page.evaluate(() => (window as unknown as { __failNextCommit: () => void }).__failNextCommit());
+  await page.getByRole("button", { name: "Align horizontal centres" }).click();
+  await expect(page.getByText("transform refused")).toBeVisible();
+
+  // A preview left in place would have both centred already, and this click would send nothing.
+  await page.getByRole("button", { name: "Align horizontal centres" }).click();
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  const log = await commitLog(page);
+  expect(log.map((e) => [e.ids[0], e.m[4], e.batch])).toEqual([[2, -15, 1], [4, 15, 1]]); // document order
+});
+
+test("the fake refuses a whole batch that names a missing node", async ({ page }) => {
+  // The fake is what the frontend is tested against, so it must not half-apply what the backend
+  // refuses outright.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  const refused = await page.evaluate(() =>
+    (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> } })
+      .__TAURI_INTERNALS__.invoke("commit_transforms", { moves: [
+        { ids: [4], m: [1, 0, 0, 1, 5, 0] },
+        { ids: [999], m: [1, 0, 0, 1, 1, 0] },
+      ] }).then(() => false, () => true),
+  );
+  expect(refused).toBe(true);
+  expect(await commitLog(page)).toEqual([]);
+  expect(await nodeTransform(page, 4)).toEqual([1, 0, 0, 1, 0, 0]);
+});
+
+test("queued aligns replace each other per axis, not across axes", async ({ page }) => {
+  const v = await selectRedBesideGroup(page);
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 5 * v.scale); // red to 5..15 × 5..15
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+
+  await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] });
+  await page.getByRole("button", { name: "Align left edges" }).click();
+  await page.getByRole("button", { name: "Align top edges" }).click();
+  await page.getByRole("button", { name: "Align right edges" }).click(); // replaces left, not top
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // Top takes red up to the Group's 0; right takes red to the Group's 40. Left (the Group to 5)
+  // never runs.
+  await expect.poll(async () => (await commitLog(page)).length).toBe(3);
+  const [, top, right] = await commitLog(page);
+  expect(top).toMatchObject({ ids: [4], m: [1, 0, 0, 1, 0, expect.closeTo(-5, 6)] });
+  expect(right).toMatchObject({ ids: [4], m: [1, 0, 0, 1, expect.closeTo(25, 6), 0] });
+  expect(await nodeTransform(page, 2)).toEqual([1, 0, 0, 1, 30, 0]);
+});
+
+test("an align that would move nothing sends nothing and does not hold the next one", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await selectRows(page, [2, 3]); // red and green, both already at 0
+  await page.getByRole("button", { name: "Align left edges" }).click();
+  // Never invoked, not just never logged: the fake refuses an empty batch before it logs anything,
+  // so an empty send would pass the log check below and put a refusal on screen.
+  expect(await page.evaluate(() => (window as unknown as { __maxInFlightCommits?: number }).__maxInFlightCommits)).toBeUndefined();
+  await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] });
+  await page.getByRole("button", { name: "Align left edges" }).click();
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  expect((await commitLog(page))[0]).toMatchObject({ ids: [2], batch: 1 });
+});
+
+test("a queued distribute does not replace a queued align on the same axis", async ({ page }) => {
+  const v = await selectRedBesideGroup(page);
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // red to 5..15
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+
+  await page.getByTestId("layer-row").nth(3).click({ modifiers: ["Shift"] }); // green
+  await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] }); // the Group
+  await page.getByRole("button", { name: "Distribute horizontal spacing" }).click();
+  await page.getByRole("button", { name: "Align left edges" }).click();
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // Distribute first: green 0..10 and the Group 30..40 stay, red goes to 15 (+10). Then align left
+  // from there: red −15, the Group −30. Align alone would have sent red −5.
+  await expect.poll(async () => (await commitLog(page)).length).toBe(4);
+  const log = await commitLog(page);
+  expect(log.slice(1).map((e) => [e.ids[0], Math.round(e.m[4] * 1e6) / 1e6, e.batch])).toEqual([[4, 10, 2], [2, -30, 3], [4, -15, 3]]);
+});
+
+test("an align's preview moves every unit while its commit is on the wire", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await selectRows(page, [0, 2, 3]); // the Group, red, green: the centre of 0..40 is 20
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await page.getByRole("button", { name: "Align horizontal centres" }).click();
+  await expect.poll(async () => (await commitLog(page)).length).toBe(3);
+
+  // The fields read the effective scene, so they show the preview: red and green both at 15. A
+  // preview that applied only the first move (the Group's) would leave them at 0.
+  await page.getByTestId("layer-row").nth(2).click();
+  await expect(page.getByLabel("X", { exact: true })).toHaveValue("15");
+  await page.getByTestId("layer-row").nth(3).click();
+  await expect(page.getByLabel("X", { exact: true })).toHaveValue("15");
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+});
+
+test("distribute spaces the pieces inside a border selected with them", async ({ page }) => {
+  await seedAlignExtras(page);
+  const horizontal = page.getByRole("button", { name: "Distribute horizontal spacing" });
+
+  // Widen red to 100 mm, a border across x over green (0..10) and the Group (50..80).
+  await selectRows(page, [0]);
+  await page.getByLabel("W", { exact: true }).fill("100");
+  await expect.poll(async () => (await nodeTransform(page, 2))[0]).toBeCloseTo(10, 6);
+
+  await selectRows(page, [0, 2]);
+  await expect(horizontal).toBeDisabled();
+  await expect(horizontal).toHaveAttribute("title", /select three or more pieces/);
+
+  // 100 mm less 40 mm of pieces leaves 60 over three spaces: green to 20, the Group already at 50.
+  await page.getByTestId("layer-row").nth(1).click({ modifiers: ["Shift"] });
+  await horizontal.click();
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2); // the W edit, then this
+  expect((await commitLog(page))[1]).toMatchObject({ ids: [3], m: [1, 0, 0, 1, 20, 0] });
+});
+
+test("a border too small for its pieces blocks distribute on that axis only, and says why", async ({ page }) => {
+  await seedAlignExtras(page);
+  const horizontal = page.getByRole("button", { name: "Distribute horizontal spacing" });
+  const vertical = page.getByRole("button", { name: "Distribute vertical spacing" });
+
+  // Red becomes a 100 mm border; green grows to 75 mm, so with the 30 mm Group the pieces need
+  // 105 mm across. Down y nothing spans and the three distribute between two ends as usual.
+  await selectRows(page, [0]);
+  await page.getByLabel("W", { exact: true }).fill("100");
+  await expect.poll(async () => (await nodeTransform(page, 2))[0]).toBeCloseTo(10, 6);
+  await selectRows(page, [1]);
+  await page.getByLabel("W", { exact: true }).fill("75");
+  await expect.poll(async () => (await nodeTransform(page, 3))[0]).toBeCloseTo(7.5, 6);
+
+  await selectRows(page, [0, 1, 2]);
+  await expect(horizontal).toBeDisabled();
+  await expect(horizontal).toHaveAttribute("title", /the pieces do not fit inside the one around them/);
+  await expect(vertical).toBeEnabled();
+  await expect(vertical).toHaveAttribute("title", "Distribute vertical spacing");
+});
+
+// #298: a commit drained from the queue was made before the refusal ahead of it arrived, so it
+// must not clear that refusal's message before the operator has seen it.
+test("a refusal stays on screen when an edit queued behind it lands", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => {
+    const w = window as unknown as { __holdCommits: () => void; __failNextCommit: () => void };
+    w.__holdCommits();
+    w.__failNextCommit();
+  });
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // will be refused
+  await page.getByLabel("X", { exact: true }).fill("30"); // queued behind it
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(30, 6);
+  await expect(page.getByText("transform refused")).toBeVisible();
+});
+
+test("a queued edit whose refresh succeeds clears the refresh warning ahead of it", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // lands, refresh fails
+  await page.getByLabel("X", { exact: true }).fill("30"); // queued behind it
+  await page.evaluate(() => {
+    const w = window as unknown as { __failNextSnapshot: () => void; __releaseCommits: () => Promise<void> };
+    w.__failNextSnapshot();
+    return w.__releaseCommits();
+  });
+
+  // The warning was true when it went up; once the queued edit has re-read the canvas it is not.
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(30, 6);
+  await expect(page.getByText("the canvas could not be refreshed")).toBeHidden();
+});
+
+test("a fresh edit after a refusal clears its message", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __failNextCommit: () => void }).__failNextCommit());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0);
+  await expect(page.getByText("transform refused")).toBeVisible();
+
+  // Made after the refusal was on screen, so it is the operator's next act and starts clean.
+  await page.getByLabel("X", { exact: true }).fill("30");
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(30, 6);
+  await expect(page.getByText("transform refused")).toBeHidden();
+});
+
+// Copilot on #301: going out from the queue is not the same as being made before the refusal. An
+// align clicked once the refusal is on screen, while an edit queued earlier is still on the wire,
+// is the operator's next act and must clear it when it lands.
+test("an edit made after a refusal was shown clears it, even when it waits in the queue", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => {
+    const w = window as unknown as { __holdCommits: () => void; __failNextCommit: () => void };
+    w.__holdCommits();
+    w.__failNextCommit();
+  });
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // will be refused
+  await page.getByLabel("X", { exact: true }).fill("30"); // queued before the refusal
+  // Let the refusal through and hold again at once, so the X edit it drains stays on the wire.
+  await page.evaluate(() => {
+    const w = window as unknown as { __holdCommits: () => void; __releaseCommits: () => Promise<void> };
+    void w.__releaseCommits();
+    w.__holdCommits();
+  });
+  await expect(page.getByText("transform refused")).toBeVisible();
+
+  await page.getByRole("button", { name: "Align horizontal centres" }).click(); // queued behind X
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(160, 6);
+  await expect(page.getByText("transform refused")).toBeHidden();
+});
+
+test("a newer align replaces a queued one on the same selection in any click order", async ({ page }) => {
+  // Copilot on #301: the key followed click order, so reselecting a piece made a second request
+  // that ran after the first instead of replacing it.
+  const v = await selectRedBesideGroup(page);
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // red to 5..15, parked
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+
+  await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] }); // [red, Group]
+  await page.getByRole("button", { name: "Align left edges" }).click();
+  await page.getByTestId("layer-row").nth(2).click({ modifiers: ["Shift"] }); // [Group]
+  await page.getByTestId("layer-row").nth(2).click({ modifiers: ["Shift"] }); // [Group, red]
+  await page.getByRole("button", { name: "Align right edges" }).click();
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // Right alone: red to the Group's 40 (+25). Left first would have moved the Group to 5.
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  expect((await commitLog(page))[1]).toMatchObject({ ids: [4], m: [1, 0, 0, 1, expect.closeTo(25, 6), 0] });
+  expect(await nodeTransform(page, 2)).toEqual([1, 0, 0, 1, 30, 0]);
+});
+
+test("a queued align to the artboard uses the bed it lands on, not the one it was clicked on", async ({ page }) => {
+  // Copilot on #301: the queued click kept the render's artboard, so a machine switch in between
+  // centred the piece on the old bed.
+  const v = await selectRedBesideGroup(page);
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // red to 5..15, parked
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  await page.getByRole("button", { name: "Align horizontal centres" }).click(); // queued
+
+  const before = (await readView(page)).scale;
+  await page.getByLabel("Machine").selectOption("puma"); // 600 mm bed
+  await expect.poll(async () => (await readView(page)).scale).not.toBeCloseTo(before, 6);
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // Red's centre is 10; the Puma's is 300. The Cameo's 165 would give 155.
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  expect((await commitLog(page))[1]).toMatchObject({ ids: [4], m: [1, 0, 0, 1, expect.closeTo(290, 6), 0] });
+});
+
+test("the align row follows the preview while its commit is on the wire", async ({ page }) => {
+  // Copilot on #301: the preview lived in a ref, so the buttons kept the bounds from before it.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedGroup: true });
+  await page.goto("/");
+  await selectRows(page, [0, 2, 3]); // the Group, red, green: all 10 mm wide
+  const horizontal = page.getByRole("button", { name: "Distribute horizontal spacing" });
+  await expect(horizontal).toBeEnabled();
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await page.getByRole("button", { name: "Align left edges" }).click();
+  // In the preview all three sit at 0..10, so each spans the rest and distribute cannot act.
+  await expect(horizontal).toBeDisabled();
+  await expect(horizontal).toHaveAttribute("title", /spans the selection on this axis/);
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+});
+
+test("the fake refuses a whole batch when a later entry's geometry cannot be reversed", async ({ page }) => {
+  // Copilot on #301: the first entry is fine and the second sits under a Group scaled to nothing.
+  // Rust refuses the batch and keeps neither; the fake must too, or a test can pass on a half-commit.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedCollapsedGroup: true });
+  await page.goto("/");
+  const refused = await page.evaluate(() =>
+    (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> } })
+      .__TAURI_INTERNALS__.invoke("commit_transforms", { moves: [
+        { ids: [2], m: [1, 0, 0, 1, 5, 0] },
+        { ids: [5], m: [1, 0, 0, 1, 1, 0] },
+      ] }).then(() => false, () => true),
+  );
+  expect(refused).toBe(true);
+  expect(await nodeTransform(page, 2)).toEqual([1, 0, 0, 1, 0, 0]);
+  expect(await nodeTransform(page, 5)).toEqual([1, 0, 0, 1, 0, 0]);
+  // Nor logged: a refused batch that took a batch number would shift every later one.
+  expect(await commitLog(page)).toEqual([]);
+});
+
+test("the fake accepts a batch under a tiny but invertible parent, as Rust does", async ({ page }) => {
+  // Copilot on #301: Rust refuses only an exactly zero determinant, so a 1e-7 scale (determinant
+  // 1e-14) must commit; a tolerance in the fake refused it and could fail a valid test.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedCollapsedGroup: true, collapsedScale: 1e-7 });
+  await page.goto("/");
+  const refused = await page.evaluate(() =>
+    (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> } })
+      .__TAURI_INTERNALS__.invoke("commit_transforms", { moves: [
+        { ids: [2], m: [1, 0, 0, 1, 5, 0] },
+        { ids: [5], m: [1, 0, 0, 1, 1, 0] },
+      ] }).then(() => false, () => true),
+  );
+  expect(refused).toBe(false);
+  expect((await nodeTransform(page, 2))[4]).toBeCloseTo(5, 6);
+  // A 1 mm world move beneath a 1e-7 scale is 1e7 in the rect's own space (CodeRabbit on #301).
+  expect((await nodeTransform(page, 5))[4] / 1e7).toBeCloseTo(1, 6);
+});
+
+test("the fake refuses an empty batch, or a batch with an empty entry, as transform_each does", async ({ page }) => {
+  // Copilot on #301: Rust answers EmptySelection for both and keeps nothing; the fake applied the
+  // valid first move and recorded the batch.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const send = (moves: unknown[]) => page.evaluate((mv) =>
+    (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> } })
+      .__TAURI_INTERNALS__.invoke("commit_transforms", { moves: mv }).then(() => false, () => true), moves);
+  expect(await send([{ ids: [2], m: [1, 0, 0, 1, 5, 0] }, { ids: [], m: [1, 0, 0, 1, 1, 0] }])).toBe(true);
+  expect(await send([])).toBe(true);
+  expect(await nodeTransform(page, 2)).toEqual([1, 0, 0, 1, 0, 0]);
+  expect(await commitLog(page)).toEqual([]);
+});
+
+test("a queued edit is dropped when Reload replaces the document", async ({ page }) => {
+  // Copilot on #301: Reload reuses ids, so an X edit queued against the old document moved a shape
+  // in the reloaded one.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click(); // gives Reload a path
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // on the wire
+  await page.getByLabel("X", { exact: true }).fill("30"); // queued behind it
+  await page.getByRole("button", { name: "Reload" }).click();
+  await expect(page.getByTestId("layer-row").first()).toBeVisible();
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // The queued X must not follow the held drag into the reloaded document. Where the drag itself
+  // ends up is not this test's to say: the backend runs it before the load, which then replaces it,
+  // while the fake runs a held commit on release, after the load.
+  await page.waitForTimeout(300);
+  expect(await commitLog(page)).toHaveLength(1);
+  expect((await nodeTransform(page, 2))[4]).not.toBeCloseTo(30, 6);
+});
+
+test("an edit made while Reload loads is held, and dropped once the document is replaced", async ({ page }) => {
+  // An edit made during the load used to go straight out, with ids from the document on screen, and
+  // land on whatever the reloaded one gives those ids.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click(); // gives Reload a path
+  await page.evaluate(() => (window as unknown as { __holdLoad: () => void }).__holdLoad());
+  await page.getByTestId("layer-row").first().click(); // red
+  await page.getByRole("button", { name: "Reload" }).click(); // parked
+  // Locked while it loads, and saying why: the panel used to take these, and the load then dropped
+  // them without a word (Copilot on #301).
+  const centre = page.getByRole("button", { name: "Align horizontal centres" });
+  await expect(centre).toBeDisabled();
+  await expect(centre).toHaveAttribute("title", /waiting for the document to load/);
+  await expect(page.getByLabel("X", { exact: true })).toBeDisabled();
+  await page.evaluate(() => (window as unknown as { __releaseLoad: () => Promise<void> }).__releaseLoad());
+
+  await page.waitForTimeout(300);
+  expect(await commitLog(page)).toEqual([]);
+  expect(await nodeTransform(page, 2)).toEqual([1, 0, 0, 1, 0, 0]);
+  await page.getByTestId("layer-row").first().click();
+  await expect(centre).toBeEnabled();
+  await expect(page.getByLabel("X", { exact: true })).toBeEnabled();
+});
+
+test("a snapshot answering after a newer one has rendered is dropped", async ({ page }) => {
+  // CodeRabbit on #301: an older snapshot answering last rendered under a newer revision, so the
+  // canvas went back to geometry from before the align that the newer one already showed.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click(); // red
+  const x = page.getByLabel("X", { exact: true });
+  const before = await x.inputValue();
+  await page.evaluate(() => (window as unknown as { __holdSnapshots: () => void }).__holdSnapshots());
+  await page.getByRole("checkbox", { name: "Cut this shape" }).click(); // its snapshot is held
+  await page.getByRole("button", { name: "Align horizontal centres" }).click(); // to the bed; held too
+  await expect.poll(() => commitLog(page).then((l) => l.length)).toBe(1);
+
+  await page.evaluate(() => (window as unknown as { __releaseLatestSnapshot: () => Promise<void> }).__releaseLatestSnapshot());
+  await expect(x).not.toHaveValue(before);
+  const aligned = await x.inputValue();
+  await page.evaluate(() => (window as unknown as { __releaseSnapshot: () => Promise<void> }).__releaseSnapshot());
+  await page.waitForTimeout(300);
+  await expect(x).toHaveValue(aligned);
+});
+
+test("Open or Reload waits for a document edit already on its way before it loads", async ({ page }) => {
+  // CodeRabbit on #301: the lock is checked when an edit starts, and an import then reads its file
+  // before it sends. A Reload in that gap loaded first, and the import's old root met the new
+  // document. A load now waits for edits already started, as it does for a transform commit.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  const loads = () => page.evaluate(() => (window as unknown as { __loads?: number }).__loads ?? 0);
+  await page.evaluate(() => (window as unknown as { __holdEdits: () => void }).__holdEdits());
+  await page.getByTestId("layer-row").first().click(); // red
+  await page.getByRole("checkbox", { name: "Cut this shape" }).click(); // on its way, held
+  await page.getByRole("button", { name: "Reload" }).click();
+  await page.waitForTimeout(300);
+  expect(await loads()).toBe(0);
+  await page.evaluate(() => (window as unknown as { __releaseEdits: () => Promise<void> }).__releaseEdits());
+
+  await expect.poll(loads).toBe(1);
+  expect(await page.evaluate(() => (window as unknown as { __loadDuringEdit?: boolean }).__loadDuringEdit)).toBeUndefined();
+});
+
+test("an import still reading its file finishes before Reload loads", async ({ page }) => {
+  // CodeRabbit on #301: the import passes the lock, then awaits its file before it sends. Paused in
+  // that read, a Reload must wait for it rather than load and take the import's old root.
+  await page.addInitScript(() => {
+    const w = window as unknown as {
+      __docOrder: string[]; __holdFileReads: () => void; __releaseFileReads: () => void; __heldFileReads: () => number;
+    };
+    w.__docOrder = [];
+    let holding = false;
+    const held: (() => void)[] = [];
+    const read = Blob.prototype.arrayBuffer;
+    Blob.prototype.arrayBuffer = function (this: Blob) {
+      if (!holding) return read.call(this);
+      return new Promise((resolve, reject) => held.push(() => read.call(this).then(resolve, reject)));
+    };
+    w.__holdFileReads = () => { holding = true; };
+    w.__releaseFileReads = () => { holding = false; held.splice(0).forEach((f) => f()); };
+    w.__heldFileReads = () => held.length;
+  });
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.evaluate(() => (window as unknown as { __holdFileReads: () => void }).__holdFileReads());
+  // Built in the page: the e2e build has no Node types, so no Buffer.
+  await page.evaluate(() => {
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const files = new DataTransfer();
+    files.items.add(new File(['<svg xmlns="http://www.w3.org/2000/svg"><rect width="5" height="5"/></svg>'], "a.svg", { type: "image/svg+xml" }));
+    input.files = files.files;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  // In the read, past the lock check, before Reload is asked for.
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __heldFileReads: () => number }).__heldFileReads())).toBe(1);
+  await page.getByRole("button", { name: "Reload" }).click();
+  await page.waitForTimeout(300);
+  const order = () => page.evaluate(() => (window as unknown as { __docOrder: string[] }).__docOrder);
+  expect(await order()).toEqual([]);
+  await page.evaluate(() => (window as unknown as { __releaseFileReads: () => void }).__releaseFileReads());
+
+  await expect.poll(order).toEqual(["import_svg", "load_project"]);
+});
+
+test("a transform's late snapshot retires its preview against the newer one already shown", async ({ page }) => {
+  // Copilot on #301: an align's snapshot answering after a Delete's had rendered was dropped as
+  // "nothing rendered", so the align's preview stayed up over the newer scene, still drawing (and
+  // hit-testing) the shape the Delete had removed.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const v = await fittedView(page);
+  await page.getByTestId("layer-row").first().click(); // red
+  const x = page.getByLabel("X", { exact: true });
+  await page.evaluate(() => (window as unknown as { __holdSnapshots: () => void }).__holdSnapshots());
+  await page.getByRole("button", { name: "Align horizontal centres" }).click(); // its snapshot is held
+  await expect.poll(() => commitLog(page).then((l) => l.length)).toBe(1);
+  await expect(x).not.toHaveValue("0");
+  const alignedX = Number(await x.inputValue());
+  await page.keyboard.press("Delete"); // its snapshot is held too
+
+  await page.evaluate(() => (window as unknown as { __releaseLatestSnapshot: () => Promise<void> }).__releaseLatestSnapshot());
+  await expect(page.getByTestId("layer-row")).toHaveCount(1); // the Delete's, red gone
+  await page.evaluate(() => (window as unknown as { __releaseSnapshot: () => Promise<void> }).__releaseSnapshot());
+  await page.waitForTimeout(300);
+
+  const at = await toPage(page, v, { x: alignedX + 5, y: 5 });
+  await page.mouse.click(at.x, at.y);
+  await expect(x).toHaveCount(0);
+});
+
+test("Delete, Undo and the other document commands are refused while a document loads", async ({ page }) => {
+  // CodeRabbit on #301: only transforms waited for a load. A Delete pressed during a Reload named ids
+  // from the document on screen, and the loaded one reuses them.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.evaluate(() => (window as unknown as { __holdLoad: () => void }).__holdLoad());
+  await page.getByTestId("layer-row").first().click(); // red
+  await page.getByRole("button", { name: "Reload" }).click(); // held
+  await page.keyboard.press("Delete");
+  await expect(page.getByText("the document is still loading")).toBeVisible();
+  await page.evaluate(() => (window as unknown as { __releaseLoad: () => Promise<void> }).__releaseLoad());
+
+  await page.waitForTimeout(300);
+  await expect(page.getByTestId("layer-row")).toHaveCount(2);
+});
+
+test("an edit refused after a load whose read failed says so, reads it again, and unlocks", async ({ page }) => {
+  // After Reload loaded but its snapshot failed, every edit was refused as "still loading" until
+  // another Reload, which nothing said to do (silent-failure-hunter on #301).
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  const failNextSnapshot = () =>
+    page.evaluate(() => (window as unknown as { __failNextSnapshot: () => void }).__failNextSnapshot());
+  await failNextSnapshot();
+  await page.getByRole("button", { name: "Reload" }).click(); // loads; its read fails
+  await expect(page.getByText("snapshot unavailable")).toBeVisible();
+
+  const centre = page.getByRole("button", { name: "Align horizontal centres" });
+  await page.getByTestId("layer-row").first().click();
+  await expect(centre).toBeDisabled();
+  await expect(centre).toHaveAttribute("title", /the loaded document could not be read\. Reload to try again/);
+
+  await failNextSnapshot(); // the re-read fails too
+  await page.keyboard.press("Delete");
+  await expect(page.getByText(/Not applied: the loaded document could not be read: snapshot unavailable\. Reload to try again/)).toBeVisible();
+  await expect(centre).toBeDisabled();
+
+  await page.keyboard.press("Delete"); // this re-read works
+  await expect(page.getByText(/Not applied, but the loaded document is on screen now/)).toBeVisible();
+  await expect(page.getByTestId("layer-row")).toHaveCount(2); // neither Delete went out
+  await page.getByTestId("layer-row").first().click();
+  await expect(centre).toBeEnabled();
+});
+
+test("a snapshot asked for before a later load never renders over it or lifts its lock", async ({ page }) => {
+  // Copilot on #301: the lock lifted on any newer snapshot, so a first Reload's snapshot answering
+  // after a second Reload had loaded showed the first document and unlocked edits on it, while the
+  // backend held the second; an align there sent the first one's bounds into the second.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  const loads = () => page.evaluate(() => (window as unknown as { __loads?: number }).__loads ?? 0);
+  await page.evaluate(() => (window as unknown as { __holdSnapshots: () => void }).__holdSnapshots());
+  await page.getByRole("button", { name: "Reload" }).click(); // loads; its snapshot is held
+  await expect.poll(loads).toBe(1);
+  await page.getByRole("button", { name: "Reload" }).click(); // loads again; held too
+  await expect.poll(loads).toBe(2);
+
+  const release = () =>
+    page.evaluate(() => (window as unknown as { __releaseSnapshot: () => Promise<void> }).__releaseSnapshot());
+  const centre = page.getByRole("button", { name: "Align horizontal centres" });
+  await release(); // the first Reload's answer, read before the second load
+  await page.getByTestId("layer-row").first().click();
+  await expect(centre).toHaveAttribute("title", /waiting for the document to load/);
+  await expect(centre).toBeDisabled();
+
+  await release(); // the second's, read after its load
+  await page.getByTestId("layer-row").first().click();
+  await expect(centre).toBeEnabled();
+});
+
+test("a queued align finds a Group's shapes in the tree as it stands when it is sent", async ({ page }) => {
+  // Copilot on #301: the queued click kept the tree from its render, so a shape added to the Group
+  // before it drained was left out of the Group's bounds.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedAlignExtras: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click(); // red, 0..10
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // red to 5..15, parked
+  await page.getByTestId("layer-row").nth(2).click({ modifiers: ["Shift"] }); // + the Group, 50..80
+  await page.getByRole("button", { name: "Align left edges" }).click(); // queued
+  // A 10 mm rect joins the Group at 0..10 while the align waits.
+  await page.evaluate(() =>
+    (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> } })
+      .__TAURI_INTERNALS__.invoke("add_primitive", { parent: 4, kind: { Rect: { w: 10, h: 10 } } }));
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // With the new rect the Group reaches 0, so only red moves (to 0). The old tree said 50..80,
+  // which would have sent the Group to 5 instead.
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  expect((await commitLog(page))[1]).toMatchObject({ ids: [2], m: [1, 0, 0, 1, expect.closeTo(-5, 6), 0] });
+});
+
+test("an edit made between a commit settling and the queue draining still waits its turn", async ({ page }) => {
+  // CodeRabbit on #301: inFlight cleared on settle but the queue drained a render later, so an
+  // edit made in between was sent at once and overlapped the drained one on the wire.
+  const v = await selectRedBesideGroup(page);
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 5 * v.scale); // red to 5..15 × 5..15
+  await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] }); // + the Group
+  await page.getByRole("button", { name: "Align top edges" }).click(); // queued behind the drag
+
+  // Release without yielding a task, let the settled chain run its microtasks, then click: React
+  // has not rendered yet, so this lands in the gap before the drain.
+  await page.evaluate(async () => {
+    void (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits();
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    (document.querySelector('[aria-label="Align right edges"]') as HTMLButtonElement).click();
+  });
+
+  await expect.poll(async () => (await commitLog(page)).length).toBe(3);
+  expect(await page.evaluate(() => (window as unknown as { __maxInFlightCommits?: number }).__maxInFlightCommits)).toBe(1);
+  // In the order they were made: top was queued first. One on the wire at a time is not enough on
+  // its own; a click in the gap that went out at once would still land before the queued top.
+  const [, top, right] = await commitLog(page);
+  expect(top).toMatchObject({ ids: [4], m: [1, 0, 0, 1, 0, expect.closeTo(-5, 6)] });
+  expect(right).toMatchObject({ ids: [4], m: [1, 0, 0, 1, expect.closeTo(25, 6), 0] });
+});
+
+test("Reload waits for a commit already on the wire before it loads", async ({ page }) => {
+  // CodeRabbit on #301: gating new edits does not cover a commit that already went out. Open and
+  // Reload must not start load_project while one is unanswered, or a reused id could meet it.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // on the wire, held
+  await page.getByRole("button", { name: "Reload" }).click();
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // The load ran (a never-run Reload would pass a no-overlap check), and did not overlap the commit.
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __loads?: number }).__loads ?? 0)).toBe(1);
+  expect(await page.evaluate(() => (window as unknown as { __loadDuringCommit?: boolean }).__loadDuringCommit ?? false)).toBe(false);
+  // The reload did happen once the commit had settled: the saved copy has red back at 0.
+  await expect.poll(async () => (await nodeTransform(page, 2))[4]).toBeCloseTo(0, 6);
+});
+
+test("after a load whose snapshot failed, edits on the old view are not sent", async ({ page }) => {
+  // Copilot on #301: replacing cleared when the load returned, but the new document's snapshot
+  // comes after, so the canvas still showed the old one; an align there sent old bounds and a
+  // reused id into the loaded document. Edits stay off until a newer snapshot has rendered.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.evaluate(() => (window as unknown as { __failNextSnapshot: () => void }).__failNextSnapshot());
+  await page.getByRole("button", { name: "Reload" }).click();
+  await expect(page.getByText("snapshot unavailable")).toBeVisible(); // loaded, but not re-read
+
+  await page.getByTestId("layer-row").first().click(); // red, from the old view
+  // Locked, and saying why, rather than taking the click and dropping it (silent-failure-hunter).
+  const centre = page.getByRole("button", { name: "Align horizontal centres" });
+  await expect(centre).toBeDisabled();
+  await expect(centre).toHaveAttribute("title", /the loaded document could not be read/);
+  await expect(page.getByLabel("X", { exact: true })).toBeDisabled();
+  expect(await commitLog(page)).toEqual([]);
+});
+
+test("a drag held through a Reload is dropped, not sent to the loaded document", async ({ page }) => {
+  // Copilot on #301: an unreleased drag is not a commit yet, so the load did not wait for it, and
+  // its pointer-up sent the old ids and matrix straight into the reloaded document.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  const from = await toPage(page, v, { x: 5, y: 5 });
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(from.x + 5 * v.scale, from.y, { steps: 4 }); // dragging, not released
+  await page.getByRole("button", { name: "Reload" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("layer-row").first()).toBeVisible();
+  await page.mouse.up();
+
+  await page.waitForTimeout(300);
+  expect(await commitLog(page)).toEqual([]);
+  expect((await nodeTransform(page, 2))[4]).toBeCloseTo(0, 6);
+});
+
+test("the fake refuses a held batch whose node was deleted before it was answered", async ({ page }) => {
+  // Copilot on #301: the id check ran at the call and the staged apply skipped a node gone by
+  // the answer, so the fake applied the rest where Rust refuses the batch.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  const refused = await page.evaluate(async () => {
+    const w = window as unknown as {
+      __holdCommits: () => void; __releaseCommits: () => Promise<void>;
+      __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> };
+    };
+    w.__holdCommits();
+    const batch = w.__TAURI_INTERNALS__.invoke("commit_transforms", { moves: [
+      { ids: [2], m: [1, 0, 0, 1, 5, 0] },
+      { ids: [3], m: [1, 0, 0, 1, 5, 0] },
+    ] }).then(() => false, () => true);
+    await w.__TAURI_INTERNALS__.invoke("delete", { ids: [2] });
+    await w.__releaseCommits();
+    return batch;
+  });
+  expect(refused).toBe(true);
+  expect(await nodeTransform(page, 3)).toEqual([1, 0, 0, 1, 0, 0]);
+});
+
+test("edits work again once a successful Reload's snapshot has rendered", async ({ page }) => {
+  // pr-test-analyzer on #301: the lock after a load was tested only while held. Were its release
+  // broken, every edit after any Open or Reload would be dead and nothing else would notice.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: "Reload" }).click();
+  await page.getByTestId("layer-row").first().click(); // red
+  const centre = page.getByRole("button", { name: "Align horizontal centres" });
+  await expect(centre).toBeEnabled();
+  await centre.click();
+  await expect.poll(async () => (await commitLog(page)).length).toBe(1);
+  expect((await commitLog(page))[0]).toMatchObject({ ids: [2], m: [1, 0, 0, 1, expect.closeTo(160, 6), 0] });
+});
+
+test("a queued align on two pieces sends nothing if one is deleted before it goes", async ({ page }) => {
+  // pr-test-analyzer on #301: an align clicked on two pieces must not turn into "send the survivor
+  // to the mat" because the other went while it waited.
+  const v = await selectRedBesideGroup(page);
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // red to 5..15, parked
+  await page.getByTestId("layer-row").nth(0).click({ modifiers: ["Shift"] }); // + the Group
+  await page.getByRole("button", { name: "Align left edges" }).click(); // queued on [red, Group]
+  await page.evaluate(() =>
+    (window as unknown as { __TAURI_INTERNALS__: { invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown> } })
+      .__TAURI_INTERNALS__.invoke("delete", { ids: [2] })); // the Group goes
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // The drag lands and its refresh drops the Group; the align, now on red alone, sends nothing.
+  await expect.poll(async () => (await nodeTransform(page, 4))[4]).toBeCloseTo(5, 6);
+  await page.waitForTimeout(300);
+  expect(await commitLog(page)).toHaveLength(1);
+});
+
+test("a refused edit puts back the preview of an unread commit beneath it", async ({ page }) => {
+  // pr-test-analyzer on #301: every refusal test started with no preview standing. Here the first
+  // drag lands but cannot be re-read, so its preview stands for what the backend holds; a refused
+  // edit on top must return to that, not to the stale committed scene.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __failNextSnapshot: () => void }).__failNextSnapshot());
+  await dragBy(page, await toPage(page, v, { x: 5, y: 5 }), 5 * v.scale, 0); // lands at 5, unread
+  await expect(page.getByText("the canvas could not be refreshed")).toBeVisible();
+  await expect(page.getByLabel("X", { exact: true })).toHaveValue("5");
+
+  await page.evaluate(() => (window as unknown as { __failNextCommit: () => void }).__failNextCommit());
+  await page.getByLabel("X", { exact: true }).fill("30");
+  await expect(page.getByText("transform refused")).toBeVisible();
+  await expect(page.getByLabel("X", { exact: true })).toHaveValue("5");
+});
+
+test("an align pressed from the keyboard during a drag waits for the drag's commit", async ({ page }) => {
+  // Copilot and CodeRabbit on #301: busy() ignored a drag under the pointer, so the align went out
+  // at once and the release sent a second batch on top of it.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click(); // red
+  const v = await zoomInAt(page, { x: 5, y: 5 }, -350);
+
+  await page.evaluate(() => (window as unknown as { __holdCommits: () => void }).__holdCommits());
+  const from = await toPage(page, v, { x: 5, y: 5 });
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(from.x + 5 * v.scale, from.y, { steps: 4 }); // dragging
+  await page.getByRole("button", { name: "Align horizontal centres" }).focus();
+  await page.keyboard.press("Enter");
+  await page.mouse.up();
+  await page.evaluate(() => (window as unknown as { __releaseCommits: () => Promise<void> }).__releaseCommits());
+
+  // The drag first, then the align computed from where it left red; never two on the wire.
+  await expect.poll(async () => (await commitLog(page)).length).toBe(2);
+  const [drag, align] = await commitLog(page);
+  expect(drag.m[4]).toBeCloseTo(5, 6);
+  expect(align.m[4]).toBeCloseTo(165 - 10, 6);
+  expect(await page.evaluate(() => (window as unknown as { __maxInFlightCommits?: number }).__maxInFlightCommits)).toBe(1);
+});
+
+test("a second Open or Reload while one is still loading is refused, and edits stay held", async ({ page }) => {
+  // Copilot on #301: two replacements could overlap, and the first to finish cleared the shared
+  // lock while the other was still loading, letting old-document edits reach it.
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.evaluate(() => (window as unknown as { __holdLoad: () => void }).__holdLoad());
+  await page.getByRole("button", { name: "Reload" }).click(); // held
+  await page.getByRole("button", { name: "Reload" }).click(); // refused while the first loads
+  await expect(page.getByText("another document is still loading")).toBeVisible();
+  await page.evaluate(() => (window as unknown as { __releaseLoad: () => Promise<void> }).__releaseLoad());
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __loads?: number }).__loads ?? 0)).toBe(1);
+
+  // Once the first load's snapshot renders, editing works.
+  await page.getByTestId("layer-row").first().click();
+  await expect(page.getByRole("button", { name: "Align horizontal centres" })).toBeEnabled();
 });

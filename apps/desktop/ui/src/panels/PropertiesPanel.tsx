@@ -5,6 +5,8 @@ import type { PresetAssignmentJson } from "../ipc";
 import type { Preset } from "../cut/viewmodel";
 import type { EffectiveMaterial } from "./materialPreset";
 import { NumberField } from "./NumberField";
+import { AlignRow } from "./AlignRow";
+import type { AlignMode, Axis, DistributeBlock } from "../interaction/align";
 
 type Props = {
   bounds: Bounds | null;
@@ -17,6 +19,12 @@ type Props = {
   onChangeY: (v: number) => void;
   onChangeW: (v: number) => void;
   onChangeH: (v: number) => void;
+  unitCount: number;
+  /** Why edits are refused for now, or null; see `CanvasInteraction.editsLock`. */
+  editsLocked: string | null;
+  distributeBlocked: Record<Axis, DistributeBlock | null>;
+  onAlign: (mode: AlignMode) => void;
+  onDistribute: (axis: Axis) => void;
   onChangeCutLineType: (v: CutLineTypeJson) => void;
   onChangeMaterialPreset: (v: PresetAssignmentJson) => void;
 };
@@ -42,19 +50,22 @@ export function materialLabel(
 }
 
 export function PropertiesPanel({ bounds, cutLineType, materialPreset, effectiveMaterial, presets,
-                                  onChangeX, onChangeY, onChangeW, onChangeH,
+                                  onChangeX, onChangeY, onChangeW, onChangeH, unitCount, editsLocked, distributeBlocked, onAlign, onDistribute,
                                   onChangeCutLineType, onChangeMaterialPreset }: Props) {
   return (
     <div style={{ padding: 8, display: "flex", flexDirection: "column", gap: 6, overflowY: "auto" }}>
       <div style={{ fontSize: 11, color: "var(--muted)", textTransform: "uppercase" }}>Properties</div>
       {bounds ? (
         <>
-          <NumberField label="X" value={bounds.x} onChange={onChangeX} />
-          <NumberField label="Y" value={bounds.y} onChange={onChangeY} />
-          <NumberField label="W" value={bounds.w} min={0} onChange={onChangeW} />
-          <NumberField label="H" value={bounds.h} min={0} onChange={onChangeH} />
+          <NumberField label="X" value={bounds.x} disabled={editsLocked !== null} onChange={onChangeX} />
+          <NumberField label="Y" value={bounds.y} disabled={editsLocked !== null} onChange={onChangeY} />
+          <NumberField label="W" value={bounds.w} min={0} disabled={editsLocked !== null} onChange={onChangeW} />
+          <NumberField label="H" value={bounds.h} min={0} disabled={editsLocked !== null} onChange={onChangeH} />
         </>
       ) : null}
+      {/* Also outside it, since aligning is mostly for multi-node selections. Always shown, disabled
+          when it cannot act, so the buttons do not jump the rows below them in and out. */}
+      <AlignRow unitCount={unitCount} locked={editsLocked} distributeBlocked={distributeBlocked} onAlign={onAlign} onDistribute={onDistribute} />
       {/* Outside the `bounds` branch: `selectedBounds` is null for every multi-node selection
           and for a selected container (App.tsx), both of which do have a cuttability. */}
       {cutLineType !== null ? (

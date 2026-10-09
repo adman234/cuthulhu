@@ -48,6 +48,7 @@ fn main() {
             ipc::new_doc,
             ipc::snapshot,
             ipc::commit_transform,
+            ipc::commit_transforms,
             ipc::add_primitive,
             ipc::boolean_op,
             ipc::add_text,

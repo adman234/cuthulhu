@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { listen } from "@tauri-apps/api/event";
 import * as ipc from "./ipc";
 import { Canvas2DRenderer } from "./render/Canvas2DRenderer";
-import type { Affine6, Scene, ShapeGeom } from "./render/hittest";
+import { unionBounds, type Affine6, type Scene, type ShapeGeom } from "./render/hittest";
 import { pathBounds } from "./render/pathdata";
 import { IDENTITY, compose, transformBounds } from "./render/affine";
-import { shapesUnder, toggleId } from "./interaction/marquee";
+import { outermost, shapesUnder, toggleId } from "./interaction/marquee";
+import { AXIS, alignMoves, distributeBlock, distributeMoves, type AlignMode, type Axis, type Unit } from "./interaction/align";
 import type { Matrix } from "./interaction/transform";
-import { useCanvasInteraction, type CommitOutcome } from "./interaction/useCanvasInteraction";
+import { useCanvasInteraction, type CommitOutcome, type EditsLock } from "./interaction/useCanvasInteraction";
 import { viewMatrix, zoomPercent } from "./interaction/viewport";
 import { TopBar } from "./panels/TopBar";
 import { ToolRail } from "./panels/ToolRail";
@@ -100,6 +101,23 @@ function buildScene(doc: DocSnapshot): Scene {
   return { nodes };
 }
 
+/** One align unit per id, bounded by every shape it moves (`expand`) as they stand in `scene`, in
+ *  document order (the scene's, by each unit's first shape), since that breaks a distribute tie. */
+function unitsOf(s: Scene, ids: number[], expand: (ids: number[]) => number[]): Unit[] {
+  if (ids.length === 0) return [];
+  const at = new Map(s.nodes.map((n, i) => [n.id, i]));
+  const found = ids.flatMap((id) => {
+    const idx = expand([id]).flatMap((sid) => {
+      const i = at.get(sid);
+      return i === undefined ? [] : [i];
+    });
+    if (idx.length === 0) return [];
+    const first = idx.reduce((a, b) => Math.min(a, b));
+    return [{ first, unit: { ids: [id], bounds: unionBounds(idx.map((i) => s.nodes[i].bounds)) } }];
+  });
+  return found.sort((a, b) => a.first - b.first).map((f) => f.unit);
+}
+
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<Canvas2DRenderer | null>(null);
@@ -108,7 +126,14 @@ export function App() {
   const [selected, setSelected] = useState<number[]>([]);
   const [machines, setMachines] = useState<MachineProfile[]>([]);
   const [tool, setTool] = useState("select");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setErrorState] = useState<string | null>(null);
+  // When the message on screen was raised, on the clock the canvas stamps its requests with: a
+  // commit clears only a message older than the request it carries (Copilot on #301).
+  const errorAt = useRef(0);
+  const setError = useCallback((next: SetStateAction<string | null>) => {
+    if (typeof next === "string") errorAt.current = performance.now();
+    setErrorState(next);
+  }, []);
   const [lastPath, setLastPath] = useState<string | null>(null);
   const [cutOpen, setCutOpen] = useState(false);
   const [textOpen, setTextOpen] = useState(false);
@@ -128,12 +153,40 @@ export function App() {
   // queued commits can render an earlier one's snapshot while a later one is still on the wire.
   const revCounter = useRef(0);
   const [docRev, setDocRev] = useState(0);
-  const refresh = useCallback(async () => {
-    const json = (await ipc.snapshot()) as string;
+  // Bumped when a load replaces the document. A snapshot asked for before that answers with the
+  // document that left; rendered after the load, it showed that one under the next revision, which
+  // also lifted the edit lock over the loaded document (Copilot on #301). So it is dropped, and
+  // null says nothing rendered.
+  const docGen = useRef(0);
+  // Snapshots in the order they were asked for, and the latest that rendered. One answering after a
+  // newer one rendered is older than what is on screen: shown under the next revision, it put the
+  // canvas back to before an edit the newer one already showed (CodeRabbit on #301). It answers
+  // with the revision on screen instead, which was read later and so holds everything it would
+  // have: as null, a transform's preview stayed up over that newer scene (Copilot on #301).
+  const snapshotsAsked = useRef(0);
+  const snapshotShown = useRef(0);
+  // Whether the last read of this document failed. After a load, edits stay locked until its
+  // snapshot renders; when that read fails nothing else will render one, so the lock says to Reload
+  // rather than that the document is still loading (silent-failure-hunter on #301).
+  const [readFailed, setReadFailed] = useState(false);
+  const refresh = useCallback(async (): Promise<number | null> => {
+    const gen = docGen.current;
+    const asked = ++snapshotsAsked.current;
+    let json: string;
+    try {
+      json = (await ipc.snapshot()) as string;
+    } catch (e) {
+      if (gen === docGen.current) setReadFailed(true);
+      throw e;
+    }
+    if (gen !== docGen.current) return null;
+    if (asked < snapshotShown.current) return revCounter.current;
+    snapshotShown.current = asked;
     const parsed = JSON.parse(json) as DocSnapshot;
     const rev = ++revCounter.current;
     setDoc(parsed);
     setDocRev(rev);
+    setReadFailed(false);
     return rev;
   }, []);
 
@@ -222,6 +275,8 @@ export function App() {
     if (ctx) rendererRef.current = new Canvas2DRenderer(ctx);
   }, []);
 
+  // The last refresh warning a commit raised, so a later successful refresh can retract exactly it.
+  const refreshWarning = useRef<string | null>(null);
   const expand = useCallback((ids: number[]) => (doc ? shapesUnder(doc.nodes, ids) : ids), [doc]);
 
   // After the renderer is constructed, so it exists before the hook's observer first fires.
@@ -236,23 +291,95 @@ export function App() {
     // Not `run`: it reports one `false` for two failures that need opposite repairs. A refused
     // transform must put the shape back; one that landed but could not be re-read must keep it,
     // because the backend already holds the new geometry (silent-failure-hunter on #298).
-    commit: async (ids, m): Promise<CommitOutcome> => {
-      setError(null);
+    // A message raised after this edit was asked for stays: a refusal ahead of a queued edit would
+    // otherwise vanish the moment the edit went out, before anyone saw it (silent-failure-hunter,
+    // from #298).
+    commit: async (moves, requestedAt): Promise<CommitOutcome> => {
+      // Strictly older: WebKit's clock is coarse, and a refusal stamped in the same tick as a click
+      // queued behind its commit was raised after that click, not before.
+      if (errorAt.current < requestedAt) setError(null);
       try {
-        await ipc.commitTransform({ ids, m });
+        await ipc.commitTransforms({ moves });
       } catch (e) {
         setError(ipc.ipcErrorMessage(e));
         return { kind: "refused" };
       }
       try {
-        return { kind: "applied", snapshotRev: await refresh() };
+        const snapshotRev = await refresh();
+        // A refresh that worked makes an earlier "could not be refreshed" untrue, so that one
+        // message goes even from a queued commit; a refusal stays (code-reviewer).
+        setError((shown) => (shown !== null && shown === refreshWarning.current ? null : shown));
+        return { kind: "applied", snapshotRev };
       } catch (e) {
-        setError(`Edit applied, but the canvas could not be refreshed: ${ipc.ipcErrorMessage(e)}`);
+        const warning = `Edit applied, but the canvas could not be refreshed: ${ipc.ipcErrorMessage(e)}`;
+        refreshWarning.current = warning;
+        setError(warning);
         return { kind: "applied", snapshotRev: null };
       }
     },
     sceneRev: docRev,
   });
+
+  // Every other command that changes the document, refused while Open or Reload replaces it and
+  // until the loaded one renders: each names ids or the root of the document on screen, which the
+  // loaded one reuses, so a Delete pressed during a Reload removed what it gave those ids
+  // (CodeRabbit on #301). Refused with a word, like the panel's locked controls.
+  // The lock is read when an edit starts, and some then wait before they send (an import reads its
+  // file first): a load waits for every edit started before it, or one could name the old root in
+  // the new document (CodeRabbit on #301). `run` never rejects, so neither does the wait.
+  const editsStarted = useRef(new Set<Promise<boolean>>());
+  const { editsLockNow } = interaction;
+  const lockReason = (lock: EditsLock) =>
+    lock === null ? null
+    : lock === "unread" && readFailed ? "the loaded document could not be read. Reload to try again"
+    : "waiting for the document to load";
+  // A refusal after the loaded document's read failed also reads it again: the lock lifts once a
+  // snapshot renders, so the next try can go through without a Reload.
+  const refuseEdit = useCallback(
+    (lock: "loading" | "unread") => {
+      if (lock === "loading" || !readFailed) {
+        setError("Not applied: the document is still loading");
+        return;
+      }
+      const refused = "Not applied: the loaded document could not be read. Reading it again";
+      setError(refused);
+      refresh().then(
+        (rev) => {
+          // Null: a newer load replaced the document meanwhile, and its own read speaks for it.
+          if (rev === null) return;
+          setError((shown) => (shown === refused ? "Not applied, but the loaded document is on screen now: try again" : shown));
+        },
+        (e) => {
+          const failed = `Not applied: the loaded document could not be read: ${ipc.ipcErrorMessage(e)}. Reload to try again`;
+          setError((shown) => (shown === refused ? failed : shown));
+        },
+      );
+    },
+    [readFailed, refresh, setError],
+  );
+  const edit = useCallback(
+    (fn: () => Promise<unknown>) => {
+      const lock = editsLockNow();
+      if (lock !== null) {
+        refuseEdit(lock);
+        return Promise.resolve(false);
+      }
+      const started = run(fn);
+      editsStarted.current.add(started);
+      void started.finally(() => editsStarted.current.delete(started));
+      return started;
+    },
+    [run, refuseEdit, editsLockNow],
+  );
+
+  // Inside `replaceDocument`, which has locked edits by then, so nothing joins the set while it waits.
+  const loadDocument = (path: string) =>
+    interaction.replaceDocument(async () => {
+      await Promise.all(editsStarted.current);
+      await ipc.loadProject({ path });
+      docGen.current++;
+      setReadFailed(false);
+    });
 
   const { repaint } = interaction;
   useEffect(() => {
@@ -270,10 +397,10 @@ export function App() {
   // (still valid) selection in place, and a successful one can't leave stale ids around to
   // error out a later transform.
   const deleteSelected = useCallback(() => {
-    run(() => ipc.deleteNodes({ ids: selected })).then((ok) => {
+    edit(() => ipc.deleteNodes({ ids: selected })).then((ok) => {
       if (ok) setSelected([]);
     });
-  }, [run, selected]);
+  }, [edit, selected]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -285,12 +412,12 @@ export function App() {
         deleteSelected();
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z" && !typing) {
         e.preventDefault();
-        run(() => (e.shiftKey ? ipc.redo() : ipc.undo()));
+        edit(() => (e.shiftKey ? ipc.redo() : ipc.undo()));
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected, run, deleteSelected]);
+  }, [selected, edit, deleteSelected]);
 
   const root = doc?.root ?? 0;
   // Bounds of a single selection in a given scene. The fields read the effective scene, which holds
@@ -299,7 +426,7 @@ export function App() {
     selected.length === 1 ? (s.nodes.find((n) => n.id === selected[0])?.bounds ?? null) : null;
   const selectedBounds = boundsIn(interaction.effectiveScene);
 
-  // Through the hook rather than straight to commitTransform: a field edit then waits behind a
+  // Through the hook rather than straight to the backend: a field edit then waits behind a
   // commit on the wire and builds its matrix from the geometry as it stands when it is sent, not
   // from a position the shape has already left (Copilot on #298).
   const commitAxis = (axis: "x" | "y", v: number) =>
@@ -321,11 +448,54 @@ export function App() {
       return axis === "w" ? [k, 0, 0, 1, b.x - k * b.x, 0] : [1, 0, 0, k, 0, b.y - k * b.y];
     });
 
+  // One unit per selected id that no other selected id contains, bounded by every shape it moves,
+  // so a Group lines up as a drag would move it. Read from the scene the hook passes in, which holds
+  // any unread commit's preview. Listed in document order (the scene's, by each unit's first shape)
+  // rather than the order they were clicked, since that is what breaks a distribute tie.
+  // Memoised: a pointer move re-renders App for the cursor readout, and rebuilding these scanned
+  // every node in the document per move (CodeRabbit on #301).
+  const units = useMemo(() => (doc ? outermost(doc.nodes, selected) : []), [doc, selected]);
+  // Keyed like the fields: a newer click of the same kind on the same axis and selection replaces a
+  // queued one, but "Align top" does not replace a queued "Align left", and a distribute does not
+  // replace an align, since each is a different request (code-reviewer).
+  // Sorted, because `outermost` keeps click order and reselecting a piece reorders it: the same
+  // selection must make the same key, or a newer click runs after the older one instead of
+  // replacing it (Copilot on #301).
+  const alignKey = (kind: "align" | "distribute", axis: Axis) =>
+    `${kind}:${axis}:${[...units].sort((p, q) => p - q).join(",")}`;
+  // A queued click keeps the ids it was made on but reads the tree and the bed as they stand when it
+  // is sent (`SendTime`): the commit ahead of it may have changed a Group's shapes, and a machine
+  // switch in between centred a piece on the old bed (Copilot on #301).
+  const align = (mode: AlignMode) => {
+    const ids = units;
+    // What the click meant, kept for when it is sent: lining the pieces up with each other, or one
+    // piece with the bed. A unit deleted while the click waited would otherwise turn the first into
+    // the second, and send the piece left over to the edge of the mat.
+    const toEachOther = unitCount >= 2;
+    interaction.transformEach(alignKey("align", AXIS[mode]), (s, now) => {
+      const sent = unitsOf(s, ids, now.expand);
+      return sent.length >= 2 === toEachOther ? alignMoves(sent, mode, now.artboard) : [];
+    });
+  };
+  const distribute = (axis: Axis) => {
+    const ids = units;
+    interaction.transformEach(alignKey("distribute", axis), (s, now) => distributeMoves(unitsOf(s, ids, now.expand), axis));
+  };
+  // Counted from the scene the moves are computed from, not from the selection: an empty Group
+  // is a selected id with nothing to line up, and counting it enabled a distribute that then had
+  // two units and did nothing, or sent a lone shape to the artboard (silent-failure-hunter).
+  const shownUnits = useMemo(() => unitsOf(interaction.effectiveScene, units, expand), [interaction.effectiveScene, units, expand]);
+  const unitCount = shownUnits.length;
+  const distributeBlocked = useMemo(
+    () => ({ x: distributeBlock(shownUnits, "x"), y: distributeBlock(shownUnits, "y") }),
+    [shownUnits],
+  );
+
   const cutLineType = doc ? selectionCutLineType(doc.nodes, selected) : null;
 
   const setCutLineType = (value: CutLineTypeJson) => {
     if (selected.length === 0) return;
-    run(() => ipc.setCutLineType({ ids: selected, value }));
+    edit(() => ipc.setCutLineType({ ids: selected, value }));
   };
 
   // The selection's own assignment, and what it resolves to. Both, because `Inherit` alone
@@ -345,7 +515,7 @@ export function App() {
 
   const setMaterialPreset = (value: ipc.PresetAssignmentJson) => {
     if (selected.length === 0) return;
-    run(() => ipc.setMaterialPreset({ ids: selected, value }));
+    edit(() => ipc.setMaterialPreset({ ids: selected, value }));
   };
 
   // A successful boolean op removes the source nodes and adds a result node — selecting
@@ -354,17 +524,17 @@ export function App() {
   // selection if the shape ever comes back without one).
   const onBooleanOp = useCallback(
     (op: BoolOp) => {
-      run(async () => {
+      edit(async () => {
         const delta = (await ipc.booleanOp({ ids: selected, op })) as NodeOpJson[];
         const added = delta.find((o): o is Extract<NodeOpJson, { Add: unknown }> => "Add" in o);
         setSelected(added ? [added.Add.node.id] : []);
       });
     },
-    [run, selected],
+    [edit, selected],
   );
 
   const onImportFile = (file: File) => {
-    run(async () => {
+    edit(async () => {
       const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
       const [, skipped] = (await ipc.importSvg({ bytes, parent: root })) as [unknown, string[]];
       if (skipped.length > 0) setError(`Imported with ${skipped.length} element(s) skipped: ${skipped.join(", ")}`);
@@ -378,7 +548,7 @@ export function App() {
     });
 
   const onTraceInsert = (svg: string) => {
-    run(async () => {
+    edit(async () => {
       const bytes = Array.from(new TextEncoder().encode(svg));
       const [, skipped] = (await ipc.importSvg({ bytes, parent: root })) as [unknown, string[]];
       if (skipped.length > 0) setError(`Inserted with ${skipped.length} element(s) skipped: ${skipped.join(", ")}`);
@@ -399,7 +569,7 @@ export function App() {
         <TopBar
           machines={machines}
           currentMachineId={doc?.machine?.id ?? null}
-          onSelectMachine={(id) => run(() => ipc.setMachine({ machineId: id }))}
+          onSelectMachine={(id) => edit(() => ipc.setMachine({ machineId: id }))}
           onSave={() =>
             run(async () => {
               const p = await ipc.pickSavePath();
@@ -413,7 +583,10 @@ export function App() {
             run(async () => {
               const p = await ipc.pickOpenPath();
               if (p) {
-                await ipc.loadProject({ path: p });
+                // Held for the whole load, not cleared before it: the backend has replaced the
+                // document by the time loadProject resolves, and a commit settling in between would
+                // drain into it (CodeRabbit on #301), as would an edit made while it loads.
+                await loadDocument(p);
                 setLastPath(p);
                 setSelected([]); // loaded doc may not contain the old ids
                 interaction.requestFit();
@@ -422,14 +595,14 @@ export function App() {
           }
           onReload={() =>
             run(async () => {
-              await ipc.loadProject({ path: lastPath! });
+              await loadDocument(lastPath!);
               setSelected([]);
               interaction.requestFit();
             })
           }
           canReload={lastPath !== null}
-          onUndo={() => run(() => ipc.undo())}
-          onRedo={() => run(() => ipc.redo())}
+          onUndo={() => edit(() => ipc.undo())}
+          onRedo={() => edit(() => ipc.redo())}
           onImportFile={onImportFile}
           onCut={() => setCutOpen(true)}
           onTrace={onTrace}
@@ -439,8 +612,8 @@ export function App() {
         tool={tool}
         selectionCount={selected.length}
         onSelectTool={setTool}
-        onAddRect={() => run(() => ipc.addPrimitive({ parent: root, kind: { Rect: { w: 20, h: 20 } } }))}
-        onAddEllipse={() => run(() => ipc.addPrimitive({ parent: root, kind: { Ellipse: { rx: 10, ry: 10 } } }))}
+        onAddRect={() => edit(() => ipc.addPrimitive({ parent: root, kind: { Rect: { w: 20, h: 20 } } }))}
+        onAddEllipse={() => edit(() => ipc.addPrimitive({ parent: root, kind: { Ellipse: { rx: 10, ry: 10 } } }))}
         onAddText={() => setTextOpen(true)}
         onBoolean={onBooleanOp}
         onDelete={deleteSelected}
@@ -469,6 +642,11 @@ export function App() {
           onChangeY={(v) => commitAxis("y", v)}
           onChangeW={(v) => commitScale("w", v)}
           onChangeH={(v) => commitScale("h", v)}
+          unitCount={unitCount}
+          distributeBlocked={distributeBlocked}
+          editsLocked={lockReason(interaction.editsLock)}
+          onAlign={align}
+          onDistribute={distribute}
           cutLineType={cutLineType}
           onChangeCutLineType={setCutLineType}
           materialPreset={materialPreset}
@@ -494,7 +672,7 @@ export function App() {
           docMachineId={doc.machine?.id ?? null}
           status={status}
           refreshDeviceState={refreshDeviceState}
-          onConvertMachine={(machineId) => run(() => ipc.setMachine({ machineId }))}
+          onConvertMachine={(machineId) => edit(() => ipc.setMachine({ machineId }))}
           onError={setError}
           onClose={() => setCutOpen(false)}
         />
@@ -508,7 +686,7 @@ export function App() {
             setTextOpen(false);
             // ponytail: content and size are fixed until #33 grows this dialog into real
             // text editing; the family is the only choice the backend can act on today.
-            run(() => ipc.addText({ parent: root, family, sizeMm: 10, text: "Text" }));
+            edit(() => ipc.addText({ parent: root, family, sizeMm: 10, text: "Text" }));
           }}
           onClose={() => setTextOpen(false)}
         />

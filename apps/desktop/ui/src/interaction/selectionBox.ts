@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import type { Affine6, Scene } from "../render/hittest";
+import { unionBounds, type Affine6, type Scene } from "../render/hittest";
 import { apply, compose, invert, translate, type Pt } from "../render/affine";
 
 /** The local rectangle [0, w] × [0, h], placed in world by `frame`. Gestures work in this frame,
@@ -29,11 +29,8 @@ export function selectionBox(scene: Scene, ids: number[]): Box | null {
   if (only?.local && only.world) {
     return { frame: compose(translate(only.local.x, only.local.y), only.world), w: only.local.w, h: only.local.h };
   }
-  const x = Math.min(...nodes.map((n) => n.bounds.x));
-  const y = Math.min(...nodes.map((n) => n.bounds.y));
-  const r = Math.max(...nodes.map((n) => n.bounds.x + n.bounds.w));
-  const b = Math.max(...nodes.map((n) => n.bounds.y + n.bounds.h));
-  return { frame: translate(x, y), w: r - x, h: b - y };
+  const u = unionBounds(nodes.map((n) => n.bounds));
+  return { frame: translate(u.x, u.y), w: u.w, h: u.h };
 }
 
 export function handleLocal(box: Box, h: ScaleHandle): Pt {
