@@ -20,11 +20,12 @@ checklist in `apps/desktop/MANUAL-CHECKLIST.md` (§ Cameo 1) is what turns it in
 | Vendor ID | `0x0b4d` (Graphtec) | `[src: Graphtec.py L131 (GPL-2.0+)]` |
 | Product ID | `0x1121` | `[src: Graphtec.py L138 (GPL-2.0+)]` |
 | Bulk OUT / IN | `0x01` / `0x82` | `[src: Graphtec.py L753, L863 (GPL-2.0+)]` |
-| Interface | `0`. On Linux, `usblp` claims it as a printer, so it must be detached first | `[src: Graphtec.py L585-597 (GPL-2.0+)]` |
+| Interface | `0`. On Linux, `usblp` claims it as a printer, so it must be detached first | `[src: Graphtec.py L589-596 (GPL-2.0+)]` |
 
 On Linux, a normal user needs a udev rule to open the device; see `docs/linux/99-silhouette-cameo1.rules`.
 On Windows the device binds to `usbprint`, and libusb-style access needs a WinUSB driver (for
-example, via Zadig). Silhouette themselves dropped Cameo 1 USB support on Windows 10 1809 and later.
+example, via Zadig). Silhouette themselves dropped Cameo 1 USB support on Windows 10 1809 and later
+`[doc: Windows 10 1809 Update Impacting Some Silhouette Machines, https://silhouetteschoolblog.com/2019/08/windows-10-1809-update-impacting-some.html]`.
 
 ## Geometry
 
@@ -37,7 +38,8 @@ example, via Zadig). Silhouette themselves dropped Cameo 1 USB support on Window
 
 inkscape-silhouette shifts every point by the margins (`x_off += llx`, `y_off += ury`)
 `[src: Graphtec.py L1436-1438, L1501-1502, L1612 (GPL-2.0+)]`. Cuthulhu does the same in the
-driver, and its `cameo1` profile is the reachable area: **295 × 3000 mm**. A design at the
+driver, and its `cameo1` profile is the reachable area: **295 × 2999 mm**, so the cutting area's far
+corner (`Z60000,6080`) is the device's own 304 × 3000 mm. A design at the
 artboard's (0, 0) is cut 9 mm from the media's left edge and 1 mm from its top.
 
 ## Session
@@ -57,7 +59,7 @@ artboard's (0, 0) is cut 9 mm from the media's left edge and 1 mm from its top.
 |---|---|---|
 | Speed | `!<1..10>`, with no tool suffix | `[src: Graphtec.py L1203-1211 (GPL-2.0+)]` |
 | Force | `FX<1..33>`, with no tool suffix | `[src: Graphtec.py L1213-1221 (GPL-2.0+)]` |
-| Blade offset | `FC18` for the 0.9 mm blade, `FC0` for a pen | `[src: Graphtec.py L1241-1259 (GPL-2.0+)]` |
+| Blade offset | `FC18` for the 0.9 mm blade, `FC0` for a pen | `[src: Graphtec.py L1244-1259 (GPL-2.0+)]` |
 | Paths | `M<y>,<x>`, then `D<y>,<x>`… | `[src: Graphtec.py L1339-1345 (GPL-2.0+)]` |
 
 There is no `J` (tool select). The Cameo 1 has one tool holder `[src: Graphtec.py L169, L1151-1152 (GPL-2.0+)]`.
@@ -72,8 +74,13 @@ furthest pass of the session, not just the last one.
 
 inkscape-silhouette sends speed, force and blade offset **before** `FY1`/`FN0`/`TB50,0`,
 because it does setup once per job. Cuthulhu sends speed, force and blade offset per pass, after the job-wide
-setup, so that each colour pass can carry its own settings. That ordering is the first thing
-for the hardware checklist to confirm.
+setup, so that each colour pass can carry its own settings. The Silhouette Studio captures
+recorded in inkscape-silhouette use this order (the model is not named): `FN0 TB50,0 \30,0 Z… FX33 !5 FC18 FE0,0 FF0,0,0 FY1`, then the paths
+`[src: inkscape-silhouette Commands.md L410-443 (GPL-2.0+)]`.
+
+A one-point path is skipped, as inkscape-silhouette skips it `[src: Graphtec.py L1443 (GPL-2.0+)]`.
+A cancelled or failed job sends no epilogue, so it does not feed or set a new origin. Move the media
+on by hand before cutting again.
 
 ## Not yet implemented
 

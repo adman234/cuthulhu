@@ -167,6 +167,9 @@ the device and the date it was verified on. The upstream PR for Cameo 1 support 
       rather than on top of it.
 - [ ] Cancel mid-cut, and unplug mid-cut, end as they do on the Cameo 5 (see SP4).
 - [ ] Each builtin `cameo1-*` preset cuts its material cleanly with the standard ratchet blade.
+- [ ] The Cameo 5 still connects and cuts. Its open path changed to detach-and-claim along with the Cameo 1's.
+- [ ] After a cancelled or failed Cameo 1 job, the media must be moved on by hand. No epilogue is sent,
+      so no feed and no new origin. Confirm that nothing else is left in a bad state.
 
 ## Simple (LightBurn-style) shell — fork only, not yet verified in the real app
 

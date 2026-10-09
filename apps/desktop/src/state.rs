@@ -251,4 +251,20 @@ mod tests {
         assert!(d.0.is_empty(), "premise: a new rect is stroked black");
         assert!(app.redo().is_some(), "a no-op must not throw away redoable work");
     }
+
+    /// Each machine's profile is written twice — once in `document::builtin_profiles` (the
+    /// artboard an operator designs on) and once in its Driver (what preflight checks the cut
+    /// against). Here, where both crates are visible, they are pinned together: an artboard wider
+    /// than the driver's reach would offer space that every cut there is refused for.
+    #[test]
+    fn every_document_profile_matches_its_driver() {
+        use driver_core::DeviceBackendFactory;
+        for p in document::builtin_profiles() {
+            let driver = driver_registry::HardwareBackendFactory.driver_for(&p.id)
+                .unwrap_or_else(|| panic!("no driver for document profile `{}`", p.id));
+            let d = driver.profile();
+            assert_eq!((d.id.as_str(), d.name.as_str(), d.width_mm, d.height_mm),
+                       (p.id.as_str(), p.name.as_str(), p.width_mm, p.height_mm), "{}", p.id);
+        }
+    }
 }

@@ -36,7 +36,7 @@ cargo run -p cli -- cut square.svg --device cameo1 --dry-run   # prints the byte
 
 ## 3. Cutting, in the simple window
 
-1. **Machine:** in the top bar, choose **Silhouette Cameo**. The artboard becomes 295 × 3000 mm,
+1. **Machine:** in the top bar, choose **Silhouette Cameo**. The artboard becomes 295 × 2999 mm,
    which is the area the blade can reach. Artboard (0, 0) is 9 mm from the left edge of the media
    and 1 mm from the top.
 2. **Design:** draw, add text, trace, or **Import** an SVG.
