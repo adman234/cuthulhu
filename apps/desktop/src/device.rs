@@ -4,10 +4,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use cut_host::client::HostClient;
-use cutplan::presets::{
-    default_presets_path, load_presets, resolve_settings, save_user_presets, MaterialPreset,
-    SettingsOverride,
-};
+use cutplan::presets::{load_presets, resolve_settings, save_user_presets, MaterialPreset, SettingsOverride};
 use cutplan::{plan_cut, plan_passes_with, DocumentPass, CutError, Grouping, PassKey, PassSelection, PlanOptions};
 use driver_core::manager::{CutPass, DeviceEvent, DeviceManager};
 use driver_core::{CutStatus, DeviceBackendFactory, DeviceInfo, HostId, MachineCaps};
@@ -156,6 +153,10 @@ pub struct CutRequest {
     /// changed between them while the stale-plan check only guards the document.
     pub grouping: Grouping,
     pub passes: Vec<ConfiguredPassDto>,
+    /// Who is cutting, for the usage log only — nothing about the cut depends on it. Defaulted so
+    /// a frontend that sends none (the simple dock, an older build) still cuts.
+    #[serde(default)]
+    pub operator: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -361,6 +362,9 @@ pub struct DeviceManagerHandle {
     /// the write conditional on nothing having happened meanwhile.
     dispatch_epoch: std::sync::atomic::AtomicU64,
     pub connected: Mutex<Option<DeviceInfo>>,
+    /// Pairs each job's start with how it ended, for the usage log. Here rather than in the event
+    /// bridge so `main.rs` stays a forwarder.
+    usage: crate::usage::Recorder,
 }
 
 /// How many Jobs may be held in doubt at once.
@@ -410,8 +414,38 @@ impl DeviceManagerHandle {
             remote_dispatched: Mutex::new(std::collections::HashSet::new()),
             dispatch_epoch: std::sync::atomic::AtomicU64::new(0),
             connected: Mutex::new(None),
+            usage: crate::usage::Recorder::new(None),
         };
         (handle, events)
+    }
+
+    /// Where finished jobs are logged. Left unset, nothing is: a handle built by a test must never
+    /// write to the operator's real configuration directory.
+    pub fn with_usage_log(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.usage = crate::usage::Recorder::new(path);
+        self
+    }
+
+    /// Every device event, in order, from the event bridge — how the usage log learns that a local
+    /// job ended.
+    pub fn observe_event(&self, event: &DeviceEvent) {
+        self.usage.observe(event);
+    }
+
+    fn usage_log_path(&self) -> Result<&Path, IpcError> {
+        self.usage
+            .log_path()
+            .ok_or_else(|| IpcError::new("no_config_dir", "this system has no configuration directory for the usage log"))
+    }
+
+    /// The newest `limit` logged jobs, newest first.
+    pub fn usage_log(&self, limit: usize) -> Result<Vec<crate::usage::UsageEntry>, IpcError> {
+        crate::usage::read_recent(self.usage_log_path()?, limit)
+    }
+
+    /// The whole log as CSV at `out`; answers how many jobs it holds.
+    pub fn export_usage_csv(&self, out: &Path) -> Result<usize, IpcError> {
+        crate::usage::export_csv(self.usage_log_path()?, out)
     }
 
     fn manager(&self) -> Result<Arc<DeviceManager>, IpcError> {
@@ -840,10 +874,13 @@ impl DeviceManagerHandle {
                     .with_host_within(&id, STATUS_POLL_TIMEOUT, |c| c.snapshots_within(STATUS_POLL_TIMEOUT))
                     .ok()
                     .and_then(|snaps| {
-                        snaps.into_iter().find(|s| s.info.instance_id == device.instance_id).map(|s| s.status)
+                        snaps
+                            .into_iter()
+                            .find(|s| s.info.instance_id == device.instance_id)
+                            .map(|s| (s.status, s.job_id))
                     });
                 match polled {
-                    Some(status) => {
+                    Some((status, host_job)) => {
                         if self.dispatch_epoch.load(std::sync::atomic::Ordering::SeqCst) == epoch {
                             let key = (id, device.instance_id.clone());
                             // `actions.cut` is the cutter saying it would take a Job right now,
@@ -853,6 +890,10 @@ impl DeviceManagerHandle {
                             if status.actions.cut {
                                 self.remote_dispatched.lock().unwrap().remove(&key);
                             }
+                            // Inside the epoch check for the same reason as the mark above: a poll
+                            // that began before the dispatch would end the new job with the
+                            // previous one's `Idle`.
+                            self.usage.remote_polled(&key.0, &key.1, &status, host_job);
                             self.last_remote_status.lock().unwrap().insert(key, status.clone());
                         }
                         status
@@ -966,6 +1007,7 @@ impl DeviceManagerHandle {
     /// clone is briefly alive), that's a non-fatal race at process exit — log
     /// and move on rather than block or panic.
     pub fn shutdown(&self) {
+        self.usage.flush_unfinished();
         let Some(arc) = self.local_manager.lock().unwrap().take() else { return };
         match Arc::try_unwrap(arc) {
             Ok(mgr) => mgr.shutdown(),
@@ -985,6 +1027,15 @@ impl DeviceManagerHandle {
     /// What stays here is what `cutplan` cannot know: which device is plugged
     /// in, which driver serves it, and where the presets file lives.
     pub fn prepare_cut(&self, app: &AppState, request: CutRequest) -> Result<(DeviceInfo, Vec<CutPass>), IpcError> {
+        self.prepare_logged_cut(app, request).map(|(device, passes, _)| (device, passes))
+    }
+
+    /// `prepare_cut`, plus what the usage log records about the job if it starts.
+    pub fn prepare_logged_cut(
+        &self,
+        app: &AppState,
+        request: CutRequest,
+    ) -> Result<(DeviceInfo, Vec<CutPass>, crate::usage::UsageStart), IpcError> {
         let connected = self.connected.lock().unwrap().clone()
             .ok_or_else(|| IpcError::new("not_connected", "no device connected"))?;
         if connected.instance_id != request.device_instance_id {
@@ -1004,9 +1055,9 @@ impl DeviceManagerHandle {
         // operator's own string, so `my-vinyl` can exist for both a Puma and a Cameo.
         let enabled = || request.passes.iter().filter(|p| p.enabled);
         let presets: Vec<MaterialPreset> = if enabled().any(|p| p.preset_id.is_some()) {
-            let path = default_presets_path()
-                .ok_or_else(|| IpcError::new("no_config_dir", "cannot resolve presets file location"))?;
-            load_presets(&path)?
+            // The configured location, shared or not: a cut must read the presets the editor
+            // wrote, and an unreachable share refuses the cut rather than cutting with defaults.
+            load_presets(&crate::settings::presets_path()?)?
                 .into_iter()
                 .filter(|p| p.machine_id == connected.machine_id)
                 .collect()
@@ -1014,7 +1065,7 @@ impl DeviceManagerHandle {
             Vec::new()
         };
 
-        let passes: Vec<PassSelection> = enabled()
+        let passes: Vec<(PassSelection, crate::usage::UsagePass)> = enabled()
             .map(|dto| {
                 let preset = match dto.preset_id.as_deref() {
                     // A named preset that the file no longer resolves is refused, not silently
@@ -1039,9 +1090,21 @@ impl DeviceManagerHandle {
                     track_enhancing: dto.track_enhancing,
                     tool: dto.tool,
                 };
-                Ok(PassSelection { key: dto.key.clone(), settings: resolve_settings(preset, &override_) })
+                let settings = resolve_settings(preset, &override_);
+                let logged = crate::usage::UsagePass {
+                    key: dto.key.to_string(),
+                    preset_id: dto.preset_id.clone(),
+                    preset_name: preset.map(|p| p.name.clone()),
+                    speed: settings.speed,
+                    force: settings.force,
+                    repeat_count: settings.repeat_count,
+                    // Filled from the planned Job below; the geometry does not exist yet.
+                    cut_length_mm: 0.0,
+                };
+                Ok((PassSelection { key: dto.key.clone(), settings }, logged))
             })
-            .collect::<Result<_, IpcError>>()?;
+            .collect::<Result<Vec<_>, IpcError>>()?;
+        let (passes, logged): (Vec<PassSelection>, Vec<crate::usage::UsagePass>) = passes.into_iter().unzip();
 
         // The wire carries the revision as a string. One that isn't a u64 was
         // never issued by `doc_revision`, so it cannot be the current plan.
@@ -1055,7 +1118,26 @@ impl DeviceManagerHandle {
         let planned = plan_passes_with(&app.editor.doc, request.grouping)
             .map_err(|e| IpcError::new("plan_error", e.to_string()))?;
         let plan = plan_cut(&planned, &profile, &caps, &opts).map_err(map_cut_error)?;
-        Ok((connected, plan.cut_passes()))
+        let passes = plan.cut_passes();
+        let length = |p: &CutPass| crate::usage::polyline_length(&p.job.polylines) * f64::from(p.job.settings.repeat_count);
+        let mut logged = logged;
+        // `plan_cut` keeps the selection's order, one planned pass per selected pass, so the two
+        // lists line up index for index.
+        for (entry, pass) in logged.iter_mut().zip(&passes) {
+            entry.cut_length_mm = length(pass);
+        }
+        let usage = crate::usage::UsageStart {
+            // Overwritten when the job is handed over; planning time is not when the cut began.
+            started: std::time::SystemTime::now(),
+            operator: request.operator.as_deref().map(str::trim).filter(|o| !o.is_empty()).map(String::from),
+            machine_id: connected.machine_id.clone(),
+            device_instance_id: connected.instance_id.clone(),
+            host: connected.host.as_ref().map(|h| h.0.clone()),
+            document: app.file_name.clone(),
+            passes: logged,
+            cut_length_mm: passes.iter().map(length).sum(),
+        };
+        Ok((connected, passes, usage))
     }
 
     /// Submits already-planned passes to the device manager. Blocks until the
@@ -1069,6 +1151,19 @@ impl DeviceManagerHandle {
     /// because it would be handed the *new* device's own `machine_id` and so compare it
     /// against itself. So the aim is re-read and compared here, before anything is sent.
     pub fn execute_cut(&self, planned_for: DeviceInfo, passes: Vec<CutPass>) -> Result<CutStarted, IpcError> {
+        self.execute_logged_cut(planned_for, passes, None)
+    }
+
+    /// `execute_cut`, logging the job when it starts if `usage` says what it is. A local job is
+    /// written when its ending arrives through `observe_event`; a Cut Host's when a status poll
+    /// sees its cutter free again.
+    pub fn execute_logged_cut(
+        &self,
+        planned_for: DeviceInfo,
+        passes: Vec<CutPass>,
+        usage: Option<crate::usage::UsageStart>,
+    ) -> Result<CutStarted, IpcError> {
+        let usage = usage.map(|u| crate::usage::UsageStart { started: std::time::SystemTime::now(), ..u });
         let aimed = self.connected.lock().unwrap().clone();
         // A cutter is its id, its host *and* its machine, never the id alone: fallback ids are
         // assigned by location (`usb:at:1:4`, `serial:at:/dev/ttyUSB0`), so two hosts wired alike
@@ -1089,7 +1184,11 @@ impl DeviceManagerHandle {
 
         // Routed by the device Preflight approved, now that it is known to be the one aimed at.
         match self.route(&planned_for)? {
-            Route::Local => Ok(CutStarted { job_id: self.manager()?.cut(passes)?, duplicate: false }),
+            Route::Local => {
+                let manager = self.manager()?;
+                let job_id = self.usage.local_cut(usage, || manager.cut(passes))?;
+                Ok(CutStarted { job_id, duplicate: false })
+            }
             Route::Host(id) => {
                 let (device, machine_id) = (planned_for.instance_id, planned_for.machine_id);
                 let key = JobKey {
@@ -1203,10 +1302,15 @@ impl DeviceManagerHandle {
                     // knows whether it had already accepted this id, and "already accepted" and
                     // "your Job has started" look identical to the operator otherwise — one of
                     // them means the cutter is never going to move (#121).
-                    Ok(admitted) => Ok(CutStarted {
-                        job_id: 0,
-                        duplicate: admitted == cut_host::protocol::Admitted::AlreadyAccepted,
-                    }),
+                    Ok(admitted) => {
+                        let duplicate = admitted == cut_host::protocol::Admitted::AlreadyAccepted;
+                        // A duplicate started nothing new, but the dispatch it repeats may be one
+                        // whose answer was lost and so was never logged; it is logged once.
+                        if let Some(usage) = usage {
+                            self.usage.remote_started(id.clone(), device.clone(), usage, !duplicate);
+                        }
+                        Ok(CutStarted { job_id: 0, duplicate })
+                    }
                     // Whether this call left anything of this Job outstanding. An answer that said
                     // what the host did settles it, and a call that never reached a host settles it
                     // too — there was nothing there to have started anything.
@@ -1518,6 +1622,17 @@ pub fn save_preset(path: &Path, preset: MaterialPreset) -> Result<(), IpcError> 
     if preset.name.trim().is_empty() {
         return Err(IpcError::new("invalid_preset", "a material preset needs a name"));
     }
+    // The depth is advice the operator reads, never sent, so a value off the blade's dial is a typo
+    // that would send them hunting for a setting that does not exist.
+    if let Some(depth) = preset.blade_depth {
+        let dial = cutplan::preflight::SETTINGS_RANGES.blade_depth;
+        if !dial.admits(u32::from(depth)) {
+            return Err(IpcError::new(
+                "invalid_preset",
+                format!("blade depth must be {}..={}, not {depth}", dial.min, dial.max),
+            ));
+        }
+    }
     // Preflight refuses these settings at the cut, so storing them makes a material the operator
     // can pick from the dialog and never cut with.
     if let Some(reason) = cutplan::preflight::preset_settings_out_of_range(&preset.settings) {
@@ -1532,6 +1647,13 @@ pub fn save_preset(path: &Path, preset: MaterialPreset) -> Result<(), IpcError> 
         }
     }
 
+    // Re-read at the moment of writing, not from anything held, because the file may be shared by
+    // every computer in the room: what another one saved a minute ago is kept.
+    //
+    // ponytail: two computers saving within the same instant still race — both read, both rename,
+    // the second rename wins and the first edit is gone. The rename keeps the file whole, never
+    // half-written, so the cost is one lost edit, not a damaged file. A lock file beside it is
+    // the upgrade if a makerspace ever edits presets from several computers at once.
     let mut user = user_entries(path)?;
     user.retain(|p| (&p.machine_id, &p.id) != (&preset.machine_id, &preset.id));
     user.push(MaterialPreset { builtin: false, ..preset });
@@ -1629,7 +1751,7 @@ mod tests {
             doc_revision: plan.doc_revision.to_string(),
             // The mode the passes were planned under. `plan_for` uses colour grouping, so
             // this must too, or every request here would be refused as an unknown key.
-            grouping: Grouping::Color,
+            grouping: Grouping::Color, operator: None,
             passes: plan.passes.iter().map(|p| ConfiguredPassDto {
                 key: p.key.clone(), enabled: true, preset_id: None,
                 speed: None, force: None, repeat_count: None, track_enhancing: None, tool: None
@@ -1714,7 +1836,7 @@ mod tests {
         let dev = test_device_setup();
         let revision = cutplan::doc_revision(&app.editor.doc);
         let request = CutRequest { device_instance_id: test_instance().instance_id,
-            doc_revision: revision.to_string(), grouping: Grouping::Color, passes: vec![] };
+            doc_revision: revision.to_string(), grouping: Grouping::Color, operator: None, passes: vec![] };
         let err = dev.cut_from_request(&app, request).unwrap_err();
         assert_eq!(err.code, "nothing_to_cut");
     }
@@ -1854,7 +1976,7 @@ mod tests {
         let request = CutRequest {
             device_instance_id: test_instance().instance_id,
             doc_revision: revision,
-            grouping: Grouping::Fill,
+            grouping: Grouping::Fill, operator: None,
             passes: vec![ConfiguredPassDto {
                 key: colour(RED), enabled: true, preset_id: None,
                 speed: None, force: None, repeat_count: None, track_enhancing: None, tool: None }],
@@ -1901,7 +2023,7 @@ mod tests {
         let request = CutRequest {
             device_instance_id: test_instance().instance_id,
             doc_revision: revision,
-            grouping: Grouping::Preset,
+            grouping: Grouping::Preset, operator: None,
             passes: vec![ConfiguredPassDto {
                 key: PassKey::Preset(Some("cameo5-htv".into())),
                 enabled: true,
@@ -1938,7 +2060,7 @@ mod tests {
         let request = CutRequest {
             device_instance_id: test_instance().instance_id,
             doc_revision: revision,
-            grouping: Grouping::Preset,
+            grouping: Grouping::Preset, operator: None,
             passes: vec![ConfiguredPassDto {
                 key: PassKey::Preset(Some("cameo5-htv".into())),
                 enabled: true,
@@ -1975,7 +2097,7 @@ mod tests {
         let request = CutRequest {
             device_instance_id: test_instance().instance_id,
             doc_revision: revision,
-            grouping: Grouping::Preset,
+            grouping: Grouping::Preset, operator: None,
             passes: vec![ConfiguredPassDto {
                 key: PassKey::Preset(Some("deleted-by-hand".into())),
                 enabled: true,
@@ -2001,7 +2123,7 @@ mod tests {
         let request = CutRequest {
             device_instance_id: test_instance().instance_id,
             doc_revision: revision,
-            grouping: Grouping::Preset,
+            grouping: Grouping::Preset, operator: None,
             passes: vec![ConfiguredPassDto {
                 // What the dialog sends for a `preset:` row now that both grammars parse it.
                 key: PassKey::Preset(Some(String::new())),
@@ -2035,7 +2157,7 @@ mod tests {
         let request = CutRequest {
             device_instance_id: test_instance().instance_id,
             doc_revision: revision,
-            grouping: Grouping::Preset,
+            grouping: Grouping::Preset, operator: None,
             passes: vec![ConfiguredPassDto {
                 key: PassKey::Preset(Some("puma-htv".into())),
                 enabled: true,
@@ -3786,6 +3908,70 @@ mod tests {
         }
         assert!(user_entries(&path).unwrap().is_empty(),
             "a refused save still wrote an entry to the file");
+    }
+
+    /// The material library's fields: a depth off the ratchet blade's 1–10 dial is refused, and a
+    /// preset carrying notes, a depth and the mirror flag keeps all three through a save and a read.
+    #[test]
+    fn a_blade_depth_off_the_dial_is_refused_and_the_library_fields_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("presets.json");
+        for depth in [0u8, 11] {
+            let p = MaterialPreset { blade_depth: Some(depth), ..a_user_preset("cameo1", "htv", 10) };
+            assert_eq!(save_preset(&path, p).unwrap_err().code, "invalid_preset", "depth {depth} was saved");
+        }
+        let htv = MaterialPreset {
+            notes: "Siser EasyWeed, shiny side down".into(),
+            blade_depth: Some(2),
+            mirror: true,
+            ..a_user_preset("cameo1", "htv", 10)
+        };
+        save_preset(&path, htv.clone()).unwrap();
+        let listed = list_presets(&path, "cameo1").unwrap();
+        assert_eq!(listed.iter().find(|p| p.id == "htv"), Some(&htv));
+    }
+
+    /// A frontend that sends no operator — the simple dock, an older build — still cuts.
+    #[test]
+    fn a_cut_request_without_an_operator_still_reads() {
+        let r: CutRequest = serde_json::from_str(
+            r#"{"device_instance_id":"usb:1:4","doc_revision":"1","grouping":"Color","passes":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(r.operator, None);
+    }
+
+    /// The whole path a desktop cut takes into the usage log: planned with an operator, handed to
+    /// the worker, ended by the events the bridge forwards.
+    #[test]
+    fn a_local_cut_is_logged_with_its_operator_document_length_and_ending() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("usage.jsonl");
+        let (dev, events) = DeviceManagerHandle::new(Arc::new(TestFactory));
+        let dev = dev.with_usage_log(Some(log.clone()));
+        dev.connect(test_instance()).unwrap();
+        let mut app = AppState::new();
+        app.add_rect(10.0, 10.0);
+        app.file_name = Some("badge.cut".into());
+        let request = CutRequest { operator: Some("  Ada  ".into()), ..request_from(plan_for(&app)) };
+        let (planned_for, passes, usage) = dev.prepare_logged_cut(&app, request).unwrap();
+        dev.execute_logged_cut(planned_for, passes, Some(usage)).unwrap();
+        // `TestDriver` parks each pass for the operator, so the job ends on this confirm.
+        dev.confirm_pass_done().unwrap();
+        for event in events.try_iter() {
+            dev.observe_event(&event);
+        }
+        let entries = crate::usage::read_all(&log).unwrap();
+        assert_eq!(entries.len(), 1, "one job, one line");
+        let e = &entries[0];
+        assert_eq!(e.outcome, crate::usage::Outcome::Completed);
+        assert_eq!(e.operator.as_deref(), Some("Ada"));
+        assert_eq!(e.document.as_deref(), Some("badge.cut"));
+        assert_eq!(e.machine_id, "cameo5");
+        assert_eq!(e.cut_length_mm, 40.0);
+        assert_eq!(e.passes.len(), 1);
+        assert_eq!(e.passes[0].repeat_count, 1);
+        assert_eq!(e.passes[0].cut_length_mm, 40.0);
     }
 
     /// An entry with two faults is named by the one the operator can act on. A pair that names a

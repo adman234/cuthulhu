@@ -527,6 +527,14 @@ describe("toCutRequest", () => {
     expect(result.passes[0].preset_id).toBe("preset1");
     expect(result.passes[1].preset_id).toBe("preset2");
   });
+
+  // The operator rides along for the usage log, and only when a caller has one to give: a request
+  // built without it is the one every caller sent before the log existed.
+  it("carries the operator only when one is given", () => {
+    expect("operator" in toCutRequest("d", "1", "Color", [])).toBe(false);
+    expect(toCutRequest("d", "1", "Color", [], "Ada").operator).toBe("Ada");
+    expect(toCutRequest("d", "1", "Color", [], null).operator).toBeNull();
+  });
 });
 
 describe("parsePassKey", () => {

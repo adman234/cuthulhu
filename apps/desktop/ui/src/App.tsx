@@ -21,6 +21,7 @@ import type { Preset } from "./cut/viewmodel";
 import { StatusBar } from "./panels/StatusBar";
 import { CutDialog } from "./cut/CutDialog";
 import { TraceDialog } from "./trace/TraceDialog";
+import { UsageLogDialog } from "./usage/UsageLogDialog";
 import { TextDialog } from "./text/TextDialog";
 import { selectedText, type TextSource } from "./text/viewmodel";
 import { PrintCutDialog } from "./printcut/PrintCutDialog";
@@ -180,6 +181,7 @@ export function App() {
   const [cutOpen, setCutOpen] = useState(false);
   /** Shapes on a layer with Output off, reported by the simple dock for the canvas to dim. */
   const [mutedIds, setMutedIds] = useState<number[]>([]);
+  const [usageOpen, setUsageOpen] = useState(false);
   const [layout, setLayout] = useState<Layout>(() => readLayout(layoutStorage()));
   const toggleLayout = () => {
     const next: Layout = layout === "simple" ? "classic" : "simple";
@@ -747,6 +749,7 @@ export function App() {
           onCut={() => setCutOpen(true)}
           onTrace={onTrace}
           onPrintCut={() => setPrintCutOpen(true)}
+          onUsageLog={() => setUsageOpen(true)}
           layout={layout}
           onToggleLayout={toggleLayout}
         />
@@ -790,6 +793,7 @@ export function App() {
           scene={scene}
           onJobEdit={(call) => void edit(call)}
           onMuted={setMutedIds}
+          onOpenPrintCut={() => setPrintCutOpen(true)}
         />
       ) : (
         <div style={{ display: "grid", gridTemplateRows: "1fr 1fr", borderLeft: "1px solid var(--border)", minHeight: 0 }}>
@@ -826,6 +830,7 @@ export function App() {
       {printCutOpen ? (
         <PrintCutDialog onChanged={refresh} onClose={() => setPrintCutOpen(false)} />
       ) : null}
+      {usageOpen ? <UsageLogDialog onClose={() => setUsageOpen(false)} /> : null}
       {tracePath !== null ? (
         <TraceDialog path={tracePath} onInsert={onTraceInsert} onClose={() => setTracePath(null)} />
       ) : null}

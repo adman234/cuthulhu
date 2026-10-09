@@ -20,11 +20,18 @@ pub struct RegistrationStatus {
 /// just maps typed errors to `String` for the Tauri boundary.
 pub struct AppState {
     pub editor: Editor,
+    /// The project file's name once it has been saved or opened, for the usage log. The name
+    /// alone, not the path: the log is read on other computers, where the path means nothing.
+    pub file_name: Option<String>,
+}
+
+fn file_name_of(path: &Path) -> Option<String> {
+    path.file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
 impl AppState {
     pub fn new() -> Self {
-        AppState { editor: Editor::new() }
+        AppState { editor: Editor::new(), file_name: None }
     }
 
     /// Test/IPC helper: add a rect under the document root, committed as one step.
@@ -39,6 +46,7 @@ impl AppState {
     /// Discards the current document (and its undo history) and starts a fresh one.
     pub fn new_doc(&mut self) -> String {
         self.editor = Editor::new();
+        self.file_name = None;
         self.snapshot()
     }
 
@@ -153,8 +161,10 @@ impl AppState {
         Ok((self.editor.commit(d), skipped))
     }
 
-    pub fn save_project(&self, path: &Path) -> Result<(), IoError> {
-        fileio::save_project(path, &self.editor.doc)
+    pub fn save_project(&mut self, path: &Path) -> Result<(), IoError> {
+        fileio::save_project(path, &self.editor.doc)?;
+        self.file_name = file_name_of(path);
+        Ok(())
     }
 
     /// Loads a project from disk, replacing the current document and undo history.
@@ -162,6 +172,7 @@ impl AppState {
         let doc = fileio::load_project(path)?;
         self.editor = Editor::new();
         self.editor.doc = doc;
+        self.file_name = file_name_of(path);
         Ok(self.snapshot())
     }
 

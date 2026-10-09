@@ -18,6 +18,8 @@ type Props = {
   onTrace: () => void;
   /** Opens print & cut (registration marks and the printable sheet). Absent, no button. */
   onPrintCut?: () => void;
+  /** Opens the usage log. Absent, no button is offered. */
+  onUsageLog?: () => void;
   /** The shell on screen, and how to switch it. Absent, no switch is offered. */
   layout?: Layout;
   onToggleLayout?: () => void;
@@ -45,6 +47,7 @@ export function TopBar({
   onCut,
   onTrace,
   onPrintCut,
+  onUsageLog,
   layout,
   onToggleLayout,
 }: Props) {
@@ -118,6 +121,11 @@ export function TopBar({
       <button aria-label="Cut" style={btn} onClick={onCut}>
         Cut
       </button>
+      {onUsageLog ? (
+        <button aria-label="Usage log" style={btn} onClick={onUsageLog}>
+          Usage log…
+        </button>
+      ) : null}
       {layout && onToggleLayout ? (
         <button
           aria-label={layout === "simple" ? "Switch to classic layout" : "Switch to simple layout"}

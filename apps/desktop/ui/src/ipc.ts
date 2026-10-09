@@ -355,7 +355,14 @@ export async function machineCaps(machineId: string) {
  *  `traceControls` is: `cutplan::preflight` is what refuses a cut whose settings sit outside
  *  these, so the preset editor asks it for the bounds instead of keeping a second copy to drift. */
 export type SettingRange = { min: number; max: number };
-export type SettingsRanges = { speed: SettingRange; force: SettingRange; repeatCount: SettingRange };
+export type SettingsRanges = {
+  speed: SettingRange;
+  force: SettingRange;
+  repeatCount: SettingRange;
+  /** A preset's advisory ratchet-blade depth. Absent from an older backend, which then refuses an
+   *  out-of-range depth itself. */
+  bladeDepth?: SettingRange;
+};
 
 /** The shared ranges, or — given a machine — the ranges that machine admits (its own speed
  *  ceiling). */
@@ -401,6 +408,7 @@ export type TestCutRequest = {
   x_mm: number;
   y_mm: number;
   pass: ConfiguredPassDto;
+  operator?: string | null;
 };
 
 /** Cuts Silhouette's test figure (10 mm square, triangle inside) at a point with one pass's
@@ -481,6 +489,75 @@ export async function exportPrintSvg(path: string, paper: Paper): Promise<void> 
 
 export async function pickPrintPath(): Promise<string | null> {
   return dialogSave({ defaultPath: "cuthulhu-print.svg", filters: [{ name: "SVG for printing", extensions: ["svg"] }] });
+}
+
+// --- usage log (mirrors desktop::usage) ---
+
+export type UsageOutcome = "completed" | "cancelled" | "failed" | "unknown";
+
+/** One pass of a logged job, with the settings it was actually cut with (resolved, not typed). */
+export type UsagePass = {
+  key: PassKey;
+  preset_id: string | null;
+  preset_name: string | null;
+  speed: number | null;
+  force: number | null;
+  repeat_count: number;
+  /** This pass's share of the job's length. */
+  cut_length_mm: number;
+};
+
+/** One line of `<config_dir>/cuthulhu/usage.jsonl`. Times are RFC 3339 in UTC. */
+export type UsageEntry = {
+  started_at: string;
+  ended_at: string;
+  duration_s: number;
+  operator: string | null;
+  machine_id: string;
+  device_instance_id: string;
+  /** The Cut Host's id when the job ran on one. */
+  host: string | null;
+  /** The project's file name when it had been saved or opened. */
+  document: string | null;
+  passes: UsagePass[];
+  /** Blade travel while cutting, counting every repeat. */
+  cut_length_mm: number;
+  outcome: UsageOutcome;
+  error: string | null;
+};
+
+/** The newest `limit` jobs, newest first. */
+export async function usageLog(limit: number): Promise<UsageEntry[]> {
+  return invoke("usage_log", { limit });
+}
+
+/** Writes the whole log as CSV at `path`; answers how many jobs it holds. */
+export async function exportUsageCsv(path: string): Promise<number> {
+  return invoke("export_usage_csv", { path });
+}
+
+export async function pickCsvSavePath(): Promise<string | null> {
+  return dialogSave({ defaultPath: "cuthulhu-usage.csv", filters: [{ name: "CSV", extensions: ["csv"] }] });
+}
+
+// --- where presets live (mirrors desktop::settings::PresetsLocation) ---
+
+export type PresetsLocation = { path: string; custom: boolean; defaultPath: string };
+
+export async function getPresetsLocation(): Promise<PresetsLocation> {
+  return invoke("get_presets_location", {});
+}
+
+/** A file, or a folder meaning `presets.json` inside it; `null` goes back to this computer's own
+ *  file. Refused with `presets_unreachable` when the folder is not there (an unmounted share). */
+export async function setPresetsLocation(path: string | null): Promise<PresetsLocation> {
+  return invoke("set_presets_location", { path });
+}
+
+/** A folder rather than a file, so a share that holds no presets yet can still be chosen. */
+export async function pickPresetsFolder(): Promise<string | null> {
+  const r = await dialogOpen({ directory: true, multiple: false, title: "Folder for the shared presets.json" });
+  return typeof r === "string" ? r : null;
 }
 
 const CUT_FILTER = [{ name: "cuthulhu project", extensions: ["cut"] }];

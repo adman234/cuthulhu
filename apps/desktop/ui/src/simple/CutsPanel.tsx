@@ -28,6 +28,10 @@ type Props = {
   onMedia: (id: string) => void;
   scene: Scene;
   artboard: { x: number; y: number; w: number; h: number };
+  /** Print & cut, when the machine can find registration marks; null hides it. */
+  registration: { checked: boolean; disabled: boolean; line: string } | null;
+  onRegistration: (on: boolean) => void;
+  onOpenMarks: () => void;
 };
 
 const cell: CSSProperties = { padding: "3px 4px", fontSize: 12, borderBottom: "1px solid var(--border)" };
@@ -98,6 +102,22 @@ export function CutsPanel(p: Props) {
           Mirror (HTV)
         </label>
       </div>
+      {p.registration ? (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 6, fontSize: 12 }}>
+          <label style={{ display: "flex", gap: 4, alignItems: "center" }} title={p.registration.line}>
+            <input
+              type="checkbox"
+              aria-label="Use registration marks"
+              checked={p.registration.checked}
+              disabled={p.registration.disabled}
+              onChange={(e) => p.onRegistration(e.target.checked)}
+            />
+            Print &amp; cut
+          </label>
+          <button style={tiny} onClick={p.onOpenMarks}>Marks…</button>
+          <span data-testid="registration-line" style={{ color: "var(--muted)", fontSize: 11 }}>{p.registration.line}</span>
+        </div>
+      ) : null}
 
       {planError ? (
         <div role="alert" style={{ fontSize: 12, color: "var(--cut)", marginBottom: 6 }}>{planError}</div>

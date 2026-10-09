@@ -6,7 +6,9 @@ import { connectedControl, deviceBadge, forgetFrom, groupDevices, sameCutter, st
 import { PairHostDialog } from "../hosts/PairHostDialog";
 import type { Scene } from "../render/hittest";
 import { CutPreview } from "./CutPreview";
+import { loadOperator, operatorForRequest, saveOperator } from "../operator";
 import { PresetEditor } from "./PresetEditor";
+import { PresetsLocationRow } from "./PresetsLocationRow";
 import {
   copyDraft,
   draftFault,
@@ -14,6 +16,7 @@ import {
   editorMode,
   isDirty,
   newDraft,
+  presetAdvice,
   selectAfterDelete,
   toPreset,
   type PresetDraft,
@@ -189,6 +192,9 @@ export function CutDialog({
    *  safe — it joins the first rather than starting a second Job — but it would come back
    *  "already accepted", which is a confusing thing to say about a double-click. */
   const [cutInFlight, setCutInFlight] = useState(false);
+  /** Who is cutting, for the usage log: remembered on this computer, so the next person at a shared
+   *  cutter sees the last name and changes it rather than cutting under it unawares. */
+  const [operator, setOperator] = useState(loadOperator);
 
   // The whole device list in one request rather than one per host: `list_devices` already
   // re-reads every paired host in a single call, and `list_hosts` carries why any of them cannot
@@ -604,7 +610,8 @@ export function CutDialog({
 
   const savePresetDraft = (then?: () => void) => {
     if (draft === null || connected === null || presetFault !== null) return;
-    writePreset(toPreset(draft, connected.machine_id, presets), then);
+    const stored = draft.id === "" ? undefined : presets.find((p) => p.id === draft.id);
+    writePreset(toPreset(draft, connected.machine_id, presets, stored), then);
   };
 
   /** A copy is written at once rather than opened as a draft: copying is the only way to edit what
@@ -613,7 +620,7 @@ export function CutDialog({
   const copyPreset = () => {
     const source = draft === null ? undefined : presets.find((p) => p.id === draft.id);
     if (source === undefined || connected === null) return;
-    writePreset(toPreset(copyDraft(source, presets), connected.machine_id, presets));
+    writePreset(toPreset(copyDraft(source, presets), connected.machine_id, presets, source));
   };
 
   const deletePresetDraft = () => {
@@ -683,7 +690,13 @@ export function CutDialog({
     // the previous grouping until the new plan installs, and sending them under the new one
     // would cut whatever that mode happens to key the same way.
     if (!connected || plan === null || replanning) return;
-    const request = toCutRequest(connected.instance_id, plan.revision, plan.grouping, plan.rows);
+    const request = toCutRequest(
+      connected.instance_id,
+      plan.revision,
+      plan.grouping,
+      plan.rows,
+      operatorForRequest(operator),
+    );
     setAlreadyAccepted(false);
     setCutInFlight(true);
     ipc
@@ -914,6 +927,18 @@ export function CutDialog({
             what is already stored is what a new entry's name and id have to avoid. Withheld
             outright when the ranges could not be read — an editor that cannot say what a legal
             force is would offer saves the cut path then refuses. */}
+        {/* Above the editor and outside its conditions: a share that cannot be reached is what
+            takes the editor away, and this row is the way back. A new location is a new list, so
+            the aim is renewed — the same reset a change of cutter makes — and read again. */}
+        {connected === null ? null : (
+          <PresetsLocationRow
+            guard={guardUnsaved}
+            disabled={presetBusy || aiming}
+            onChanged={() => {
+              void readPresets(aimPresetsAt(connected.machine_id), connected.machine_id);
+            }}
+          />
+        )}
         {connected === null ? null : rangesError !== null || presetListError !== null ? (
           <div style={{ fontSize: 12, color: "var(--cut)" }}>
             Material presets are unavailable: {rangesError ?? presetListError}
@@ -1031,11 +1056,16 @@ export function CutDialog({
              *  a pass: a bare-id picker has to spend the empty string as its "no preset" sentinel,
              *  and an id can be any string an operator typed, that one included. */
             const picker = presetPicker(row.presetId, presetLookup);
+            /** What the picked material says beyond its settings — the depth to set the blade to,
+             *  whether to mirror, the notes — shown where the material is chosen. */
+            const advice = presetAdvice(
+              row.presetId === null ? null : presetLookup.presets.find((p) => p.id === row.presetId),
+            );
             return (
+              <div key={row.key} style={{ border: "1px solid var(--border)", padding: 6 }}>
               <div
-                key={row.key}
                 data-testid="cut-pass-row"
-                style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, border: "1px solid var(--border)", padding: 6 }}
+                style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}
               >
                 {label.swatch !== null ? (
                   <span
@@ -1055,6 +1085,7 @@ export function CutDialog({
                 </label>
                 <select
                   aria-label={`Preset for pass ${i + 1}`}
+                  title={advice ?? undefined}
                   disabled={replanning}
                   value={picker.selected}
                   onChange={(e) => updateRow(i, { presetId: presetIdForKey(e.target.value) })}
@@ -1101,6 +1132,12 @@ export function CutDialog({
                   Down
                 </button>
               </div>
+              {advice !== null ? (
+                <div data-testid="cut-pass-advice" style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
+                  {advice}
+                </div>
+              ) : null}
+              </div>
             );
           })}
         </div>
@@ -1132,6 +1169,21 @@ export function CutDialog({
           {status.phase === "Failed" ? <span style={{ color: "var(--cut)" }}>Cut failed</span> : null}
 
           <div style={{ flex: 1 }} />
+
+          <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+            Operator
+            <input
+              aria-label="Operator"
+              type="text"
+              placeholder="your name"
+              value={operator}
+              onChange={(e) => {
+                setOperator(e.target.value);
+                saveOperator(e.target.value);
+              }}
+              style={{ width: 110 }}
+            />
+          </label>
 
           {status.actions.resume ? (
             <button aria-label="Resume" style={btn} onClick={resume}>

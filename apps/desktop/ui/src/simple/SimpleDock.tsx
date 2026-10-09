@@ -4,6 +4,8 @@ import * as ipc from "../ipc";
 import { toCutRequest, toTravelPasses, type Caps, type Preset, type PresetLookup } from "../cut/viewmodel";
 import type { DocSnapshot } from "../App";
 import type { Scene } from "../render/hittest";
+import { loadOperator, operatorForRequest, saveOperator } from "../operator";
+import { canToggle, statusLine } from "../printcut/viewmodel";
 import { CutsPanel } from "./CutsPanel";
 import { CutterPanel } from "./CutterPanel";
 import {
@@ -40,6 +42,8 @@ type Props = {
   onJobEdit: (call: () => Promise<unknown>) => void;
   /** The shapes whose layer has Output off, for the canvas to dim. */
   onMuted: (ids: number[]) => void;
+  /** Opens the print & cut dialog, where marks are laid out and the printable sheet exported. */
+  onOpenPrintCut: () => void;
   docMachineId: string | null;
   status: ipc.CutStatus;
   refreshDeviceState: () => Promise<void>;
@@ -81,6 +85,19 @@ export function SimpleDock(props: Props) {
     setBeginnerState(on);
   };
   const [testAt, setTestAt] = useState({ x: 0, y: 0 });
+  const [operator, setOperatorState] = useState(loadOperator);
+  const setOperator = (name: string) => {
+    saveOperator(name);
+    setOperatorState(name);
+  };
+  const [registration, setRegistration] = useState<ipc.RegistrationStatus | null>(null);
+  // Read with every snapshot: marks are document shapes, so adding, moving or undoing them is a
+  // document change, and the switch must say what the next cut will do.
+  useEffect(() => {
+    let live = true;
+    ipc.registrationStatus().then((s) => { if (live) setRegistration(s); }).catch(() => { if (live) setRegistration(null); });
+    return () => { live = false; };
+  }, [doc]);
   const travelSeq = useRef(0);
   // The latest snapshot, for the replan's reply: it lands after the effect that asked for it. The
   // document is the record of what the operator set, so a reloaded project or another edit is
@@ -254,7 +271,7 @@ export function SimpleDock(props: Props) {
     setSending(true);
     setNotice(null);
     ipc
-      .cut(toCutRequest(connected.instance_id, plan.revision, "Color", plan.rows))
+      .cut(toCutRequest(connected.instance_id, plan.revision, "Color", plan.rows, operatorForRequest(operator)))
       .then((started) => setNotice(started.duplicate ? "Already cutting this job." : "Cutting…"))
       .catch((e) => {
         if (ipc.ipcErrorCode(e) === "stale_plan") {
@@ -279,7 +296,7 @@ export function SimpleDock(props: Props) {
       .passes[0] ?? { key: "all", enabled: true, preset_id: null, speed: null, force: null, repeat_count: null, track_enhancing: null, tool: null };
     setSending(true);
     ipc
-      .testCut({ device_instance_id: connected.instance_id, x_mm: testAt.x, y_mm: testAt.y, pass })
+      .testCut({ device_instance_id: connected.instance_id, x_mm: testAt.x, y_mm: testAt.y, pass, operator: operatorForRequest(operator) })
       .then(() => setNotice("Test cut sent."))
       .catch((e) => onError(ipc.ipcErrorMessage(e)))
       .finally(() => setSending(false));
@@ -337,6 +354,11 @@ export function SimpleDock(props: Props) {
             onMedia={pickMedia}
             scene={props.scene}
             artboard={doc?.artboard ?? { x: 0, y: 0, w: 0, h: 0 }}
+            registration={caps.supportsRegistration
+              ? { checked: registration?.enabled ?? false, disabled: !canToggle(registration), line: statusLine(registration) }
+              : null}
+            onRegistration={(on) => props.onJobEdit(() => ipc.setRegistrationEnabled(on))}
+            onOpenMarks={props.onOpenPrintCut}
           />
         ) : (
           props.objects
@@ -366,6 +388,8 @@ export function SimpleDock(props: Props) {
         testAt={testAt}
         onTestAt={setTestAt}
         onTestCut={runTestCut}
+        operator={operator}
+        onOperator={setOperator}
       />
     </div>
   );

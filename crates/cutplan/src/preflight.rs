@@ -111,7 +111,7 @@ pub struct SettingRange {
 }
 
 impl SettingRange {
-    const fn admits(&self, value: u32) -> bool {
+    pub const fn admits(&self, value: u32) -> bool {
         value >= self.min && value <= self.max
     }
 }
@@ -123,6 +123,10 @@ pub struct SettingsRanges {
     pub speed: SettingRange,
     pub force: SettingRange,
     pub repeat_count: SettingRange,
+    /// A MaterialPreset's advisory ratchet-blade depth. Not a Setting and never judged by
+    /// Preflight — nothing sends it to a cutter — but the preset editor and `save_preset` need one
+    /// answer for the dial's ends, and this is where the editor already asks for bounds.
+    pub blade_depth: SettingRange,
 }
 
 /// Public because the preset editor asks for these over IPC rather than restating them: a
@@ -135,6 +139,8 @@ pub const SETTINGS_RANGES: SettingsRanges = SettingsRanges {
     speed: SettingRange { min: 1, max: 30 },
     force: SettingRange { min: 1, max: 33 },
     repeat_count: SettingRange { min: 1, max: 10 },
+    // The numbered dial on Silhouette's ratchet blade, which the Cameo 1 is set with by hand.
+    blade_depth: SettingRange { min: 1, max: 10 },
 };
 
 /// The one comparison against `SETTINGS_RANGES`, so a cut's Settings and a stored preset's
@@ -797,6 +803,7 @@ mod tests {
                 "speed": { "min": 1, "max": 30 },
                 "force": { "min": 1, "max": 33 },
                 "repeatCount": { "min": 1, "max": 10 },
+                "bladeDepth": { "min": 1, "max": 10 },
             }),
         );
     }

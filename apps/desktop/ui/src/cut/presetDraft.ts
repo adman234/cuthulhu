@@ -17,6 +17,11 @@ export type PresetDraft = {
   speed: number | null;
   force: number | null;
   repeatCount: number | null;
+  /** The material library: what the next person should know, the ratchet-blade depth this
+   *  material wants (advice; nothing sends it), and whether it is cut mirrored. */
+  notes: string;
+  bladeDepth: number | null;
+  mirror: boolean;
 };
 
 /** Which of the editor's controls apply, derived rather than tracked: a mode held beside the draft
@@ -30,12 +35,24 @@ export function draftOf(p: Preset): PresetDraft {
     speed: p.settings.speed,
     force: p.settings.force,
     repeatCount: p.settings.repeat_count,
+    notes: p.notes ?? "",
+    bladeDepth: p.blade_depth ?? null,
+    mirror: p.mirror ?? false,
   };
 }
 
 /** A blank entry, repeated once — the only setting a preset cannot leave to the cutter. */
 export function newDraft(ranges: SettingsRanges): PresetDraft {
-  return { id: "", name: "", speed: null, force: null, repeatCount: ranges.repeatCount.min };
+  return {
+    id: "",
+    name: "",
+    speed: null,
+    force: null,
+    repeatCount: ranges.repeatCount.min,
+    notes: "",
+    bladeDepth: null,
+    mirror: false,
+  };
 }
 
 export function editorMode(draft: PresetDraft | null, presets: Preset[]): EditorMode {
@@ -49,7 +66,10 @@ export function isDirty(draft: PresetDraft, baseline: PresetDraft): boolean {
     draft.name !== baseline.name ||
     draft.speed !== baseline.speed ||
     draft.force !== baseline.force ||
-    draft.repeatCount !== baseline.repeatCount
+    draft.repeatCount !== baseline.repeatCount ||
+    draft.notes !== baseline.notes ||
+    draft.bladeDepth !== baseline.bladeDepth ||
+    draft.mirror !== baseline.mirror
   );
 }
 
@@ -90,6 +110,9 @@ export function draftFault(
     return `Speed must be a whole number from ${ranges.speed.min} to ${ranges.speed.max}.`;
   if (bad(draft.force, ranges.force))
     return `Force must be a whole number from ${ranges.force.min} to ${ranges.force.max}.`;
+  // Only when the backend published the dial's ends; an older one refuses a bad depth itself.
+  if (ranges.bladeDepth !== undefined && bad(draft.bladeDepth, ranges.bladeDepth))
+    return `Blade depth must be a whole number from ${ranges.bladeDepth.min} to ${ranges.bladeDepth.max}.`;
   return null;
 }
 
@@ -136,20 +159,39 @@ export function copyDraft(source: Preset, presets: Preset[]): PresetDraft {
 }
 
 /** The draft as the entry to write. `builtin: false` is what the on-disk contract says a user
- *  entry is; the backend forces it too, and neither side trusts the other for it. */
-export function toPreset(draft: PresetDraft, machineId: string, presets: Preset[]): Preset {
+ *  entry is; the backend forces it too, and neither side trusts the other for it.
+ *
+ *  `stored` is the entry being edited, when there is one: what this editor does not show (track
+ *  enhancing, the tool) is carried from it, or saving a name change would quietly reset them. */
+export function toPreset(draft: PresetDraft, machineId: string, presets: Preset[], stored?: Preset): Preset {
   return {
     id: draft.id === "" ? freshPresetId(draft.name, presets) : draft.id,
     name: draft.name.trim(),
     machine_id: machineId,
     settings: {
+      ...(stored?.settings ?? {}),
       speed: draft.speed,
       force: draft.force,
       // Guarded by `draftFault`, which refuses a blank repeat count before a save can reach here.
       repeat_count: draft.repeatCount ?? 1,
     },
     builtin: false,
+    notes: draft.notes.trim(),
+    blade_depth: draft.bladeDepth,
+    mirror: draft.mirror,
   };
+}
+
+/** What a pass row says about the material it is cut with, beyond its settings: the depth to set
+ *  the blade to, whether to mirror, and the preset's notes. `null` when the preset says nothing. */
+export function presetAdvice(p: Preset | null | undefined): string | null {
+  if (!p) return null;
+  const parts: string[] = [];
+  if (p.blade_depth !== null && p.blade_depth !== undefined) parts.push(`Blade depth ${p.blade_depth}`);
+  if (p.mirror) parts.push("Cut mirrored (flip the design before cutting)");
+  const notes = (p.notes ?? "").trim();
+  if (notes !== "") parts.push(notes);
+  return parts.length === 0 ? null : parts.join(" · ");
 }
 
 /** What to select once `deletedId` is gone, given the list as it still stands: the entry after it,

@@ -16,10 +16,12 @@
   "disconnect_device": [],
   "existing_pairing": ["address", "fingerprint"],
   "export_print_svg": ["paper", "path"],
+  "export_usage_csv": ["path"],
   "force_quit": [],
   "forget_host": ["force", "id"],
   "get_connected_device": [],
   "get_device_state": [],
+  "get_presets_location": [],
   "import_svg": ["bytes", "parent"],
   "list_devices": [],
   "list_fonts": [],
@@ -50,6 +52,7 @@
   "set_material_preset": ["ids", "value"],
   "set_media": ["hMm", "wMm"],
   "set_mirror": ["on"],
+  "set_presets_location": ["path"],
   "set_registration_enabled": ["on"],
   "set_stroke_color": ["ids", "rgba"],
   "settings_ranges": ["machineId"],
@@ -61,6 +64,7 @@
   "travel_for_order": ["docRevision", "grouping", "passes"],
   "undo": [],
   "update_text": ["family", "id", "sizeMm", "text"],
+  "usage_log": ["limit"],
   "weed_box": ["ids", "lineSpacingMm", "marginMm"],
   "weld": ["ids"]
 }

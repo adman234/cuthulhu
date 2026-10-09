@@ -691,8 +691,29 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       force: number | null;
       repeat_count: number | null;
     }[];
+    // Optional on the wire, as `CutRequest::operator` is: serde defaults it.
+    operator?: string | null;
   };
   let lastCutRequest: CutRequest | null = null;
+  // The usage log as `desktop::usage` keeps it, newest last. The fake writes an entry when a cut is
+  // accepted rather than when it ends: pairing a start with its ending is the Rust recorder's job,
+  // tested there; what the e2e tests here is what the dialog sends and how the log is shown.
+  type UsageEntry = {
+    started_at: string; ended_at: string; duration_s: number; operator: string | null;
+    machine_id: string; device_instance_id: string; host: string | null; document: string | null;
+    passes: { key: string; preset_id: string | null; preset_name: string | null; speed: number | null;
+      force: number | null; repeat_count: number; cut_length_mm: number }[];
+    cut_length_mm: number; outcome: "completed" | "cancelled" | "failed" | "unknown"; error: string | null;
+  };
+  const usage: UsageEntry[] = [];
+  // Where presets live, as `desktop::settings` reports it. `shareMounted` is the one fact about the
+  // network a test needs to change: an unmounted share is refused by name, never defaulted.
+  const DEFAULT_PRESETS = "/home/member/.config/cuthulhu/presets.json";
+  let presetsPath: string | null = null;
+  let shareMounted = true;
+  const presetsLocation = () => ({ path: presetsPath ?? DEFAULT_PRESETS, custom: presetsPath !== null, defaultPath: DEFAULT_PRESETS });
+  const unreachable = () => ipcError("presets_unreachable",
+    `the presets file ${presetsPath} cannot be reached (No such file or directory (os error 2)) — if it is on a network share, check the share is connected, or switch back to this computer's own presets`);
   let failNextResume = false;
   let failNextCut = false;
   let failNextPlan = false;
@@ -704,6 +725,7 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     id: string; name: string; machine_id: string;
     settings: { speed: number | null; force: number | null; repeat_count: number };
     builtin: boolean;
+    notes?: string; blade_depth?: number | null; mirror?: boolean;
   };
   const BUILTIN_PRESETS: MaterialPreset[] = [
     { id: "cameo5-htv", name: "HTV", machine_id: "cameo5",
@@ -1146,6 +1168,17 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       // Recorded once nothing can still refuse the request, so the hook answers the cut that was
       // accepted rather than the last one attempted.
       lastCutRequest = request;
+      const at = new Date().toISOString();
+      usage.push({
+        started_at: at, ended_at: at, duration_s: 0, operator: request.operator ?? null,
+        machine_id: connected.machine_id, device_instance_id: connected.instance_id, host: null, document: null,
+        passes: request.passes.filter((p) => p.enabled).map((p) => ({
+          key: p.key, preset_id: p.preset_id ?? null,
+          preset_name: effectivePresets(connected!.machine_id).find((x) => x.id === p.preset_id)?.name ?? null,
+          speed: p.speed, force: p.force, repeat_count: p.repeat_count ?? 1, cut_length_mm: 40,
+        })),
+        cut_length_mm: 40 * enabledIndices.length, outcome: "completed", error: null,
+      });
       if (failNextCut) {
         // The opening write dies: Sending and then Failed both go out in this same
         // synchronous burst, so the only status the frontend ever commits is the failed
@@ -1251,6 +1284,7 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
         throw ipcError("presets_unreadable",
           "the presets file could not be read (Permission denied (os error 13))");
       }
+      if (presetsPath !== null && !shareMounted) throw unreachable();
       const list = effectivePresets(a.machineId as string);
       if (!holdingPresets) return list;
       // Executor form, like the parked plan and travel replies above: the UI's `lib` is older than
@@ -1263,7 +1297,27 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       speed: { min: 1, max: 30 },
       force: { min: 1, max: 33 },
       repeatCount: { min: 1, max: 10 },
+      bladeDepth: { min: 1, max: 10 },
     }),
+    // Mirrors `desktop::settings`: a folder means `presets.json` inside it, and a location whose
+    // folder is not there is refused before anything is saved.
+    get_presets_location: () => presetsLocation(),
+    set_presets_location: (a) => {
+      const path = a.path as string | null;
+      if (path === null) {
+        presetsPath = null;
+      } else {
+        if (!shareMounted) throw ipcError("presets_unreachable", `the presets file ${path} cannot be reached`);
+        presetsPath = path.endsWith(".json") ? path : `${path}/presets.json`;
+      }
+      return presetsLocation();
+    },
+    __test_unmount_share: () => {
+      shareMounted = false;
+      return null;
+    },
+    usage_log: (a) => usage.slice().reverse().slice(0, a.limit as number),
+    export_usage_csv: () => usage.length,
     // Every refusal `desktop::device::save_preset` makes, because the editor is what must never
     // send one: an entry under a builtin's pair shadows a shipped material with no way back, an
     // id-less entry is dropped on load (a save the operator never gets back), and a setting out of
@@ -1290,6 +1344,10 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
           throw ipcError("invalid_preset", `${field} must be ${range[field][0]}..=${range[field][1]}`);
         }
       }
+      if (p.blade_depth != null && (p.blade_depth < 1 || p.blade_depth > 10)) {
+        throw ipcError("invalid_preset", `blade depth must be 1..=10, not ${p.blade_depth}`);
+      }
+      if (presetsPath !== null && !shareMounted) throw unreachable();
       // Last, because the file is the last thing production touches: every refusal above is
       // decided without writing, so none of them may lose the race to a disk fault
       // (`what_a_preset_is_refuses_it_before_the_file_is_touched`). Production's own words and
@@ -1352,7 +1410,7 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     // The Cameo 1's own answer is what the dock's machine-specific controls hang off; every other
     // machine keeps the one constant the cut dialog's tests were written against.
     machine_caps: (a) => a.machineId === "cameo1"
-      ? { supportsSpeed: true, supportsForce: true, needsOperatorPassConfirm: false, speedMax: 10, supportsTrackEnhancing: true, supportsPen: true }
+      ? { supportsSpeed: true, supportsForce: true, needsOperatorPassConfirm: false, speedMax: 10, supportsTrackEnhancing: true, supportsPen: true, supportsRegistration: true }
       : { supportsSpeed: true, supportsForce: true, needsOperatorPassConfirm: false },
     // Mirror desktop::state's job-settings commands: not undo steps, saved in the document.
     set_layer_settings: (a) => {
@@ -1432,7 +1490,9 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
   (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
     invoke: (cmd: string, args: Record<string, unknown> = {}) => {
       if (cmd === "plugin:dialog|save" || cmd === "plugin:dialog|open") {
-        return Promise.resolve("/mock/cuthulhu-project.cut");
+        // A folder picker (the shared presets location) answers with a folder.
+        const options = (args.options ?? {}) as { directory?: boolean };
+        return Promise.resolve(options.directory ? "/mnt/makerspace/cuthulhu" : "/mock/cuthulhu-project.cut");
       }
       if (cmd === "plugin:event|listen") {
         const id = args.handler as number;
@@ -2563,6 +2623,84 @@ test("the whole editor is operable from the keyboard alone", async ({ page }) =>
 
   await expect(page.getByLabel("Preset to manage")).toHaveValue("keyed-card");
   await expect(page.getByTestId("preset-preview")).toHaveText("Cuts at speed 8, force 22, one pass.");
+});
+
+test("a preset's notes, blade depth and mirror are saved and shown where a pass picks it", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await openDialogOnCameo(page);
+
+  await page.getByLabel("New preset").click();
+  await page.getByLabel("Preset name").fill("Flex HTV");
+  await page.getByLabel("Preset blade depth").fill("11");
+  // Refused before anything is written, against the dial the backend published.
+  await expect(page.getByTestId("preset-error")).toHaveText("Blade depth must be a whole number from 1 to 10.");
+  await expect(page.getByLabel("Save preset", { exact: true })).toBeDisabled();
+  await page.getByLabel("Preset blade depth").fill("2");
+  await page.getByLabel("Preset cut mirrored").check();
+  await page.getByLabel("Preset notes").fill("Siser EasyWeed, shiny side down");
+  await page.getByLabel("Save preset", { exact: true }).click();
+  await expect(page.getByLabel("Preset to manage")).toHaveValue("flex-htv");
+  // Re-read from what was stored, not left over from what was typed.
+  await expect(page.getByLabel("Preset blade depth")).toHaveValue("2");
+  await expect(page.getByLabel("Preset cut mirrored")).toBeChecked();
+
+  await expect(page.getByTestId("cut-pass-advice")).toHaveCount(0);
+  await page.getByLabel("Preset for pass 1").selectOption("preset:flex-htv");
+  await expect(page.getByTestId("cut-pass-advice")).toHaveText(
+    "Blade depth 2 · Cut mirrored (flip the design before cutting) · Siser EasyWeed, shiny side down",
+  );
+});
+
+test("the operator's name is remembered and sent with the cut, and the usage log lists the job", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await openDialogOnCameo(page);
+  await page.getByLabel("Operator").fill("Ada");
+  await page.getByRole("button", { name: "Start Cut" }).click();
+  await expect(page.getByText("Waiting for color swap")).toBeVisible();
+  const request = await callFake(page, "__test_last_cut_request") as { operator?: string | null };
+  expect(request.operator).toBe("Ada");
+
+  // Remembered on this computer: the next dialog starts with the last name.
+  await page.getByLabel("Close").click();
+  await page.getByRole("button", { name: "Cut" }).click();
+  await expect(page.getByLabel("Operator")).toHaveValue("Ada");
+  await page.getByLabel("Close").click();
+
+  await page.getByRole("button", { name: "Usage log" }).click();
+  const dialog = page.getByRole("dialog", { name: "Usage log" });
+  await expect(dialog.getByTestId("usage-row")).toHaveCount(1);
+  await expect(dialog.getByTestId("usage-row")).toContainText("Ada");
+  await expect(dialog.getByRole("table", { name: "Totals by operator" })).toContainText("Ada");
+  await dialog.getByLabel("Export CSV").click();
+  await expect(dialog.getByRole("status")).toHaveText("Exported 1 job to /mock/cuthulhu-project.cut");
+});
+
+test("presets can be pointed at a shared folder, and an unmounted share says so with a way back", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await openDialogOnCameo(page);
+  await expect(page.getByTestId("presets-location")).toHaveText(
+    "/home/member/.config/cuthulhu/presets.json (this computer only)",
+  );
+  await expect(page.getByLabel("Use default presets file")).toHaveCount(0);
+
+  await page.getByLabel("Change presets file").click();
+  await expect(page.getByTestId("presets-location")).toContainText("/mnt/makerspace/cuthulhu/presets.json");
+  // The list is read again from the new file.
+  await expect(page.getByLabel("Preset to manage")).toBeVisible();
+
+  // The share goes away: the editor names the reason, and the location row stays to fix it.
+  await callFake(page, "__test_unmount_share");
+  await page.getByLabel("Close").click();
+  await page.getByRole("button", { name: "Cut" }).click();
+  await expect(page.getByText("Material presets are unavailable: the presets file /mnt/makerspace/cuthulhu/presets.json cannot be reached", { exact: false })).toBeVisible();
+  await page.getByLabel("Use default presets file").click();
+  await expect(page.getByTestId("presets-location")).toHaveText(
+    "/home/member/.config/cuthulhu/presets.json (this computer only)",
+  );
+  await expect(page.getByLabel("Preset to manage")).toBeVisible();
 });
 
 // Greptile's P1 on the fifth push: a replan that *fails* leaves the previous plan in force —
@@ -5234,3 +5372,30 @@ test("the cut dialog says when a cut is registered against printed marks", async
     "Registered: the cutter looks for the printed marks first (195.9 × 259.4 mm from 10, 10 mm) and cuts from them.",
   );
 });
+
+test("the dock sends the operator's name with a cut and remembers it", async ({ page }) => {
+  await useSimpleLayout(page);
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await expect(page.getByTestId("cuts-row")).toHaveCount(2);
+  await page.getByLabel("Operator name").fill("  Ada ");
+  await page.getByRole("button", { name: "Connect cutter" }).click();
+  await page.getByRole("button", { name: "Start", exact: true }).click();
+  await expect.poll(() => callFake(page, "__test_last_cut_request")).not.toBeNull();
+  const request = (await callFake(page, "__test_last_cut_request")) as { operator?: string | null };
+  expect(request.operator).toBe("Ada");
+  expect(await page.evaluate(() => localStorage.getItem("cuthulhu.operator"))).toBe("  Ada ");
+});
+
+test("on a Cameo 1 the dock offers print & cut, switched on once marks are added", async ({ page }) => {
+  await useSimpleLayout(page);
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true, seedCameo1: true });
+  await page.goto("/");
+  const toggle = page.getByLabel("Use registration marks");
+  await expect(toggle).toBeVisible();
+  await expect(toggle).toBeDisabled();
+  await expect(page.getByTestId("registration-line")).toHaveText("No registration marks in this document yet.");
+  await page.getByRole("button", { name: "Marks…" }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+});
+

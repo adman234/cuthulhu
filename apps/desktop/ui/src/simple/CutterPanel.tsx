@@ -29,6 +29,9 @@ type Props = {
   testAt: { x: number; y: number };
   onTestAt: (at: { x: number; y: number }) => void;
   onTestCut: () => void;
+  /** Who is cutting, for the usage log; remembered on this computer. */
+  operator: string;
+  onOperator: (name: string) => void;
 };
 
 const btn: CSSProperties = {
@@ -52,6 +55,16 @@ export function CutterPanel(p: Props) {
   return (
     <section aria-label="Cutter" style={{ padding: 8, borderTop: "1px solid var(--border)", display: "grid", gap: 6 }}>
       <h2 style={{ fontSize: 13, margin: 0 }}>Cutter</h2>
+      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+        Operator
+        <input
+          aria-label="Operator name"
+          placeholder="Your name (for the usage log)"
+          style={{ flex: 1, minWidth: 0, ...field }}
+          value={p.operator}
+          onChange={(e) => p.onOperator(e.target.value)}
+        />
+      </label>
       {p.connected === null ? (
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           <select

@@ -28,6 +28,25 @@
         "Resources/Assets.car": "icons/Assets.car"
       }
     },
+    "linux": {
+      "deb": {
+        "section": "graphics",
+        "desktopTemplate": "linux/cuthulhu.desktop",
+        "files": {
+          "/etc/udev/rules.d/99-silhouette-cameo1.rules": "../../docs/linux/99-silhouette-cameo1.rules"
+        },
+        "postInstallScript": "linux/postinst.sh",
+        "postRemoveScript": "linux/postrm.sh"
+      },
+      "rpm": {
+        "desktopTemplate": "linux/cuthulhu.desktop",
+        "files": {
+          "/etc/udev/rules.d/99-silhouette-cameo1.rules": "../../docs/linux/99-silhouette-cameo1.rules"
+        },
+        "postInstallScript": "linux/postinst.sh",
+        "postRemoveScript": "linux/postrm.sh"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
