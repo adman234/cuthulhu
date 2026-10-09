@@ -166,6 +166,12 @@ pub struct ConfiguredPassDto {
     pub speed: Option<u32>,
     pub force: Option<u32>,
     pub repeat_count: Option<u32>,
+    /// `None` defers to the preset, like the three above. Defaulted so a frontend that predates
+    /// them still sends a request this accepts.
+    #[serde(default)]
+    pub track_enhancing: Option<bool>,
+    #[serde(default)]
+    pub tool: Option<driver_core::Tool>,
 }
 
 /// One paired Cut Host: what was saved about it, its connection if it has one, and why it has
@@ -1029,7 +1035,9 @@ impl DeviceManagerHandle {
                 let override_ = SettingsOverride {
                     speed: dto.speed,
                     force: dto.force,
-                    repeat_count: dto.repeat_count, ..Default::default()
+                    repeat_count: dto.repeat_count,
+                    track_enhancing: dto.track_enhancing,
+                    tool: dto.tool,
                 };
                 Ok(PassSelection { key: dto.key.clone(), settings: resolve_settings(preset, &override_) })
             })
@@ -1504,6 +1512,14 @@ pub fn save_preset(path: &Path, preset: MaterialPreset) -> Result<(), IpcError> 
     if let Some(reason) = cutplan::preflight::preset_settings_out_of_range(&preset.settings) {
         return Err(IpcError::new("invalid_preset", reason));
     }
+    // And against the machine it is for: a Cameo 1 preset saved at speed 20 passes the shared
+    // range and is refused at every cut. A machine this build has no driver for keeps the shared
+    // check alone — its presets are still the operator's to keep.
+    if let Some(driver) = driver_registry::HardwareBackendFactory.driver_for(&preset.machine_id) {
+        if let Some(reason) = cutplan::preflight::preset_settings_out_of_range_for(&preset.settings, &driver.caps()) {
+            return Err(IpcError::new("invalid_preset", reason.into_owned()));
+        }
+    }
 
     let mut user = user_entries(path)?;
     user.retain(|p| (&p.machine_id, &p.id) != (&preset.machine_id, &preset.id));
@@ -1605,7 +1621,7 @@ mod tests {
             grouping: Grouping::Color,
             passes: plan.passes.iter().map(|p| ConfiguredPassDto {
                 key: p.key.clone(), enabled: true, preset_id: None,
-                speed: None, force: None, repeat_count: None,
+                speed: None, force: None, repeat_count: None, track_enhancing: None, tool: None
             }).collect(),
         }
     }
@@ -1775,7 +1791,7 @@ mod tests {
             grouping: Grouping::Fill,
             passes: vec![ConfiguredPassDto {
                 key: colour(RED), enabled: true, preset_id: None,
-                speed: None, force: None, repeat_count: None }],
+                speed: None, force: None, repeat_count: None, track_enhancing: None, tool: None }],
         };
         // Fill grouping keys that shape on its fill, so the stroke's key names nothing.
         assert_eq!(dev.cut_from_request(&app, request).unwrap_err().code, "unknown_pass");
@@ -1825,7 +1841,7 @@ mod tests {
                 enabled: true,
                 // What the dialog sends for a preset-keyed row: the key's own id.
                 preset_id: Some("cameo5-htv".into()),
-                speed: None, force: None, repeat_count: None }],
+                speed: None, force: None, repeat_count: None, track_enhancing: None, tool: None }],
         };
         let (_, passes) = dev.prepare_cut(&app, request).expect("planned");
         let builtin = cutplan::presets::builtin_presets().into_iter()
@@ -1862,7 +1878,7 @@ mod tests {
                 enabled: true,
                 // The operator picked "No preset" on a row keyed by a material.
                 preset_id: None,
-                speed: Some(7), force: None, repeat_count: None }],
+                speed: Some(7), force: None, repeat_count: None, track_enhancing: None, tool: None }],
         };
         let (_, passes) = dev.prepare_cut(&app, request).expect("planned, not refused");
         let builtin = cutplan::presets::builtin_presets().into_iter()
@@ -1898,7 +1914,7 @@ mod tests {
                 key: PassKey::Preset(Some("deleted-by-hand".into())),
                 enabled: true,
                 preset_id: Some("deleted-by-hand".into()),
-                speed: None, force: None, repeat_count: None }],
+                speed: None, force: None, repeat_count: None, track_enhancing: None, tool: None }],
         };
         let err = dev.prepare_cut(&app, request).unwrap_err();
         assert_eq!(err.code, "unknown_preset");
@@ -1925,7 +1941,7 @@ mod tests {
                 key: PassKey::Preset(Some(String::new())),
                 enabled: true,
                 preset_id: Some(String::new()),
-                speed: None, force: None, repeat_count: None }],
+                speed: None, force: None, repeat_count: None, track_enhancing: None, tool: None }],
         };
         let err = dev.prepare_cut(&app, request).unwrap_err();
         assert_eq!(err.code, "unknown_preset",
@@ -1958,7 +1974,7 @@ mod tests {
                 key: PassKey::Preset(Some("puma-htv".into())),
                 enabled: true,
                 preset_id: Some("puma-htv".into()),
-                speed: None, force: None, repeat_count: None }],
+                speed: None, force: None, repeat_count: None, track_enhancing: None, tool: None }],
         };
         let err = dev.prepare_cut(&app, request).unwrap_err();
         assert_eq!(err.code, "unknown_preset",
@@ -3571,6 +3587,22 @@ mod tests {
             },
             builtin: false, ..Default::default()
         }
+    }
+
+    /// A preset is judged against its own machine: speed 20 is a Cameo 5 speed and not a Cameo 1
+    /// one, so the same settings save for the first and are refused, by name, for the second.
+    #[test]
+    fn a_preset_is_refused_a_speed_its_machine_does_not_have() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("presets.json");
+        let fast = |machine: &str| MaterialPreset {
+            settings: cutplan::presets::PresetSettings { speed: Some(20), ..a_user_preset(machine, "fast", 10).settings },
+            ..a_user_preset(machine, "fast", 10)
+        };
+        save_preset(&path, fast("cameo5")).expect("the Cameo 5 runs at 20");
+        let err = save_preset(&path, fast("cameo1")).unwrap_err();
+        assert_eq!(err.code, "invalid_preset");
+        assert_eq!(err.message, "speed must be 1..=10 on this machine");
     }
 
     /// The whole of #153, against a temporary presets file: an operator's id is their own string,

@@ -22,6 +22,9 @@ pub struct Document {
     pub ids: IdGen,
     pub artboard: Rect,
     pub machine: Option<MachineProfile>,
+    /// Defaulted so a project from before cut-job settings opens with none.
+    #[serde(default)]
+    pub job: crate::job::JobSettings,
 }
 
 impl Document {
@@ -43,6 +46,7 @@ impl Document {
             ids,
             artboard,
             machine: None,
+            job: Default::default(),
         }
     }
     pub fn get(&self, id: NodeId) -> Option<&Node> { self.nodes.get(&id) }

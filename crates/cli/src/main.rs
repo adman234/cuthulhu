@@ -52,6 +52,12 @@ enum Command {
         /// Cut force (device units; omit for machine default)
         #[arg(long)]
         force: Option<u32>,
+        /// Roll the media back and forth before cutting so the rollers grip (Cameo 1)
+        #[arg(long)]
+        track_enhancing: bool,
+        /// Draw with a pen instead of cutting with a blade: no blade-offset correction (Cameo 1)
+        #[arg(long)]
+        pen: bool,
         /// Serial port (HPGL devices)
         #[arg(long)]
         port: Option<String>,
@@ -130,12 +136,13 @@ fn main() {
 
 fn run() -> Result<(), String> {
     match Cli::parse().command {
-        Command::Cut { file, device, dry_run, speed, force, port, baud, group_by, skip_pass, order, allow_out_of_bounds } => {
+        Command::Cut { file, device, dry_run, speed, force, track_enhancing, pen, port, baud, group_by, skip_pass, order, allow_out_of_bounds } => {
             let driver = driver_for(&device)?;
             let grouping: cutplan::Grouping = group_by.into();
             check_pass_flag_scope(&skip_pass, &order, grouping)?;
             let svg = std::fs::read(&file).map_err(|e| format!("read {}: {e}", file.display()))?;
-            let settings = Settings { speed, force, repeat_count: 1, ..Default::default() };
+            let tool = if pen { driver_core::Tool::Pen } else { driver_core::Tool::Blade };
+            let settings = Settings { speed, force, repeat_count: 1, track_enhancing, tool };
             cut_planned(&svg, driver.as_ref(), &device, &settings, grouping, &skip_pass, &order,
                         dry_run, port, baud, allow_out_of_bounds)
         }

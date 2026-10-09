@@ -5,7 +5,7 @@ use crate::IoError;
 
 /// The manifest schema version this build writes. Bump it in the same change that appends a
 /// step to `STEPS`, never on its own — `every_version_has_a_migration_step` fails otherwise.
-pub(crate) const MANIFEST_VERSION: u32 = 2;
+pub(crate) const MANIFEST_VERSION: u32 = 3;
 
 /// Every manifest written before the envelope existed: a bare `serde_json::to_string` of
 /// `Document` (`Document::snapshot_json`) with no version field at all. It is numbered 1 rather
@@ -27,7 +27,7 @@ pub(crate) const LEGACY_UNVERSIONED: u32 = 1;
 /// into the current `Document` before these steps run. Nothing pre-builds that arm, because a
 /// speculative wire type would freeze a guess about a schema nobody has designed yet; what is
 /// pre-built is the version that tells you which arm to write.
-const STEPS: &[fn(&mut Document)] = &[legacy_machine_ids];
+const STEPS: &[fn(&mut Document)] = &[legacy_machine_ids, cut_job_settings];
 
 /// What `save_project` writes. The document is serialized straight from the borrow rather than
 /// through `snapshot_json`, whose bare shape stays the IPC and e2e-fake contract.
@@ -203,6 +203,12 @@ fn legacy_machine_ids(doc: &mut Document) {
         };
     }
 }
+
+/// Version 2 → 3. Version 3 adds the cut-job settings (`Document::job`: per-pass settings, pass
+/// order, mirror). The field defaults on read, so there is no value to rewrite — the step exists
+/// so the version moves, and a build that predates job settings refuses a version-3 project by
+/// name rather than opening it and silently dropping them on the next save.
+fn cut_job_settings(_doc: &mut Document) {}
 
 #[cfg(test)]
 mod tests {

@@ -467,6 +467,8 @@ describe("toCutRequest", () => {
       speed: 100,
       force: 50,
       repeat_count: 2,
+      track_enhancing: null,
+      tool: null,
     });
   });
 
@@ -492,6 +494,8 @@ describe("toCutRequest", () => {
       speed: null,
       force: null,
       repeat_count: null,
+      track_enhancing: null,
+      tool: null,
     });
   });
 

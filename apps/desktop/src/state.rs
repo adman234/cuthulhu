@@ -122,6 +122,22 @@ impl AppState {
         Ok(self.snapshot())
     }
 
+    pub fn set_layer_settings(&mut self, key: String, value: Option<document::LayerSettings>) {
+        self.editor.set_layer_settings(key, value);
+    }
+
+    pub fn set_layer_order(&mut self, order: Vec<String>) {
+        self.editor.set_layer_order(order);
+    }
+
+    pub fn set_mirror(&mut self, on: bool) {
+        self.editor.set_mirror(on);
+    }
+
+    pub fn set_media(&mut self, w_mm: f64, h_mm: f64) -> Result<geometry::Rect, document::MediaError> {
+        self.editor.set_media(w_mm, h_mm)
+    }
+
     pub fn set_machine(&mut self, machine_id: &str) -> Result<(), CmdError> {
         let profile = document::builtin_profiles().into_iter().find(|p| p.id == machine_id)
             .ok_or(CmdError::NotFound)?;

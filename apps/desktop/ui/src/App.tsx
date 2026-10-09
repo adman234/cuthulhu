@@ -71,6 +71,8 @@ export type DocSnapshot = {
   root: number;
   artboard: { x: number; y: number; w: number; h: number };
   machine: MachineProfile | null;
+  /** Saved cut-job settings; absent from an older backend's snapshot. */
+  job?: ipc.JobSettings;
 };
 
 function shapeBounds(kind: ShapeKindJson) {

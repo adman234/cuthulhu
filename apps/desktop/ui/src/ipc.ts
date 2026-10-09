@@ -322,8 +322,46 @@ export async function machineCaps(machineId: string) {
 export type SettingRange = { min: number; max: number };
 export type SettingsRanges = { speed: SettingRange; force: SettingRange; repeatCount: SettingRange };
 
-export async function settingsRanges(): Promise<SettingsRanges> {
-  return invoke("settings_ranges", {});
+/** The shared ranges, or — given a machine — the ranges that machine admits (its own speed
+ *  ceiling). */
+export async function settingsRanges(machineId?: string): Promise<SettingsRanges> {
+  return invoke("settings_ranges", machineId === undefined ? {} : { machineId });
+}
+
+/** Mirrors `document::LayerSettings`: one pass's saved choices. `null` defers to the preset. */
+export type LayerSettings = {
+  output: boolean;
+  preset_id: string | null;
+  speed: number | null;
+  force: number | null;
+  repeat_count: number | null;
+  track_enhancing: boolean | null;
+  pen: boolean | null;
+};
+
+/** Mirrors `document::JobSettings`. Absent from a document saved before it existed. */
+export type JobSettings = {
+  layers: Record<PassKey, LayerSettings>;
+  layer_order: PassKey[];
+  mirror: boolean;
+};
+
+/** `value: null` forgets the pass's settings. Saved with the project; not an undo step. */
+export async function setLayerSettings(key: PassKey, value: LayerSettings | null) {
+  return invoke("set_layer_settings", { key, value });
+}
+
+export async function setLayerOrder(order: PassKey[]) {
+  return invoke("set_layer_order", { order });
+}
+
+export async function setMirror(on: boolean) {
+  return invoke("set_mirror", { on });
+}
+
+/** Sizes the artboard to the loaded media, clamped by the backend to the machine's reach. */
+export async function setMedia(wMm: number, hMm: number) {
+  return invoke("set_media", { wMm, hMm });
 }
 
 export async function savePreset(p: Args) {

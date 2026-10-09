@@ -6,6 +6,8 @@ import type { Grouping, PassKey } from "../ipc";
 export type { Bounds };
 
 // View model types (UI representation)
+export type Tool = "Blade" | "Pen";
+
 export type PassVm = {
   key: PassKey;
   shapeCount: number;
@@ -14,12 +16,20 @@ export type PassVm = {
   speed: number | null;
   force: number | null;
   repeatCount: number | null;
+  /** Optional so the cut dialog, which offers neither, need not carry them; absent is `null`,
+   *  "defer to the preset". */
+  trackEnhancing?: boolean | null;
+  tool?: Tool | null;
 };
 
 export type Caps = {
   supportsSpeed: boolean;
   supportsForce: boolean;
   needsOperatorPassConfirm: boolean;
+  /** Absent from an older backend: read as the shared ceiling and no optional tool controls. */
+  speedMax?: number;
+  supportsTrackEnhancing?: boolean;
+  supportsPen?: boolean;
 };
 
 // Wire types (match Rust ConfiguredPassDto and CutRequest)
@@ -30,6 +40,8 @@ export type ConfiguredPassDto = {
   speed: number | null;
   force: number | null;
   repeat_count: number | null;
+  track_enhancing: boolean | null;
+  tool: Tool | null;
 };
 
 export type CutRequest = {
@@ -48,8 +60,13 @@ export type Preset = {
     speed: number | null;
     force: number | null;
     repeat_count: number;
+    track_enhancing?: boolean;
+    tool?: Tool;
   };
   builtin: boolean;
+  notes?: string;
+  blade_depth?: number | null;
+  mirror?: boolean;
 };
 
 /** World-mm → canvas-px mapping for the cut preview: screen = world * scale + t. */
@@ -399,6 +416,8 @@ export function toCutRequest(
       speed: p.speed,
       force: p.force,
       repeat_count: p.repeatCount,
+      track_enhancing: p.trackEnhancing ?? null,
+      tool: p.tool ?? null,
     })),
   };
 }

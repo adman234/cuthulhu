@@ -9,4 +9,6 @@ pub mod commands;
 pub use commands::*;
 pub mod machine;
 pub use machine::*;
+pub mod job;
+pub use job::*;
 pub mod snapshot;

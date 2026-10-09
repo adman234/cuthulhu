@@ -77,6 +77,30 @@ pub fn set_stroke_color(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>, r
 }
 
 #[tauri::command]
+pub fn set_layer_settings(state: tauri::State<AppStateHandle>, key: String, value: Option<document::LayerSettings>)
+    -> Result<(), String> {
+    state.lock().unwrap().set_layer_settings(key, value);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_layer_order(state: tauri::State<AppStateHandle>, order: Vec<String>) -> Result<(), String> {
+    state.lock().unwrap().set_layer_order(order);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_mirror(state: tauri::State<AppStateHandle>, on: bool) -> Result<(), String> {
+    state.lock().unwrap().set_mirror(on);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_media(state: tauri::State<AppStateHandle>, w_mm: f64, h_mm: f64) -> Result<(), String> {
+    state.lock().unwrap().set_media(w_mm, h_mm).map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn set_material_preset(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>, value: PresetAssignment)
     -> Result<Delta, String> {
     state.lock().unwrap().set_material_preset(ids, value).map_err(|e| e.to_string())
@@ -218,8 +242,16 @@ pub fn machine_caps(dev: tauri::State<DeviceManagerHandle>, machine_id: String) 
 /// The preset editor is told the bounds rather than restating them: a second copy in TypeScript
 /// offers the operator a speed `cutplan` then refuses (the arrangement `trace_controls` uses).
 #[tauri::command]
-pub fn settings_ranges() -> Result<cutplan::preflight::SettingsRanges, IpcError> {
-    Ok(cutplan::preflight::SETTINGS_RANGES)
+pub fn settings_ranges(
+    dev: tauri::State<DeviceManagerHandle>,
+    machine_id: Option<String>,
+) -> Result<cutplan::preflight::SettingsRanges, IpcError> {
+    // Narrowed to the machine when the caller names one, so the editor never offers a Cameo 1 a
+    // speed its preflight will refuse; the shared ranges otherwise.
+    match machine_id {
+        Some(id) => Ok(cutplan::preflight::settings_ranges_for(&dev.caps_for(&id)?)),
+        None => Ok(cutplan::preflight::SETTINGS_RANGES),
+    }
 }
 
 #[tauri::command]

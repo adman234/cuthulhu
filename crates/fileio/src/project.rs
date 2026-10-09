@@ -743,8 +743,11 @@ mod tests {
         // wire conversion that dropped any field — machine dimensions, artboard origin, a node
         // id, a fill — fails here, which a hand-picked list of assertions would not.
         let doc = load_project(&path).unwrap();
-        let expected: serde_json::Value =
+        let mut expected: serde_json::Value =
             serde_json::from_str(&FROZEN_V1_MANIFEST.replace("puma_iv", "puma")).unwrap();
+        // The second intended difference: version 3's cut-job settings, which a version-1 file
+        // predates and so reads as the defaults.
+        expected["job"] = serde_json::to_value(document::JobSettings::default()).unwrap();
         let actual: serde_json::Value = serde_json::from_str(&doc.snapshot_json()).unwrap();
         assert_eq!(actual, expected);
         assert!(FROZEN_V1_MANIFEST.contains("puma_iv"),
