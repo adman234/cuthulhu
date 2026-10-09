@@ -1,8 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::path::Path;
-use document::{CmdError, CutLineType, Delta, Editor, MachineProfile, NodeId, PresetAssignment, ShapeKind, commands};
+use document::{CmdError, CutLineType, Delta, Editor, MachineProfile, NodeId, Paper, PresetAssignment, RegistrationArea, RegistrationError, ShapeKind, commands};
 use fileio::IoError;
 use geometry::{Affine, BoolOp};
+
+/// The document's registration, as `registration_status` reports it: the Group holding the marks
+/// (absent when there are none, including after their add was undone), whether the cut registers
+/// against them, the area the machine will search, and why that area cannot be read if it cannot.
+#[derive(Debug, PartialEq, serde::Serialize)]
+pub struct RegistrationStatus {
+    pub marks: Option<NodeId>,
+    pub enabled: bool,
+    pub area: Option<RegistrationArea>,
+    pub problem: Option<String>,
+}
 
 /// Wraps the document `Editor` with thin methods, one per IPC command. Each method
 /// carries the actual logic (or delegates straight to `document`/`fileio`); `ipc.rs`
@@ -145,6 +156,38 @@ impl AppState {
         Ok(())
     }
 
+    /// Lay out registration marks for print & cut, replacing any the document has. One undo.
+    pub fn add_registration_marks(&mut self, area: RegistrationArea) -> Result<Delta, RegistrationError> {
+        self.editor.add_registration_marks(area)
+    }
+
+    pub fn set_registration_enabled(&mut self, on: bool) -> Result<(), RegistrationError> {
+        self.editor.set_registration_enabled(on)
+    }
+
+    /// What the document says about registration, with the area read off the marks as the cut
+    /// will read it — so a panel shows the frame the machine will search, not a remembered one.
+    pub fn registration_status(&self) -> RegistrationStatus {
+        let doc = &self.editor.doc;
+        let reg = doc.job.registration.filter(|r| doc.get(r.marks).is_some());
+        let (area, problem) = match reg.map(|r| doc.marks_area(r.marks)) {
+            Some(Ok(area)) => (Some(area), None),
+            Some(Err(e)) => (None, Some(e.to_string())),
+            None => (None, None),
+        };
+        RegistrationStatus {
+            marks: reg.map(|r| r.marks),
+            enabled: reg.is_some_and(|r| r.enabled),
+            area,
+            problem,
+        }
+    }
+
+    /// Write the printable sheet — marks and artwork at true size on `paper` — to `path`.
+    pub fn export_print_svg(&self, path: &Path, paper: Paper) -> Result<(), fileio::PrintError> {
+        fileio::export_print_svg(path, &self.editor.doc, paper)
+    }
+
     pub fn list_machines(&self) -> Vec<MachineProfile> {
         document::builtin_profiles()
     }
@@ -282,5 +325,34 @@ mod tests {
             assert_eq!((d.id.as_str(), d.name.as_str(), d.width_mm, d.height_mm),
                        (p.id.as_str(), p.name.as_str(), p.width_mm, p.height_mm), "{}", p.id);
         }
+    }
+
+    #[test]
+    fn registration_status_reads_the_marks_and_follows_undo() {
+        let mut state = AppState::new();
+        assert_eq!(state.registration_status(), RegistrationStatus { marks: None, enabled: false, area: None, problem: None });
+        let letter = RegistrationArea::for_paper(Paper::Letter);
+        state.add_registration_marks(letter).unwrap();
+        let status = state.registration_status();
+        assert!(status.marks.is_some() && status.enabled && status.problem.is_none());
+        let area = status.area.unwrap();
+        assert!((area.width_mm - letter.width_mm).abs() < 1e-9 && (area.origin_y_mm - 10.0).abs() < 1e-9);
+        state.set_registration_enabled(false).unwrap();
+        assert!(!state.registration_status().enabled);
+        state.undo();
+        assert_eq!(state.registration_status().marks, None, "undone marks are no marks");
+        assert!(state.set_registration_enabled(true).is_err());
+    }
+
+    #[test]
+    fn the_printable_sheet_is_written_where_asked() {
+        let mut state = AppState::new();
+        state.add_registration_marks(RegistrationArea::for_paper(Paper::A4)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("print.svg");
+        state.export_print_svg(&path, Paper::A4).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains(r#"width="210mm" height="297mm""#));
+        let err = state.export_print_svg(&dir.path().join("letter.svg"), Paper::Letter).unwrap_err();
+        assert_eq!(err.to_string(), "the registration marks do not fit on Letter paper; add marks for that paper first");
     }
 }

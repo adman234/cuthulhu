@@ -136,6 +136,33 @@ pub fn set_machine(state: tauri::State<AppStateHandle>, machine_id: String) -> R
     state.lock().unwrap().set_machine(&machine_id).map_err(|e| e.to_string())
 }
 
+/// The marks' default layout on a sheet of `paper`, so a panel can offer it without restating the
+/// template's inset.
+#[tauri::command]
+pub fn registration_area_for_paper(paper: document::Paper) -> Result<document::RegistrationArea, String> {
+    Ok(document::RegistrationArea::for_paper(paper))
+}
+
+#[tauri::command]
+pub fn add_registration_marks(state: tauri::State<AppStateHandle>, area: document::RegistrationArea) -> Result<Delta, String> {
+    state.lock().unwrap().add_registration_marks(area).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_registration_enabled(state: tauri::State<AppStateHandle>, on: bool) -> Result<(), String> {
+    state.lock().unwrap().set_registration_enabled(on).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn registration_status(state: tauri::State<AppStateHandle>) -> Result<crate::state::RegistrationStatus, String> {
+    Ok(state.lock().unwrap().registration_status())
+}
+
+#[tauri::command]
+pub fn export_print_svg(state: tauri::State<AppStateHandle>, path: PathBuf, paper: document::Paper) -> Result<(), String> {
+    state.lock().unwrap().export_print_svg(&path, paper).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn list_machines(state: tauri::State<AppStateHandle>) -> Result<Vec<MachineProfile>, String> {
     Ok(state.lock().unwrap().list_machines())
