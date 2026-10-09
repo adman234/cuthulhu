@@ -11,4 +11,6 @@ pub mod machine;
 pub use machine::*;
 pub mod job;
 pub use job::*;
+pub mod registration;
+pub use registration::*;
 pub mod snapshot;

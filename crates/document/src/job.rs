@@ -53,6 +53,9 @@ pub struct JobSettings {
     /// Cut the job mirrored left-to-right across the artboard, as heat-transfer vinyl needs.
     #[serde(default)]
     pub mirror: bool,
+    /// The registration marks this Document prints, for print & cut. See `registration.rs`.
+    #[serde(default)]
+    pub registration: Option<crate::registration::Registration>,
 }
 
 /// Why a media size was refused.
