@@ -102,11 +102,28 @@ Cameo 1, and only after that does the upstream PR open.
 - Part B is on the fork's `main`. It is covered by vitest and by the e2e tests at the end of `e2e/smoke.spec.ts`, which pin
   every earlier test to the classic layout. The real-window checklist is pending.
 
-## Part C — later
+## Part C — second round (2026-10-09/10), done in the fork
 
-- **C1** Track enhancing and pen mode. These add `Settings` fields that pass through presets, IPC
-  and the cut-host protocol, so they get a spec of their own.
-- **C2** Print & cut with Cameo 1 registration marks. This needs a printable mark template and the `TB123` search.
-- **C3** Media size: a 12×12 mat versus roll, and the artboard follows it.
-- **C4** Copies, weed boxes and lines, and offset.
-- **C5** Upstream PR for Part A, after the hardware checklist passes.
+Built and tested headless; nothing below is hardware-verified (see `MANUAL-CHECKLIST.md`).
+
+| Item | Where |
+|---|---|
+| Per-machine speed ceiling (Cameo 1: 10), refused in preflight and on preset save | `MachineCaps.speed_max`, `cutplan::preflight` |
+| Track enhancing and pen per pass/preset | `Settings.track_enhancing` / `Tool`; Cameo 1 `FY0`/`FC0` |
+| Print & cut: mark template, print export, cutting against the marks | `document::registration`, `fileio::print`, `SessionStep::Expect` |
+| Media size presets; preflight against media ∩ machine | `Editor::set_media`, `plan_cut` |
+| Mirror for HTV (refused with registration) | `JobSettings.mirror`, `plan_cut` |
+| Per-pass settings and order saved in the project (manifest v3) | `JobSettings` / `PassSettings` |
+| Test cut | `test_cut` command, dock |
+| Weed box and lines, copies, offset/contour, text editing + weld, nesting | `document::shape_tools`, ToolRail |
+| Dock: cut preview, reorder, palette highlight, dimmed Output-off shapes, time estimate, beginner mode, operator name, print & cut switch | `ui/src/simple/` |
+| Linux .deb with udev rule and desktop entry | `apps/desktop/tauri.conf.json`, `apps/desktop/linux/` |
+| Usage log with CSV export; shared presets file; material notes / blade depth | `desktop::usage`, `desktop::settings`, PresetEditor |
+| README rewritten; USB test skips without a USB bus | — |
+
+## Later
+
+- Upstream PR for the Cameo 1 driver (`cameo1-support`), after the hardware checklist passes.
+- Hardware-verify the second round: track enhancing, pen, registration search, test cut.
+- True-shape nesting; manual registration (`TB23`, needs jogging); Cameo 5 registration (`TB124`).
+- Blade-life counter (not requested this round).
