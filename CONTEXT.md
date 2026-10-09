@@ -106,9 +106,26 @@ _Avoid_: regmarks (outside protocol notes), crop marks, alignment marks, fiducia
 ### Settings and materials
 
 **Settings**:
-How hard and how fast to cut, and how many times to repeat a pass. What a machine needs beyond
-the geometry itself.
+How hard and how fast to cut, how many times to repeat a pass, whether to track-enhance the media
+first, and which Tool is in the holder. What a machine needs beyond the geometry itself.
 _Avoid_: parameters, options, config
+
+**Tool**:
+What the holder carries for a pass — a `Blade`, whose trailing tip the Driver compensates for at
+corners, or a `Pen`, which draws where the holder is.
+_Avoid_: mode, cut type
+
+**JobSettings**:
+What the operator chose about cutting a Document, saved with it: a PassSettings per PassKey, the
+pass order, whether the job is mirrored, and its registration. Not Deltas — panel state, like the
+machine choice.
+_Avoid_: layer settings, job config
+
+**PassSettings**:
+One pass's saved choices in JobSettings: whether it is cut (`output`), its MaterialPreset, and
+overrides of its Settings, each `None` deferring to the preset. The simple shell shows these as
+LightBurn-style "layers"; that word stays in the UI copy, never in code.
+_Avoid_: layer, layer settings
 
 **MaterialPreset**:
 Named Settings for a particular material on a particular machine — vinyl on a Cameo, card on a

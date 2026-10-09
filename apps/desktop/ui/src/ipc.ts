@@ -370,8 +370,8 @@ export async function settingsRanges(machineId?: string): Promise<SettingsRanges
   return invoke("settings_ranges", machineId === undefined ? {} : { machineId });
 }
 
-/** Mirrors `document::LayerSettings`: one pass's saved choices. `null` defers to the preset. */
-export type LayerSettings = {
+/** Mirrors `document::PassSettings`: one pass's saved choices. `null` defers to the preset. */
+export type PassSettings = {
   output: boolean;
   preset_id: string | null;
   speed: number | null;
@@ -383,20 +383,20 @@ export type LayerSettings = {
 
 /** Mirrors `document::JobSettings`. Absent from a document saved before it existed. */
 export type JobSettings = {
-  layers: Record<PassKey, LayerSettings>;
-  layer_order: PassKey[];
+  pass_settings: Record<PassKey, PassSettings>;
+  pass_order: PassKey[];
   mirror: boolean;
   /** Mirrors `document::Registration`: the Group holding the marks, and whether the cut uses them. */
   registration?: { marks: number; enabled: boolean } | null;
 };
 
 /** `value: null` forgets the pass's settings. Saved with the project; not an undo step. */
-export async function setLayerSettings(key: PassKey, value: LayerSettings | null) {
-  return invoke("set_layer_settings", { key, value });
+export async function setPassSettings(key: PassKey, value: PassSettings | null) {
+  return invoke("set_pass_settings", { key, value });
 }
 
-export async function setLayerOrder(order: PassKey[]) {
-  return invoke("set_layer_order", { order });
+export async function setPassOrder(order: PassKey[]) {
+  return invoke("set_pass_order", { order });
 }
 
 export async function setMirror(on: boolean) {

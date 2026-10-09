@@ -11,7 +11,7 @@ import { CutterPanel } from "./CutterPanel";
 import {
   MEDIA, currentMedia, estimateSeconds, formatDuration, heldFromJob, machineMismatch,
   moveKey, mutedNodeIds, orderRows, readBeginner, rowsFromPlan, shouldAutoMirror, startControl,
-  testCutControl, toLayer, writeBeginner,
+  testCutControl, toPassSettings, writeBeginner,
   type CutRow, type DockPlan,
 } from "./cutsModel";
 
@@ -112,7 +112,7 @@ export function SimpleDock(props: Props) {
       .planCut("Color")
       .then((r) => {
         if (seq !== planSeq.current) return; // a newer replan owns the panel
-        const order = docRef.current?.job?.layer_order ?? [];
+        const order = docRef.current?.job?.pass_order ?? [];
         setPlan({
           revision: r.doc_revision,
           rows: orderRows(rowsFromPlan(r.passes, heldFromJob(docRef.current?.job)), order),
@@ -211,7 +211,7 @@ export function SimpleDock(props: Props) {
     if (plan === null) return;
     const rows = plan.rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r));
     setPlan({ ...plan, rows });
-    props.onJobEdit(() => ipc.setLayerSettings(rows[i].key, toLayer(rows[i])));
+    props.onJobEdit(() => ipc.setPassSettings(rows[i].key, toPassSettings(rows[i])));
     if (patch.enabled !== undefined) refreshTravel(plan.revision, rows);
     if (patch.presetId !== undefined) {
       const preset = lookup.presets.find((x) => x.id === patch.presetId);
@@ -228,7 +228,7 @@ export function SimpleDock(props: Props) {
     if (keys === null) return;
     const rows = orderRows(plan.rows, keys);
     setPlan({ ...plan, rows });
-    props.onJobEdit(() => ipc.setLayerOrder(keys));
+    props.onJobEdit(() => ipc.setPassOrder(keys));
     refreshTravel(plan.revision, rows);
   };
 

@@ -199,12 +199,12 @@ impl AppState {
         scratch
     }
 
-    pub fn set_layer_settings(&mut self, key: String, value: Option<document::LayerSettings>) {
-        self.editor.set_layer_settings(key, value);
+    pub fn set_pass_settings(&mut self, key: String, value: Option<document::PassSettings>) {
+        self.editor.set_pass_settings(key, value);
     }
 
-    pub fn set_layer_order(&mut self, order: Vec<String>) {
-        self.editor.set_layer_order(order);
+    pub fn set_pass_order(&mut self, order: Vec<String>) {
+        self.editor.set_pass_order(order);
     }
 
     pub fn set_mirror(&mut self, on: bool) {

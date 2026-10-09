@@ -398,7 +398,7 @@ mod tests {
     /// A project saved before registration existed opens with none.
     #[test]
     fn job_settings_without_registration_read_as_none() {
-        let job: crate::JobSettings = serde_json::from_str(r#"{"layers":{},"layer_order":[],"mirror":false}"#).unwrap();
+        let job: crate::JobSettings = serde_json::from_str(r#"{"pass_settings":{},"pass_order":[],"mirror":false}"#).unwrap();
         assert_eq!(job.registration, None);
     }
 }

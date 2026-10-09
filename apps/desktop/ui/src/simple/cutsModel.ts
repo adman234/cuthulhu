@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import type { CutStatus, DeviceInfo, JobSettings, LayerSettings, PassKey, PlanCutPassSummary } from "../ipc";
+import type { CutStatus, DeviceInfo, JobSettings, PassSettings, PassKey, PlanCutPassSummary } from "../ipc";
 import { presetIdForKey, type PassVm, type Preset, type PresetLookup } from "../cut/viewmodel";
 
 /** What the operator set on a Cuts row: everything but what the planner says about it. */
@@ -45,7 +45,7 @@ export function freshSettings(key: PassKey): RowSettings {
 }
 
 /** A row's settings as the document saves them. */
-export function toLayer(row: RowSettings): LayerSettings {
+export function toPassSettings(row: RowSettings): PassSettings {
   return {
     output: row.enabled,
     preset_id: row.presetId,
@@ -58,7 +58,7 @@ export function toLayer(row: RowSettings): LayerSettings {
 }
 
 /** A saved layer back into row settings. */
-export function fromLayer(l: LayerSettings): RowSettings {
+export function fromPassSettings(l: PassSettings): RowSettings {
   return {
     enabled: l.output,
     presetId: l.preset_id,
@@ -72,7 +72,7 @@ export function fromLayer(l: LayerSettings): RowSettings {
 
 /** Settings saved in the document, as the map `rowsFromPlan` reads. */
 export function heldFromJob(job: JobSettings | undefined): Map<PassKey, RowSettings> {
-  return new Map(Object.entries(job?.layers ?? {}).map(([k, l]) => [k, fromLayer(l)]));
+  return new Map(Object.entries(job?.pass_settings ?? {}).map(([k, l]) => [k, fromPassSettings(l)]));
 }
 
 /** Passes in the operator's saved order: keys named in `order` first, in that order, then the

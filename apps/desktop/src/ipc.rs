@@ -112,15 +112,15 @@ pub fn set_stroke_color(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>, r
 }
 
 #[tauri::command]
-pub fn set_layer_settings(state: tauri::State<AppStateHandle>, key: String, value: Option<document::LayerSettings>)
+pub fn set_pass_settings(state: tauri::State<AppStateHandle>, key: String, value: Option<document::PassSettings>)
     -> Result<(), String> {
-    state.lock().unwrap().set_layer_settings(key, value);
+    state.lock().unwrap().set_pass_settings(key, value);
     Ok(())
 }
 
 #[tauri::command]
-pub fn set_layer_order(state: tauri::State<AppStateHandle>, order: Vec<String>) -> Result<(), String> {
-    state.lock().unwrap().set_layer_order(order);
+pub fn set_pass_order(state: tauri::State<AppStateHandle>, order: Vec<String>) -> Result<(), String> {
+    state.lock().unwrap().set_pass_order(order);
     Ok(())
 }
 

@@ -17,7 +17,7 @@ use crate::history::Editor;
 /// One pass's saved choices. Every `None` defers to the material preset, the same rule the cut
 /// request follows.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-pub struct LayerSettings {
+pub struct PassSettings {
     #[serde(default = "yes")]
     pub output: bool,
     #[serde(default)]
@@ -36,9 +36,9 @@ pub struct LayerSettings {
 
 fn yes() -> bool { true }
 
-impl Default for LayerSettings {
+impl Default for PassSettings {
     fn default() -> Self {
-        LayerSettings { output: true, preset_id: None, speed: None, force: None, repeat_count: None, track_enhancing: None, pen: None }
+        PassSettings { output: true, preset_id: None, speed: None, force: None, repeat_count: None, track_enhancing: None, pen: None }
     }
 }
 
@@ -46,10 +46,10 @@ impl Default for LayerSettings {
 pub struct JobSettings {
     /// Keyed by `PassKey` spelling (`color:ff0000ff`, …).
     #[serde(default)]
-    pub layers: BTreeMap<String, LayerSettings>,
+    pub pass_settings: BTreeMap<String, PassSettings>,
     /// The order passes are cut in, by key. A pass missing here follows, in planned order.
     #[serde(default)]
-    pub layer_order: Vec<String>,
+    pub pass_order: Vec<String>,
     /// Cut the job mirrored left-to-right across the artboard, as heat-transfer vinyl needs.
     #[serde(default)]
     pub mirror: bool,
@@ -76,17 +76,17 @@ impl std::fmt::Display for MediaError {
 
 impl Editor {
     /// `None` forgets the pass's settings, so it starts again from its preset.
-    pub fn set_layer_settings(&mut self, key: String, value: Option<LayerSettings>) {
+    pub fn set_pass_settings(&mut self, key: String, value: Option<PassSettings>) {
         match value {
-            Some(v) => { self.doc.job.layers.insert(key, v); }
-            None => { self.doc.job.layers.remove(&key); }
+            Some(v) => { self.doc.job.pass_settings.insert(key, v); }
+            None => { self.doc.job.pass_settings.remove(&key); }
         }
     }
 
-    pub fn set_layer_order(&mut self, order: Vec<String>) {
+    pub fn set_pass_order(&mut self, order: Vec<String>) {
         // A key named twice would make "cut first" ambiguous; keep its first place.
         let mut seen = std::collections::HashSet::new();
-        self.doc.job.layer_order = order.into_iter().filter(|k| seen.insert(k.clone())).collect();
+        self.doc.job.pass_order = order.into_iter().filter(|k| seen.insert(k.clone())).collect();
     }
 
     pub fn set_mirror(&mut self, on: bool) {
@@ -111,13 +111,13 @@ mod tests {
     #[test]
     fn layer_settings_are_saved_forgotten_and_ordered_without_duplicates() {
         let mut ed = Editor::new();
-        let s = LayerSettings { speed: Some(4), output: false, ..LayerSettings::default() };
-        ed.set_layer_settings("color:ff0000ff".into(), Some(s.clone()));
-        assert_eq!(ed.doc.job.layers.get("color:ff0000ff"), Some(&s));
-        ed.set_layer_settings("color:ff0000ff".into(), None);
-        assert!(ed.doc.job.layers.is_empty());
-        ed.set_layer_order(vec!["b".into(), "a".into(), "b".into()]);
-        assert_eq!(ed.doc.job.layer_order, vec!["b".to_string(), "a".to_string()]);
+        let s = PassSettings { speed: Some(4), output: false, ..PassSettings::default() };
+        ed.set_pass_settings("color:ff0000ff".into(), Some(s.clone()));
+        assert_eq!(ed.doc.job.pass_settings.get("color:ff0000ff"), Some(&s));
+        ed.set_pass_settings("color:ff0000ff".into(), None);
+        assert!(ed.doc.job.pass_settings.is_empty());
+        ed.set_pass_order(vec!["b".into(), "a".into(), "b".into()]);
+        assert_eq!(ed.doc.job.pass_order, vec!["b".to_string(), "a".to_string()]);
     }
 
     #[test]
@@ -140,7 +140,7 @@ mod tests {
         v.as_object_mut().unwrap().remove("job");
         let back: crate::Document = serde_json::from_value(v).unwrap();
         assert_eq!(back.job, JobSettings::default());
-        let layer: LayerSettings = serde_json::from_str("{}").unwrap();
+        let layer: PassSettings = serde_json::from_str("{}").unwrap();
         assert!(layer.output, "a layer saved with nothing says nothing about output, so it cuts");
     }
 }

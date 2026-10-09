@@ -86,22 +86,22 @@ describe("progressPercent", () => {
 });
 
 import {
-  currentMedia, estimateSeconds, formatDuration, fromLayer, heldFromJob, moveKey, mutedNodeIds,
-  orderRows, readBeginner, shouldAutoMirror, toLayer, writeBeginner, BEGINNER_KEY,
+  currentMedia, estimateSeconds, formatDuration, fromPassSettings, heldFromJob, moveKey, mutedNodeIds,
+  orderRows, readBeginner, shouldAutoMirror, toPassSettings, writeBeginner, BEGINNER_KEY,
 } from "./cutsModel";
 
 describe("saved layer settings", () => {
-  it("round-trip between a row and the document's LayerSettings", () => {
+  it("round-trip between a row and the document's PassSettings", () => {
     const row = { ...freshSettings("color:ff0000ff"), speed: 4, enabled: false, tool: "Pen" as const, trackEnhancing: true };
-    expect(fromLayer(toLayer(row))).toEqual(row);
+    expect(fromPassSettings(toPassSettings(row))).toEqual(row);
     const blank = freshSettings("all");
-    expect(toLayer(blank)).toMatchObject({ output: true, pen: null, track_enhancing: null });
-    expect(fromLayer(toLayer(blank))).toEqual(blank);
+    expect(toPassSettings(blank)).toMatchObject({ output: true, pen: null, track_enhancing: null });
+    expect(fromPassSettings(toPassSettings(blank))).toEqual(blank);
   });
 
   it("seed rows from the document, which an older backend may not send", () => {
     expect(heldFromJob(undefined).size).toBe(0);
-    const held = heldFromJob({ layers: { "color:ff0000ff": toLayer({ ...freshSettings("x"), speed: 7 }) }, layer_order: [], mirror: false });
+    const held = heldFromJob({ pass_settings: { "color:ff0000ff": toPassSettings({ ...freshSettings("x"), speed: 7 }) }, pass_order: [], mirror: false });
     expect(rowsFromPlan([pass("color:ff0000ff")], held)[0].speed).toBe(7);
   });
 });

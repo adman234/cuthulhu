@@ -22,7 +22,7 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     artboard: { x: number; y: number; w: number; h: number };
     machine: { id: string; name: string; width_mm: number; height_mm: number } | null;
     // Mirrors document::JobSettings; created on first write, as an older snapshot lacks it.
-    job?: { layers: Record<string, unknown>; layer_order: string[]; mirror: boolean };
+    job?: { pass_settings: Record<string, unknown>; pass_order: string[]; mirror: boolean };
   };
 
   const machines = [
@@ -59,7 +59,7 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     doc.machine = CAMEO1;
     doc.artboard = { x: 0, y: 0, w: 295, h: 2999 };
   }
-  const job = () => (doc.job ??= { layers: {}, layer_order: [], mirror: false });
+  const job = () => (doc.job ??= { pass_settings: {}, pass_order: [], mirror: false });
   let saved: Doc | null = null;
   let registration: { marks: number; enabled: boolean; area: unknown } | null = null;
 
@@ -1413,13 +1413,13 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       ? { supportsSpeed: true, supportsForce: true, needsOperatorPassConfirm: false, speedMax: 10, supportsTrackEnhancing: true, supportsPen: true, supportsRegistration: true }
       : { supportsSpeed: true, supportsForce: true, needsOperatorPassConfirm: false },
     // Mirror desktop::state's job-settings commands: not undo steps, saved in the document.
-    set_layer_settings: (a) => {
-      if (a.value === null) delete job().layers[a.key as string];
-      else job().layers[a.key as string] = a.value;
+    set_pass_settings: (a) => {
+      if (a.value === null) delete job().pass_settings[a.key as string];
+      else job().pass_settings[a.key as string] = a.value;
       return null;
     },
-    set_layer_order: (a) => {
-      job().layer_order = [...new Set(a.order as string[])];
+    set_pass_order: (a) => {
+      job().pass_order = [...new Set(a.order as string[])];
       return null;
     },
     set_mirror: (a) => {
@@ -5245,10 +5245,10 @@ test("a layer's settings and the cut order are saved in the document and drive t
   await expect(page.getByTestId("cuts-row").first()).toContainText("#00ff00");
 
   const snap = JSON.parse((await callFake(page, "snapshot")) as string) as {
-    job: { layers: Record<string, { speed: number; output: boolean }>; layer_order: string[] };
+    job: { pass_settings: Record<string, { speed: number; output: boolean }>; pass_order: string[] };
   };
-  expect(snap.job.layers["color:ff0000ff"]).toMatchObject({ speed: 4, output: true });
-  expect(snap.job.layer_order).toEqual(["color:00ff00ff", "color:ff0000ff"]);
+  expect(snap.job.pass_settings["color:ff0000ff"]).toMatchObject({ speed: 4, output: true });
+  expect(snap.job.pass_order).toEqual(["color:00ff00ff", "color:ff0000ff"]);
   await expect(page.getByTestId("cut-estimate")).toBeVisible();
 
   await page.getByRole("button", { name: "Connect cutter" }).click();
@@ -5270,8 +5270,8 @@ test("on a Cameo 1 the dock offers media, mirror, track enhancing, pen and a tes
   await page.getByLabel("Track enhancing for Red").check();
   await page.getByLabel("Pen for Red").check();
   await expect.poll(async () => {
-    const d = JSON.parse((await callFake(page, "snapshot")) as string) as { artboard: { w: number; h: number }; job?: { mirror: boolean; layers: Record<string, { track_enhancing: boolean; pen: boolean }> } };
-    return [d.artboard.w, d.artboard.h, d.job?.mirror, d.job?.layers["color:ff0000ff"]?.track_enhancing, d.job?.layers["color:ff0000ff"]?.pen];
+    const d = JSON.parse((await callFake(page, "snapshot")) as string) as { artboard: { w: number; h: number }; job?: { mirror: boolean; pass_settings: Record<string, { track_enhancing: boolean; pen: boolean }> } };
+    return [d.artboard.w, d.artboard.h, d.job?.mirror, d.job?.pass_settings["color:ff0000ff"]?.track_enhancing, d.job?.pass_settings["color:ff0000ff"]?.pen];
   }).toEqual([295, 304.8, true, true, true]);
   await expect(page.getByLabel("Speed for Red")).toHaveAttribute("title", "1–10");
 
