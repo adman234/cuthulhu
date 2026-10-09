@@ -46,6 +46,7 @@
   "set_stroke_color": ["ids", "rgba"],
   "settings_ranges": ["machineId"],
   "snapshot": [],
+  "test_cut": ["request"],
   "test_host": ["address", "fingerprint", "token"],
   "trace_controls": [],
   "trace_image": ["controls", "path"],

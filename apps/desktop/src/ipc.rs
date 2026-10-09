@@ -213,6 +213,35 @@ pub fn cut(state: tauri::State<AppStateHandle>, dev: tauri::State<DeviceManagerH
     dev.execute_cut(planned_for, passes)
 }
 
+/// Cut the test figure at `(x_mm, y_mm)` with one pass's settings, through the same plan and
+/// preflight as a real cut.
+#[derive(serde::Deserialize)]
+pub struct TestCutRequest {
+    pub device_instance_id: String,
+    pub x_mm: f64,
+    pub y_mm: f64,
+    pub pass: crate::device::ConfiguredPassDto,
+}
+
+#[tauri::command(async)]
+pub fn test_cut(state: tauri::State<AppStateHandle>, dev: tauri::State<DeviceManagerHandle>, request: TestCutRequest)
+    -> Result<CutStarted, IpcError> {
+    let (planned_for, passes) = {
+        let app = state.lock().unwrap();
+        let scratch = app.test_cut_scratch(request.x_mm, request.y_mm);
+        let cut = CutRequest {
+            device_instance_id: request.device_instance_id,
+            doc_revision: cutplan::doc_revision(&scratch.editor.doc).to_string(),
+            grouping: Grouping::Single,
+            passes: vec![crate::device::ConfiguredPassDto {
+                key: cutplan::PassKey::All, enabled: true, ..request.pass
+            }],
+        };
+        dev.prepare_cut(&scratch, cut)?
+    };
+    dev.execute_cut(planned_for, passes)
+}
+
 #[tauri::command(async)]
 pub fn cancel_cut(dev: tauri::State<DeviceManagerHandle>) -> Result<(), IpcError> {
     dev.cancel()

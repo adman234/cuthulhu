@@ -37,6 +37,12 @@ pub struct DocumentPasses {
     /// The machine the document targets, if it names one. Carried here because
     /// preflight checks it and `plan_cut` no longer sees the `Document`.
     pub machine_id: Option<String>,
+    /// The media the operator laid the design out on. Carried for the same reason: `plan_cut`
+    /// refuses geometry off it, not merely off the machine, since a cut past a 12×12 mat's edge
+    /// is a cut into the rollers even where the carriage reaches.
+    pub artboard: geometry::Rect,
+    /// Whether the job is cut mirrored left-to-right (`Document::job.mirror`).
+    pub mirror: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -210,6 +216,8 @@ pub fn plan_passes_with(doc: &Document, grouping: Grouping) -> Result<DocumentPa
         skipped_not_cut,
         doc_revision: doc_revision(doc),
         machine_id: doc.machine.as_ref().map(|m| m.id.clone()),
+        artboard: doc.artboard,
+        mirror: doc.job.mirror,
     })
 }
 

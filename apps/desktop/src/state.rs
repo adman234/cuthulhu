@@ -122,6 +122,29 @@ impl AppState {
         Ok(self.snapshot())
     }
 
+    /// A document holding only the test-cut shapes — a 10 mm square with a triangle inside, the
+    /// figure Silhouette's own test cut makes — at `(x_mm, y_mm)`, for the operator's machine and
+    /// media. A scratch document rather than shapes added to theirs, so a test cut neither lands
+    /// in the design nor its undo history, and it still goes through the one cut path.
+    pub fn test_cut_scratch(&self, x_mm: f64, y_mm: f64) -> AppState {
+        let mut scratch = AppState::new();
+        scratch.editor.doc.machine = self.editor.doc.machine.clone();
+        scratch.editor.doc.artboard = self.editor.doc.artboard;
+        let root = scratch.editor.doc.root;
+        let (x, y) = (x_mm, y_mm);
+        let outlines = [
+            format!("M{x} {y} L{} {y} L{} {} L{x} {} Z", x + 10.0, x + 10.0, y + 10.0, y + 10.0),
+            format!("M{} {} L{} {} L{} {} Z", x + 2.5, y + 7.5, x + 5.0, y + 2.5, x + 7.5, y + 7.5),
+        ];
+        let mut ops = Vec::new();
+        for d in outlines {
+            let id = scratch.editor.doc.ids.next();
+            ops.push(document::NodeOp::Add { parent: root, node: document::Node::shape(id, ShapeKind::Path { d }), index: usize::MAX });
+        }
+        scratch.editor.commit(Delta(ops));
+        scratch
+    }
+
     pub fn set_layer_settings(&mut self, key: String, value: Option<document::LayerSettings>) {
         self.editor.set_layer_settings(key, value);
     }
@@ -282,5 +305,20 @@ mod tests {
             assert_eq!((d.id.as_str(), d.name.as_str(), d.width_mm, d.height_mm),
                        (p.id.as_str(), p.name.as_str(), p.width_mm, p.height_mm), "{}", p.id);
         }
+    }
+
+    #[test]
+    fn a_test_cut_is_a_square_and_triangle_on_a_scratch_document() {
+        let mut app = AppState::new();
+        app.set_machine("cameo1").unwrap();
+        app.add_rect(50.0, 50.0);
+        let scratch = app.test_cut_scratch(5.0, 6.0);
+        let planned = cutplan::plan_passes_with(&scratch.editor.doc, cutplan::Grouping::Single).unwrap();
+        assert_eq!(planned.passes.len(), 1);
+        assert_eq!(planned.passes[0].shapes.len(), 2, "square and triangle, and not the design");
+        assert_eq!(planned.machine_id.as_deref(), Some("cameo1"));
+        let xs: Vec<f64> = planned.passes[0].shapes.iter().flat_map(|s| s.polylines.iter().flatten().map(|p| p.x)).collect();
+        assert!(xs.iter().all(|x| (5.0..=15.0).contains(x)), "{xs:?}");
+        assert_eq!(app.editor.doc.nodes.len(), 2, "the operator's document is untouched");
     }
 }

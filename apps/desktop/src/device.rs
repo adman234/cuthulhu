@@ -1358,6 +1358,10 @@ pub struct PlanCutPassSummary {
     /// from `travel`, which has no move to the first shape and none for a single-shape
     /// plan. `None` is a shape whose outline flattened to nothing.
     pub starts: Vec<Option<[f64; 2]>>,
+    /// Total length the blade draws for one run of this pass, in mm — what a time estimate is
+    /// made from. One run: the repeat count is the row's to apply, and it can change without a
+    /// replan.
+    pub cut_length_mm: f64,
 }
 
 /// Summarizes `plan_passes_with` output for the UI — not the raw `DocumentPasses`
@@ -1379,6 +1383,9 @@ pub fn plan_cut_response(doc: &document::Document, grouping: Grouping)
             starts: p.shapes.iter().map(|s| {
                 s.polylines.first().and_then(|p| p.first()).map(|pt| [pt.x, pt.y])
             }).collect(),
+            cut_length_mm: p.shapes.iter().flat_map(|s| s.polylines.iter())
+                .map(|poly| poly.windows(2).map(|w| (w[1].x - w[0].x).hypot(w[1].y - w[0].y)).sum::<f64>())
+                .sum(),
         }).collect(),
         skipped_not_cut: planned.skipped_not_cut,
         doc_revision: planned.doc_revision.to_string(),
@@ -1756,6 +1763,14 @@ mod tests {
         let (app, revision) = two_color_doc();
         let err = travel_for_order(&app.editor.doc, &revision, Grouping::Color, &[on(colour(RED)), on(colour(RED))]).unwrap_err();
         assert_eq!(err.code, "plan_mismatch");
+    }
+
+    #[test]
+    fn plan_cut_response_states_each_passes_cut_length() {
+        let mut app = AppState::new();
+        app.add_rect(10.0, 5.0);
+        let response = plan_cut_response(&app.editor.doc, Grouping::Color).unwrap();
+        assert!((response.passes[0].cut_length_mm - 30.0).abs() < 1e-6, "{}", response.passes[0].cut_length_mm);
     }
 
     #[test]

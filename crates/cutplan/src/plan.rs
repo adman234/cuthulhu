@@ -147,16 +147,30 @@ pub fn plan_cut(
         configured.push(ConfiguredPass { pass, settings: sel.settings.clone(), enabled: true });
     }
 
-    preflight(&configured, profile, caps, planned.machine_id.as_deref(), opts.allow_out_of_bounds)
+    // The cuttable area is the machine's reach narrowed to the media laid out on it. Only ever
+    // narrowed: an artboard larger than the machine (a design drawn for another cutter) is still
+    // refused at the machine's own edge, which is the edge that matters to the carriage.
+    let area = MachineProfile {
+        width_mm: profile.width_mm.min(planned.artboard.x + planned.artboard.w),
+        height_mm: profile.height_mm.min(planned.artboard.y + planned.artboard.h),
+        ..profile.clone()
+    };
+    preflight(&configured, &area, caps, planned.machine_id.as_deref(), opts.allow_out_of_bounds)
         .map_err(CutError::Preflight)?;
 
+    // Mirrored about the same width preflight judged, so a design that fitted still fits: heat
+    // transfer vinyl is cut from the back, and the mirror is what makes it read the right way
+    // once pressed.
+    let flip = |p: &geometry::Point| geometry::Point { x: area.width_mm - p.x, y: p.y };
     Ok(CutPlan {
         passes: configured
             .iter()
             .map(|c| PlannedPass {
                 key: c.pass.key.clone(),
                 job: Job {
-                    polylines: c.pass.shapes.iter().flat_map(|s| s.polylines.iter().cloned()).collect(),
+                    polylines: c.pass.shapes.iter().flat_map(|s| s.polylines.iter().cloned())
+                        .map(|poly| if planned.mirror { poly.iter().map(flip).collect() } else { poly })
+                        .collect(),
                     settings: c.settings.clone(),
                 },
             })
@@ -346,5 +360,42 @@ mod tests {
         let wrapped = CutError::Preflight(PreflightError::NothingToCut);
         assert_eq!(wrapped.code(), "nothing_to_cut");
         assert_eq!(wrapped.to_string(), "no pass selected for this cut has any geometry");
+    }
+
+    /// Mirroring flips across the cuttable width, keeps y, and leaves an unmirrored plan alone.
+    #[test]
+    fn a_mirrored_job_is_flipped_across_the_cuttable_width() {
+        let mut planned = passes(&[(RED, 10.0, 20.0)]);
+        planned.artboard = geometry::Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let opts = PlanOptions {
+            passes: vec![PassSelection { key: planned.passes[0].key.clone(), settings: Settings::default() }],
+            expect_revision: None,
+            allow_out_of_bounds: false,
+        };
+        let plain = plan_cut(&planned, &profile(300.0, 300.0), &caps(), &opts).unwrap();
+        planned.mirror = true;
+        let mirrored = plan_cut(&planned, &profile(300.0, 300.0), &caps(), &opts).unwrap();
+        let (a, b) = (&plain.passes[0].job.polylines[0], &mirrored.passes[0].job.polylines[0]);
+        assert_eq!(a.len(), b.len());
+        for (p, q) in a.iter().zip(b) {
+            assert!((q.x - (100.0 - p.x)).abs() < 1e-9 && (q.y - p.y).abs() < 1e-9, "{p:?} -> {q:?}");
+        }
+    }
+
+    /// A design past the edge of the media laid out — but within the machine's reach — is
+    /// refused, because the blade would leave the mat.
+    #[test]
+    fn geometry_off_the_media_is_refused_even_within_the_machines_reach() {
+        let mut planned = passes(&[(RED, 200.0, 0.0)]);
+        planned.artboard = geometry::Rect { x: 0.0, y: 0.0, w: 150.0, h: 150.0 };
+        let opts = PlanOptions {
+            passes: vec![PassSelection { key: planned.passes[0].key.clone(), settings: Settings::default() }],
+            expect_revision: None,
+            allow_out_of_bounds: false,
+        };
+        assert!(matches!(plan_cut(&planned, &profile(300.0, 300.0), &caps(), &opts),
+            Err(CutError::Preflight(PreflightError::OutOfBounds { .. }))));
+        planned.artboard.w = 300.0;
+        assert!(plan_cut(&planned, &profile(300.0, 300.0), &caps(), &opts).is_ok());
     }
 }

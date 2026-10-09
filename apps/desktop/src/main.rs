@@ -60,6 +60,7 @@ fn main() {
             ipc::set_layer_order,
             ipc::set_mirror,
             ipc::set_media,
+            ipc::test_cut,
             ipc::set_material_preset,
             ipc::undo,
             ipc::redo,
