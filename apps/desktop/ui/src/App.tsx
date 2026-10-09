@@ -25,6 +25,9 @@ import { TextDialog } from "./text/TextDialog";
 import { SimpleDock } from "./simple/SimpleDock";
 import { ColorPalette } from "./simple/ColorPalette";
 import { readLayout, writeLayout, type Layout } from "./simple/layout";
+import { ShapeToolDialog } from "./shapes/ShapeToolDialog";
+import { OFFSET_FORM } from "./shapes/viewmodel";
+import type { ShapeTool } from "./panels/ToolRail";
 
 /** `window.localStorage` itself can throw (blocked site data), not just its methods. */
 function layoutStorage(): Storage | null {
@@ -157,6 +160,7 @@ export function App() {
     setLayout(next);
   };
   const [textOpen, setTextOpen] = useState(false);
+  const [shapeTool, setShapeTool] = useState<"offset" | null>(null);
   const [tracePath, setTracePath] = useState<string | null>(null);
   const [status, setStatus] = useState<ipc.CutStatus>(ipc.DISCONNECTED_STATUS);
   /** The machine's material presets, for the properties panel's control. Loaded here rather
@@ -560,6 +564,17 @@ export function App() {
     [edit, selected],
   );
 
+  // Commands that add shapes select what they added, so the next move or delete acts on it.
+  const selectAdded = (delta: unknown) => {
+    const added = (delta as NodeOpJson[]).flatMap((o) => ("Add" in o ? [o.Add.node.id] : []));
+    if (added.length > 0) setSelected(added);
+  };
+  const noSelection = selected.length === 0 ? "Select shapes first" : null;
+  const shapeTools: ShapeTool[] = [
+    { label: "Offset…", disabled: noSelection, onClick: () => setShapeTool("offset") },
+  ];
+  const selectionNote = `${unitCount} piece${unitCount === 1 ? "" : "s"} selected`;
+
   const onImportFile = (file: File) => {
     edit(async () => {
       const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
@@ -676,6 +691,7 @@ export function App() {
         onAddText={() => setTextOpen(true)}
         onBoolean={onBooleanOp}
         onDelete={deleteSelected}
+        shapeTools={shapeTools}
       />
       {/* The wrapper is what lets the canvas fill its grid cell: a canvas sized 100% directly in
           the grid adds its intrinsic 300×150 to the track minimum and never shrinks. `data-view`
@@ -735,6 +751,14 @@ export function App() {
       ) : null}
       {tracePath !== null ? (
         <TraceDialog path={tracePath} onInsert={onTraceInsert} onClose={() => setTracePath(null)} />
+      ) : null}
+      {shapeTool === "offset" ? (
+        <ShapeToolDialog
+          form={OFFSET_FORM}
+          note={selectionNote}
+          onApply={(r) => edit(async () => selectAdded(await ipc.offsetShapes({ ids: selected, ...r })))}
+          onClose={() => setShapeTool(null)}
+        />
       ) : null}
       {textOpen ? (
         <TextDialog

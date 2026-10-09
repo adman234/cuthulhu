@@ -26,6 +26,7 @@
   "load_project": ["path"],
   "machine_caps": ["machineId"],
   "new_doc": [],
+  "offset_shapes": ["distanceMm", "ids", "join", "union"],
   "pair_host": ["address", "fingerprint", "name", "token"],
   "pick_image": [],
   "plan_cut": ["grouping"],

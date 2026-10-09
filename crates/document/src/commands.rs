@@ -263,7 +263,7 @@ pub fn transform_each(doc: &Document, moves: &[(Vec<NodeId>, Affine)]) -> Result
 }
 
 /// Child → parent for every node, in one pass over the document.
-fn parent_index(doc: &Document) -> HashMap<NodeId, NodeId> {
+pub(crate) fn parent_index(doc: &Document) -> HashMap<NodeId, NodeId> {
     doc.nodes.iter().flat_map(|(&pid, n)| n.children.iter().map(move |&c| (c, pid))).collect()
 }
 
@@ -271,7 +271,7 @@ fn parent_index(doc: &Document) -> HashMap<NodeId, NodeId> {
 /// per-subtree (transform, delete) skip such nodes so that exactly one operation applies per
 /// selected subtree: the ancestor carries them along. Takes an index built once by the caller,
 /// since `parent_of` scans the whole document per level.
-fn ancestor_selected(parents: &HashMap<NodeId, NodeId>, selected: &HashSet<NodeId>, id: NodeId) -> bool {
+pub(crate) fn ancestor_selected(parents: &HashMap<NodeId, NodeId>, selected: &HashSet<NodeId>, id: NodeId) -> bool {
     let mut cur = id;
     while let Some(&pid) = parents.get(&cur) {
         if selected.contains(&pid) { return true; }
@@ -282,7 +282,7 @@ fn ancestor_selected(parents: &HashMap<NodeId, NodeId>, selected: &HashSet<NodeI
 
 /// `world_transform` against a parent index built once by the caller; transforms are read from
 /// `doc` as it stands.
-fn world_via(doc: &Document, parents: &HashMap<NodeId, NodeId>, id: NodeId) -> Option<Affine> {
+pub(crate) fn world_via(doc: &Document, parents: &HashMap<NodeId, NodeId>, id: NodeId) -> Option<Affine> {
     let mut m = doc.get(id)?.transform.clone();
     let mut cur = id;
     while let Some(&pid) = parents.get(&cur) {
@@ -292,7 +292,7 @@ fn world_via(doc: &Document, parents: &HashMap<NodeId, NodeId>, id: NodeId) -> O
     Some(m)
 }
 
-fn parent_of(doc: &Document, id: NodeId) -> Option<NodeId> {
+pub(crate) fn parent_of(doc: &Document, id: NodeId) -> Option<NodeId> {
     doc.nodes.iter().find(|(_, n)| n.children.contains(&id)).map(|(pid, _)| *pid)
 }
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::path::Path;
-use document::{CmdError, CutLineType, Delta, Editor, MachineProfile, NodeId, PresetAssignment, ShapeKind, commands};
+use document::{CmdError, CutLineType, Delta, Editor, MachineProfile, NodeId, PresetAssignment, ShapeKind, commands, shape_tools};
 use fileio::IoError;
 use geometry::{Affine, BoolOp};
 
@@ -57,6 +57,11 @@ impl AppState {
 
     pub fn add_text(&mut self, parent: NodeId, family: String, size_mm: f64, text: String) -> Result<Delta, CmdError> {
         self.editor.add_text(parent, &family, size_mm, &text)
+    }
+
+    pub fn offset_shapes(&mut self, ids: Vec<NodeId>, distance_mm: f64, union: bool, join: geometry::Join)
+        -> Result<Delta, CmdError> {
+        self.editor.commit_minted(|doc, gen| shape_tools::offset_shapes(doc, gen, &ids, distance_mm, union, join))
     }
 
     pub fn delete(&mut self, ids: Vec<NodeId>) -> Result<Delta, CmdError> {
@@ -282,5 +287,17 @@ mod tests {
             assert_eq!((d.id.as_str(), d.name.as_str(), d.width_mm, d.height_mm),
                        (p.id.as_str(), p.name.as_str(), p.width_mm, p.height_mm), "{}", p.id);
         }
+    }
+
+    /// The shape tools go through `commit_minted`: one undo each, and the nodes they add are new.
+    #[test]
+    fn app_state_offset_adds_one_undoable_contour() {
+        let mut app = AppState::new();
+        let id = app.add_rect(10.0, 10.0);
+        let d = app.offset_shapes(vec![id], 1.0, true, geometry::Join::Round).unwrap();
+        assert_eq!(d.0.len(), 1);
+        assert_eq!(app.editor.doc.get(app.editor.doc.root).unwrap().children.len(), 2);
+        app.undo().unwrap();
+        assert_eq!(app.editor.doc.get(app.editor.doc.root).unwrap().children, vec![id]);
     }
 }

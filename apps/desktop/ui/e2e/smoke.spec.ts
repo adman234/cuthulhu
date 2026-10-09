@@ -117,6 +117,72 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     doc.nodes[doc.root].children.push(groupId);
   }
 
+  // ── Shape tools (offset, weed box, copies, weld, text) ──
+  // The fake does not do geometry: it mirrors each command's refusals and the nodes it adds, with
+  // boxes standing in for outlines, which is all the canvas and the layers panel read back.
+  type Box = { x: number; y: number; w: number; h: number };
+  const shapeCall = (cmd: string, a: Record<string, unknown>) => {
+    const hooks = window as unknown as { __shapeCalls?: { cmd: string; args: unknown }[] };
+    (hooks.__shapeCalls ??= []).push({ cmd, args: JSON.parse(JSON.stringify(a)) });
+  };
+  const parentOf = (id: number) => Object.values(doc.nodes).find((n) => n.children.includes(id))?.id;
+  const localBox = (kind: Record<string, Record<string, unknown>>): Box => {
+    if ("Rect" in kind) return { x: 0, y: 0, w: kind.Rect.w as number, h: kind.Rect.h as number };
+    if ("Ellipse" in kind) return { x: 0, y: 0, w: 2 * (kind.Ellipse.rx as number), h: 2 * (kind.Ellipse.ry as number) };
+    const d = String((kind.Path ?? kind.Text)?.d ?? "");
+    const nums = (d.match(/-?[\d.]+(e-?\d+)?/g) ?? []).map(Number);
+    const xs = nums.filter((_, i) => i % 2 === 0);
+    const ys = nums.filter((_, i) => i % 2 === 1);
+    if (xs.length === 0) return { x: 0, y: 0, w: 0, h: 0 };
+    return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+  };
+  const worldOfNode = (id: number): number[] => {
+    let m = doc.nodes[id].transform;
+    for (let p = parentOf(id); p !== undefined; p = parentOf(p)) {
+      const [a1, b1, c1, d1, e1, f1] = m;
+      const [a2, b2, c2, d2, e2, f2] = doc.nodes[p].transform;
+      m = [a2 * a1 + c2 * b1, b2 * a1 + d2 * b1, a2 * c1 + c2 * d1, b2 * c1 + d2 * d1, a2 * e1 + c2 * f1 + e2, b2 * e1 + d2 * f1 + f2];
+    }
+    return m;
+  };
+  const worldBox = (id: number): Box | null => {
+    const n = doc.nodes[id];
+    if (typeof n.kind === "object" && n.kind !== null && "Shape" in (n.kind as object)) {
+      const b = localBox((n.kind as { Shape: Record<string, Record<string, unknown>> }).Shape);
+      const [a, bb, c, d, e, f] = worldOfNode(id);
+      const pts = [[b.x, b.y], [b.x + b.w, b.y], [b.x, b.y + b.h], [b.x + b.w, b.y + b.h]].map(([x, y]) => [a * x + c * y + e, bb * x + d * y + f]);
+      const xs = pts.map((p) => p[0]);
+      const ys = pts.map((p) => p[1]);
+      return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+    }
+    const boxes = n.children.map(worldBox).filter((b): b is Box => b !== null);
+    if (boxes.length === 0) return null;
+    const x = Math.min(...boxes.map((b) => b.x));
+    const y = Math.min(...boxes.map((b) => b.y));
+    return { x, y, w: Math.max(...boxes.map((b) => b.x + b.w)) - x, h: Math.max(...boxes.map((b) => b.y + b.h)) - y };
+  };
+  /** Mirrors shape_tools::selection_units: each id once, every one present, none under another. */
+  const unitsOf = (ids: number[]): number[] => {
+    if (ids.length === 0) throw new Error("the selection has nothing this command can act on");
+    if (ids.some((id) => !doc.nodes[id])) throw new Error("the node or machine this command names is not there");
+    const under = (id: number) => { for (let p = parentOf(id); p !== undefined; p = parentOf(p)) if (ids.includes(p)) return true; return false; };
+    return [...new Set(ids)].filter((id) => !under(id));
+  };
+  const unionBox = (ids: number[]): Box => {
+    const boxes = ids.map(worldBox).filter((b): b is Box => b !== null);
+    const x = Math.min(...boxes.map((b) => b.x));
+    const y = Math.min(...boxes.map((b) => b.y));
+    return { x, y, w: Math.max(...boxes.map((b) => b.x + b.w)) - x, h: Math.max(...boxes.map((b) => b.y + b.h)) - y };
+  };
+  const boxPath = (b: Box) => `M${b.x},${b.y} L${b.x + b.w},${b.y} L${b.x + b.w},${b.y + b.h} L${b.x},${b.y + b.h} Z`;
+  const addNode = (parent: number, kind: unknown): number => {
+    const id = nextId++;
+    doc.nodes[id] = { id, kind, transform: [1, 0, 0, 1, 0, 0], style: DEFAULT_STYLE, children: [], cut_line_type: "Cut", material_preset: { state: "inherit" } };
+    doc.nodes[parent].children.push(id);
+    return id;
+  };
+  const addedDelta = (ids: number[]) => ids.map((id) => ({ Add: { parent: parentOf(id), node: doc.nodes[id], index: 0 } }));
+
   const unimplemented = (cmd: string): never => {
     throw new Error(`${cmd}: mocked command the e2e fake does not perform; implement it here to test it`);
   };
@@ -215,6 +281,20 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       return answer(() => applyTransforms(moves));
       })();
       return answered.finally(() => { inFlightCommits -= 1; });
+    },
+    // Mirrors shape_tools::offset_shapes' refusals; the contour is the box grown by the distance.
+    offset_shapes: (a) => {
+      shapeCall("offset_shapes", a);
+      const d = a.distanceMm as number;
+      if (!Number.isFinite(d) || d === 0 || Math.abs(d) > 100) throw new Error("an offset distance must be a number of mm other than zero, at most 100 either way");
+      const units = unitsOf(a.ids as number[]);
+      const groups = a.union ? [units] : units.map((u) => [u]);
+      const added = groups.map((g) => {
+        const b = unionBox(g);
+        if (b.w + 2 * d <= 0 || b.h + 2 * d <= 0) throw new Error("the inset is deeper than the shape is wide, so nothing is left of it");
+        return addNode(parentOf(g[0])!, { Shape: { Path: { d: boxPath({ x: b.x - d, y: b.y - d, w: b.w + 2 * d, h: b.h + 2 * d }) } } });
+      });
+      return addedDelta(added);
     },
     delete: (a) => {
       for (const id of a.ids as number[]) {
@@ -4502,6 +4582,44 @@ test("a second Open or Reload while one is still loading is refused, and edits s
   // Once the first load's snapshot renders, editing works.
   await page.getByTestId("layer-row").first().click();
   await expect(page.getByRole("button", { name: "Align horizontal centres" })).toBeEnabled();
+});
+
+// ── Shape tools ───────────────────────────────────────────────────────────────────────────────
+
+const shapeCalls = (page: Page) =>
+  page.evaluate(() => (window as unknown as { __shapeCalls?: { cmd: string; args: Record<string, unknown> }[] }).__shapeCalls ?? []);
+
+test("Offset adds a contour around the selection and selects it", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Offset…" })).toBeDisabled();
+  await page.getByTestId("layer-row").first().click();
+  await page.getByRole("button", { name: "Offset…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Offset" });
+  await dialog.getByLabel("Distance (negative insets)").fill("3");
+  await dialog.getByLabel("Corners").selectOption("Miter");
+  await dialog.getByRole("button", { name: "Create offset" }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByTestId("layer-row")).toHaveCount(3);
+  await expect(page.getByTestId("layer-row").nth(2)).toHaveAttribute("data-selected", "true");
+  const [call] = await shapeCalls(page);
+  expect(call).toEqual({ cmd: "offset_shapes", args: { ids: [2], distanceMm: 3, union: true, join: "Miter" } });
+});
+
+test("an Offset the backend refuses keeps the dialog open and says why", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByTestId("layer-row").first().click();
+  await page.getByRole("button", { name: "Offset…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Offset" });
+  await dialog.getByLabel("Distance (negative insets)").fill("");
+  await expect(dialog.getByRole("alert")).toHaveText("Distance must be a number");
+  await expect(dialog.getByRole("button", { name: "Create offset" })).toBeDisabled();
+  await dialog.getByLabel("Distance (negative insets)").fill("-20");
+  await dialog.getByRole("button", { name: "Create offset" }).click();
+  await expect(page.getByText("the inset is deeper than the shape is wide")).toBeVisible();
+  await expect(dialog).toBeVisible();
+  await expect(page.getByTestId("layer-row")).toHaveCount(2);
 });
 
 // ── Simple (LightBurn-style) shell ─────────────────────────────────────────────────────────────

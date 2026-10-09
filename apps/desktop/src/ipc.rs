@@ -55,6 +55,12 @@ pub fn add_text(state: tauri::State<AppStateHandle>, parent: NodeId, family: Str
 }
 
 #[tauri::command]
+pub fn offset_shapes(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>, distance_mm: f64, union: bool, join: geometry::Join)
+    -> Result<Delta, String> {
+    state.lock().unwrap().offset_shapes(ids, distance_mm, union, join).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn delete(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>) -> Result<Delta, String> {
     state.lock().unwrap().delete(ids).map_err(|e| e.to_string())
 }

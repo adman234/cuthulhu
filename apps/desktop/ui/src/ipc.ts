@@ -35,6 +35,11 @@ export async function addText(args: Args) {
   return invoke("add_text", args);
 }
 
+/** A new contour `distanceMm` around the selection (negative insets), one undo. */
+export async function offsetShapes(args: { ids: number[]; distanceMm: number; union: boolean; join: "Round" | "Miter" | "Bevel" }) {
+  return invoke("offset_shapes", args);
+}
+
 export async function deleteNodes(args: Args) {
   return invoke("delete", args);
 }
