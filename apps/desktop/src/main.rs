@@ -53,6 +53,7 @@ fn main() {
             ipc::boolean_op,
             ipc::add_text,
             ipc::offset_shapes,
+            ipc::weed_box,
             ipc::delete,
             ipc::reorder,
             ipc::set_cut_line_type,

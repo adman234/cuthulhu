@@ -60,6 +60,13 @@ pub fn offset_shapes(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>, dist
     state.lock().unwrap().offset_shapes(ids, distance_mm, union, join).map_err(|e| e.to_string())
 }
 
+/// `line_spacing_mm` absent (null) is a box with no weed lines.
+#[tauri::command]
+pub fn weed_box(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>, margin_mm: f64, line_spacing_mm: Option<f64>)
+    -> Result<Delta, String> {
+    state.lock().unwrap().weed_box(ids, margin_mm, line_spacing_mm).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn delete(state: tauri::State<AppStateHandle>, ids: Vec<NodeId>) -> Result<Delta, String> {
     state.lock().unwrap().delete(ids).map_err(|e| e.to_string())

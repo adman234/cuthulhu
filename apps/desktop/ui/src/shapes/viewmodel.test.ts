@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { describe, expect, it } from "vitest";
-import { OFFSET_FORM } from "./viewmodel";
+import { OFFSET_FORM, WEED_FORM } from "./viewmodel";
 
 describe("OFFSET_FORM", () => {
   it("starts at a 2 mm round outset around everything", () => {
@@ -24,5 +24,21 @@ describe("OFFSET_FORM", () => {
   it("falls back to round corners for a join it does not know", () => {
     const r = OFFSET_FORM.parse({ ...OFFSET_FORM.defaults, join: "Spiky" });
     expect(r.ok && r.value.join).toBe("Round");
+  });
+});
+
+describe("WEED_FORM", () => {
+  it("starts at a 3 mm margin with weed lines", () => {
+    expect(WEED_FORM.parse(WEED_FORM.defaults)).toEqual({ ok: true, value: { marginMm: 3, lineSpacingMm: 25 } });
+  });
+
+  it("sends no spacing when lines are off, and does not read a blank one", () => {
+    expect(WEED_FORM.parse({ margin: "0", lines: false, spacing: "" })).toEqual({ ok: true, value: { marginMm: 0, lineSpacingMm: null } });
+  });
+
+  it("refuses a negative margin and a spacing that is not a positive number", () => {
+    expect(WEED_FORM.parse({ ...WEED_FORM.defaults, margin: "-1" })).toEqual({ ok: false, error: "Margin must not be negative" });
+    expect(WEED_FORM.parse({ ...WEED_FORM.defaults, spacing: "0" })).toEqual({ ok: false, error: "Line spacing must be more than zero" });
+    expect(WEED_FORM.parse({ ...WEED_FORM.defaults, spacing: "x" })).toEqual({ ok: false, error: "Line spacing must be a number" });
   });
 });

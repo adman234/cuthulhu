@@ -8,7 +8,7 @@
 //! `Editor::commit_minted` hands over a copy and keeps it only when the command succeeds.
 use std::collections::{HashMap, HashSet};
 
-use geometry::{offset, Affine, Join, Path};
+use geometry::{offset, rect_path, segments_outside, Affine, GeomError, Join, Path, Point, Rect, Seg};
 
 use crate::commands::{ancestor_selected, parent_index, shape_outline, world_via, CmdError};
 use crate::delta::{Delta, Document, NodeOp};
@@ -107,6 +107,127 @@ pub fn offset_shapes(doc: &Document, gen: &mut IdGen, ids: &[NodeId], distance_m
     }
     if ops.is_empty() { return Err(CmdError::EmptySelection); }
     Ok(Delta(ops))
+}
+
+/// How far a weed line stops short of a design, in mm. A blade that runs into a letter's edge
+/// lifts it with the waste; one millimetre of untouched vinyl around it is enough to keep the weed
+/// line's cut from reaching the design without leaving a strip too wide to peel.
+pub const WEED_LINE_CLEARANCE_MM: f64 = 1.0;
+/// The closest weed lines may be, in mm. Closer is a mat of slivers that tears as it is peeled,
+/// and an accidental 0.01 would ask for tens of thousands of lines.
+pub const MIN_WEED_LINE_SPACING_MM: f64 = 2.0;
+/// The widest margin a weed box takes, in mm, for the reason `MAX_OFFSET_MM` gives.
+pub const MAX_WEED_MARGIN_MM: f64 = 100.0;
+/// A weed line piece shorter than this, in mm, is left out: a nick between two letters is
+/// nothing to peel by and only another blade-down.
+const MIN_WEED_SEGMENT_MM: f64 = 1.0;
+
+fn union_bounds(paths: &[Path]) -> Option<Rect> {
+    let mut acc: Option<(f64, f64, f64, f64)> = None;
+    for p in paths {
+        if p.segs.is_empty() { continue; }
+        let b = p.bounds();
+        acc = Some(match acc {
+            None => (b.x, b.y, b.x + b.w, b.y + b.h),
+            Some((x0, y0, x1, y1)) => (x0.min(b.x), y0.min(b.y), x1.max(b.x + b.w), y1.max(b.y + b.h)),
+        });
+    }
+    acc.map(|(x0, y0, x1, y1)| Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+}
+
+/// Positions of `n` evenly spaced lines strictly inside `[start, start + len]`, no further apart
+/// than `spacing`: the box is divided rather than ruled from one edge, so the last strip is not a
+/// sliver.
+fn divisions(start: f64, len: f64, spacing: f64) -> Vec<f64> {
+    let n = (len / spacing).ceil() as usize;
+    (1..n).map(|i| start + len * i as f64 / n as f64).collect()
+}
+
+/// A rectangle around the selection, `margin_mm` clear of it, and — given a `line_spacing_mm` —
+/// horizontal and vertical weed lines across that box which stop short of every selected shape, so
+/// the waste around a design peels off in strips instead of one sheet that drags the letters with it.
+///
+/// The lines are clipped against the shapes' true outlines grown by `WEED_LINE_CLEARANCE_MM`, not
+/// their boxes, so a line runs into the bowl of a C and between two letters. A shape with no area
+/// (an open stroke) has no outline to grow, and is kept clear by its box grown the same way instead.
+///
+/// The box and the lines are new cut shapes in one new Group beside the first selected piece, one
+/// Delta, the selection untouched.
+pub fn weed_box(doc: &Document, gen: &mut IdGen, ids: &[NodeId], margin_mm: f64, line_spacing_mm: Option<f64>)
+    -> Result<Delta, CmdError> {
+    if !margin_mm.is_finite() || !(0.0..=MAX_WEED_MARGIN_MM).contains(&margin_mm) {
+        return Err(CmdError::Geometry(format!("a weed box margin must be between 0 and {MAX_WEED_MARGIN_MM} mm")));
+    }
+    if let Some(s) = line_spacing_mm {
+        if !s.is_finite() || s < MIN_WEED_LINE_SPACING_MM {
+            return Err(CmdError::Geometry(format!(
+                "weed lines must be at least {MIN_WEED_LINE_SPACING_MM} mm apart")));
+        }
+    }
+    let parents = parent_index(doc);
+    let units = selection_units(doc, &parents, ids)?;
+    let mut paths = vec![];
+    for &u in &units { paths.extend(world_outlines(doc, &parents, u)?); }
+    let bounds = union_bounds(&paths).ok_or(CmdError::EmptySelection)?;
+    let bx = Rect { x: bounds.x - margin_mm, y: bounds.y - margin_mm,
+                    w: bounds.w + 2.0 * margin_mm, h: bounds.h + 2.0 * margin_mm };
+    let (parent, to_parent) = landing(doc, &parents, units[0])?;
+
+    let group = Node::container(gen.next(), NodeKind::Group);
+    let group_id = group.id;
+    let mut ops = vec![NodeOp::Add { parent, node: group, index: usize::MAX }];
+    let mut border = Node::shape(gen.next(), ShapeKind::Rect { w: bx.w, h: bx.h });
+    border.transform = Affine::translate(bx.x, bx.y).then(&to_parent);
+    ops.push(NodeOp::Add { parent: group_id, node: border, index: usize::MAX });
+
+    if let Some(spacing) = line_spacing_mm {
+        let keep_out = keep_out_region(&paths)?;
+        let mut segs = vec![];
+        let mut rule = |a: Point, b: Point| {
+            for (s, e) in segments_outside(&keep_out, a, b) {
+                if ((e.x - s.x).powi(2) + (e.y - s.y).powi(2)).sqrt() >= MIN_WEED_SEGMENT_MM {
+                    segs.push(Seg::Move(s));
+                    segs.push(Seg::Line(e));
+                }
+            }
+        };
+        for y in divisions(bx.y, bx.h, spacing) { rule(Point { x: bx.x, y }, Point { x: bx.x + bx.w, y }); }
+        for x in divisions(bx.x, bx.w, spacing) { rule(Point { x, y: bx.y }, Point { x, y: bx.y + bx.h }); }
+        if !segs.is_empty() {
+            ops.push(NodeOp::Add { parent: group_id, node: path_node(gen, &Path { segs }, &to_parent), index: usize::MAX });
+        }
+    }
+    Ok(Delta(ops))
+}
+
+/// What weed lines stay out of: every selected shape grown by the clearance, with round corners
+/// so a line clears a letter's corner by the same distance as its side.
+fn keep_out_region(paths: &[Path]) -> Result<Path, CmdError> {
+    let (solid, open): (Vec<&Path>, Vec<&Path>) = paths.iter().partition(|p| has_area(p));
+    let mut region: Vec<Path> = open.iter().map(|p| {
+        let b = p.bounds();
+        let c = WEED_LINE_CLEARANCE_MM;
+        rect_path(b.x - c, b.y - c, b.w + 2.0 * c, b.h + 2.0 * c)
+    }).collect();
+    if !solid.is_empty() {
+        let solid: Vec<Path> = solid.into_iter().cloned().collect();
+        match offset(&solid, WEED_LINE_CLEARANCE_MM, Join::Round) {
+            Ok(p) => region.push(p),
+            Err(GeomError::Degenerate) => {}
+            Err(e) => return Err(CmdError::Geometry(e.to_string())),
+        }
+    }
+    Ok(Path { segs: region.into_iter().flat_map(|p| p.segs).collect() })
+}
+
+/// Whether a path encloses anything: a closed run of at least three distinct points.
+fn has_area(p: &Path) -> bool {
+    p.flatten(0.1).iter().any(|poly| {
+        // Closed explicitly: an open polyline's own edges sum to a nonzero "area" otherwise.
+        let a: f64 = poly.iter().zip(poly.iter().cycle().skip(1))
+            .map(|(p, q)| p.x * q.y - q.x * p.y).sum();
+        poly.len() >= 3 && a.abs() > 1e-9
+    })
 }
 
 #[cfg(test)]
@@ -214,5 +335,107 @@ pub(crate) mod tests {
         let d = ed.commit_minted(|doc, gen| offset_shapes(doc, gen, &[g], 1.0, false, Join::Round)).unwrap();
         let b = outline_of(added(&d)[0]).bounds();
         assert!((b.w - 42.0).abs() < 1e-3, "{b:?}");
+    }
+
+    fn weed(ed: &mut Editor, ids: &[NodeId], margin: f64, spacing: Option<f64>) -> Result<Delta, CmdError> {
+        ed.commit_minted(|doc, gen| weed_box(doc, gen, ids, margin, spacing))
+    }
+
+    /// Every weed line piece, as (start, end) in world space.
+    fn weed_lines(ed: &Editor, d: &Delta) -> Vec<(Point, Point)> {
+        let lines = added(d).into_iter().find(|n| matches!(n.kind, NodeKind::Shape(ShapeKind::Path { .. }))).unwrap();
+        let world = crate::commands::world_transform(&ed.doc, lines.id).unwrap();
+        let p = shape_outline(lines).unwrap().unwrap().transformed(&world);
+        p.flatten(0.1).into_iter().map(|poly| (poly[0], poly[1])).collect()
+    }
+
+    #[test]
+    fn a_weed_box_surrounds_the_selection_by_the_margin_in_one_group() {
+        let mut ed = Editor::new();
+        let root = ed.doc.root;
+        let a = rect_at(&mut ed, root, 10.0, 10.0, 10.0, 10.0);
+        let b = rect_at(&mut ed, root, 30.0, 15.0, 10.0, 10.0);
+        let d = weed(&mut ed, &[a, b], 3.0, None).unwrap();
+        let new = added(&d);
+        assert_eq!(new.len(), 2, "a group and its border");
+        assert!(matches!(new[0].kind, NodeKind::Group));
+        let border = outline_of(new[1]).bounds();
+        assert_eq!((border.x, border.y, border.w, border.h), (7.0, 7.0, 36.0, 21.0));
+        assert_eq!(ed.doc.get(new[0].id).unwrap().children, vec![new[1].id]);
+        ed.undo().unwrap();
+        assert_eq!(ed.doc.get(root).unwrap().children, vec![a, b], "one undo removes it all");
+    }
+
+    #[test]
+    fn weed_lines_cross_the_box_and_never_a_selected_shape() {
+        let mut ed = Editor::new();
+        let root = ed.doc.root;
+        let a = rect_at(&mut ed, root, 10.0, 10.0, 10.0, 10.0);
+        let b = rect_at(&mut ed, root, 30.0, 15.0, 10.0, 10.0);
+        let d = weed(&mut ed, &[a, b], 3.0, Some(4.0)).unwrap();
+        let lines = weed_lines(&ed, &d);
+        assert!(!lines.is_empty());
+        let shapes = [(10.0, 10.0, 20.0, 20.0), (30.0, 15.0, 40.0, 25.0)];
+        for (s, e) in &lines {
+            assert!(s.x == e.x || s.y == e.y, "axis-aligned: {s:?} {e:?}");
+            // Sampled along the piece: nothing within the clearance of either rect.
+            for i in 0..=50 {
+                let t = i as f64 / 50.0;
+                let (x, y) = (s.x + t * (e.x - s.x), s.y + t * (e.y - s.y));
+                for (x0, y0, x1, y1) in shapes {
+                    let dx = (x0 - x).max(x - x1).max(0.0);
+                    let dy = (y0 - y).max(y - y1).max(0.0);
+                    assert!((dx * dx + dy * dy).sqrt() >= WEED_LINE_CLEARANCE_MM - 1e-3,
+                        "({x},{y}) is within the clearance of {x0},{y0}");
+                }
+            }
+            // And inside the box.
+            for p in [s, e] { assert!(p.x >= 7.0 - 1e-9 && p.x <= 43.0 + 1e-9 && p.y >= 7.0 - 1e-9 && p.y <= 28.0 + 1e-9); }
+        }
+        // A horizontal line at y = 12.25 runs from the box edge to just short of the first rect.
+        assert!(lines.iter().any(|(s, e)| s.y == e.y && (s.x - 7.0).abs() < 1e-9 && (e.x - 9.0).abs() < 1e-2), "{lines:?}");
+    }
+
+    /// Clipped against the outline, not the box: a line through a ring's empty middle still cuts
+    /// the waste there.
+    #[test]
+    fn weed_lines_follow_the_outline_rather_than_its_box() {
+        let mut ed = Editor::new();
+        let root = ed.doc.root;
+        let id = ed.doc.ids.next();
+        let ring = Node::shape(id, ShapeKind::Path { d: "M0,0 L40,0 L40,40 L0,40 Z M10,10 L10,30 L30,30 L30,10 Z".into() });
+        ed.commit(Delta(vec![NodeOp::Add { parent: root, node: ring, index: usize::MAX }]));
+        let d = weed(&mut ed, &[id], 2.0, Some(25.0)).unwrap();
+        let lines = weed_lines(&ed, &d);
+        // The one horizontal line, at y = 20: the two outside runs plus the run inside the hole.
+        let at20: Vec<_> = lines.iter().filter(|(s, e)| s.y == e.y && (s.y - 20.0).abs() < 1e-9).collect();
+        assert_eq!(at20.len(), 3, "{lines:?}");
+        assert!(at20.iter().any(|(s, e)| (s.x - 11.0).abs() < 1e-2 && (e.x - 29.0).abs() < 1e-2), "{at20:?}");
+    }
+
+    #[test]
+    fn a_weed_box_refuses_out_of_range_options_in_words() {
+        let mut ed = Editor::new();
+        let root = ed.doc.root;
+        let a = rect_at(&mut ed, root, 0.0, 0.0, 10.0, 10.0);
+        assert!(weed(&mut ed, &[a], -1.0, None).unwrap_err().to_string().starts_with("a weed box margin"));
+        assert!(weed(&mut ed, &[a], 3.0, Some(0.5)).unwrap_err().to_string().starts_with("weed lines must be"));
+        assert_eq!(weed(&mut ed, &[], 3.0, None).unwrap_err(), CmdError::EmptySelection);
+        let g = ed.doc.ids.next();
+        ed.commit(Delta(vec![NodeOp::Add { parent: root, node: Node::container(g, NodeKind::Group), index: usize::MAX }]));
+        assert_eq!(weed(&mut ed, &[g], 3.0, None).unwrap_err(), CmdError::EmptySelection, "an empty group has nothing to box");
+    }
+
+    #[test]
+    fn an_open_stroke_is_kept_clear_by_its_box() {
+        let mut ed = Editor::new();
+        let root = ed.doc.root;
+        let id = ed.doc.ids.next();
+        let line = Node::shape(id, ShapeKind::Path { d: "M0,10 L40,10".into() });
+        ed.commit(Delta(vec![NodeOp::Add { parent: root, node: line, index: usize::MAX }]));
+        let d = weed(&mut ed, &[id], 3.0, Some(5.0)).unwrap();
+        for (s, e) in weed_lines(&ed, &d) {
+            if s.x == e.x { assert!(e.y <= 9.0 + 1e-9 || s.y >= 11.0 - 1e-9, "{s:?} {e:?} crosses the stroke"); }
+        }
     }
 }

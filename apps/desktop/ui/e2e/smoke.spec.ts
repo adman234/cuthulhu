@@ -296,6 +296,24 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       });
       return addedDelta(added);
     },
+    // Mirrors shape_tools::weed_box: a Group holding the border and, given a spacing, one Path of
+    // lines. The fake's lines are not clipped; the Rust tests hold that.
+    weed_box: (a) => {
+      shapeCall("weed_box", a);
+      const margin = a.marginMm as number;
+      const spacing = a.lineSpacingMm as number | null;
+      if (!Number.isFinite(margin) || margin < 0 || margin > 100) throw new Error("a weed box margin must be between 0 and 100 mm");
+      if (spacing !== null && (!Number.isFinite(spacing) || spacing < 2)) throw new Error("weed lines must be at least 2 mm apart");
+      const units = unitsOf(a.ids as number[]);
+      const b = unionBox(units);
+      const box = { x: b.x - margin, y: b.y - margin, w: b.w + 2 * margin, h: b.h + 2 * margin };
+      const group = addNode(parentOf(units[0])!, "Group");
+      const border = addNode(group, { Shape: { Rect: { w: box.w, h: box.h } } });
+      doc.nodes[border].transform = [1, 0, 0, 1, box.x, box.y];
+      const added = [group, border];
+      if (spacing !== null) added.push(addNode(group, { Shape: { Path: { d: `M${box.x},${box.y + box.h / 2} L${box.x + box.w},${box.y + box.h / 2}` } } }));
+      return addedDelta(added);
+    },
     delete: (a) => {
       for (const id of a.ids as number[]) {
         delete doc.nodes[id];
@@ -4622,12 +4640,48 @@ test("an Offset the backend refuses keeps the dialog open and says why", async (
   await expect(page.getByTestId("layer-row")).toHaveCount(2);
 });
 
+test("Weed box adds a border and weed lines in one Group, and selects the Group", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await selectRows(page, [0, 1]);
+  await page.getByRole("button", { name: "Weed box…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Weed box" });
+  await expect(dialog.getByText("2 pieces selected")).toBeVisible();
+  await dialog.getByLabel("Margin").fill("5");
+  await dialog.getByLabel("Line spacing").fill("10");
+  await dialog.getByRole("button", { name: "Add weed box" }).click();
+  await expect(dialog).not.toBeVisible();
+  // Red, green, then the Group with its border and its lines.
+  await expect(page.getByTestId("layer-row")).toHaveCount(5);
+  await expect(page.getByTestId("layer-row").nth(2)).toHaveText("Group");
+  await expect(page.getByTestId("layer-row").nth(2)).toHaveAttribute("data-selected", "true");
+  await expect(page.getByTestId("layer-row").nth(3)).toHaveAttribute("data-selected", "false");
+  const [call] = await shapeCalls(page);
+  expect(call).toEqual({ cmd: "weed_box", args: { ids: [2, 3], marginMm: 5, lineSpacingMm: 10 } });
+});
+
+test("Weed box without lines sends no spacing, in the simple layout too", async ({ page }) => {
+  await useSimpleLayout(page);
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Objects" }).click();
+  await page.getByTestId("layer-row").first().click();
+  await page.getByRole("button", { name: "Weed box…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Weed box" });
+  await dialog.getByLabel("Weed lines across the box").uncheck();
+  await dialog.getByRole("button", { name: "Add weed box" }).click();
+  await expect(page.getByTestId("layer-row")).toHaveCount(4);
+  const [call] = await shapeCalls(page);
+  expect(call.args).toEqual({ ids: [2], marginMm: 3, lineSpacingMm: null });
+});
+
 // ── Simple (LightBurn-style) shell ─────────────────────────────────────────────────────────────
 
 const useSimpleLayout = (page: Page) =>
   page.addInitScript(() => {
     try { localStorage.setItem("cuthulhu.layout", "simple"); } catch { /* opaque origin */ }
   });
+
 
 test("the simple shell cuts a two-colour design from the docked Cutter panel", async ({ page }) => {
   await useSimpleLayout(page);

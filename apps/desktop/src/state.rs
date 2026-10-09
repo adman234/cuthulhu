@@ -64,6 +64,11 @@ impl AppState {
         self.editor.commit_minted(|doc, gen| shape_tools::offset_shapes(doc, gen, &ids, distance_mm, union, join))
     }
 
+    pub fn weed_box(&mut self, ids: Vec<NodeId>, margin_mm: f64, line_spacing_mm: Option<f64>)
+        -> Result<Delta, CmdError> {
+        self.editor.commit_minted(|doc, gen| shape_tools::weed_box(doc, gen, &ids, margin_mm, line_spacing_mm))
+    }
+
     pub fn delete(&mut self, ids: Vec<NodeId>) -> Result<Delta, CmdError> {
         let d = commands::delete_nodes(&self.editor.doc, &ids)?;
         Ok(self.editor.commit(d))

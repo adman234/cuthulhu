@@ -11,3 +11,5 @@ mod text;
 pub use text::*;
 mod offset;
 pub use offset::*;
+mod clip;
+pub use clip::*;

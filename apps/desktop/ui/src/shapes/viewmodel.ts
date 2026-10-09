@@ -55,3 +55,27 @@ export const OFFSET_FORM: ToolForm<OffsetRequest> = {
     return { ok: true, value: { distanceMm, union: v.union === true, join } };
   },
 };
+
+export type WeedRequest = { marginMm: number; lineSpacingMm: number | null };
+
+export const WEED_FORM: ToolForm<WeedRequest> = {
+  title: "Weed box",
+  apply: "Add weed box",
+  fields: [
+    { key: "margin", label: "Margin", kind: "number", unit: "mm", step: 0.5 },
+    { key: "lines", label: "Weed lines across the box", kind: "checkbox" },
+    { key: "spacing", label: "Line spacing", kind: "number", unit: "mm", step: 1 },
+  ],
+  defaults: { margin: "3", lines: true, spacing: "25" },
+  parse: (v) => {
+    const marginMm = num(v, "margin", "Margin");
+    if (typeof marginMm === "string") return fail(marginMm);
+    if (marginMm < 0) return fail("Margin must not be negative");
+    // A spacing nobody is going to use is not read, so a blank one does not block a plain box.
+    if (v.lines !== true) return { ok: true, value: { marginMm, lineSpacingMm: null } };
+    const lineSpacingMm = num(v, "spacing", "Line spacing");
+    if (typeof lineSpacingMm === "string") return fail(lineSpacingMm);
+    if (lineSpacingMm <= 0) return fail("Line spacing must be more than zero");
+    return { ok: true, value: { marginMm, lineSpacingMm } };
+  },
+};

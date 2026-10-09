@@ -51,5 +51,6 @@
   "trace_controls": [],
   "trace_image": ["controls", "path"],
   "travel_for_order": ["docRevision", "grouping", "passes"],
-  "undo": []
+  "undo": [],
+  "weed_box": ["ids", "lineSpacingMm", "marginMm"]
 }

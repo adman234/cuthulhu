@@ -40,6 +40,11 @@ export async function offsetShapes(args: { ids: number[]; distanceMm: number; un
   return invoke("offset_shapes", args);
 }
 
+/** A box `marginMm` around the selection, with weed lines `lineSpacingMm` apart (null: none). */
+export async function weedBox(args: { ids: number[]; marginMm: number; lineSpacingMm: number | null }) {
+  return invoke("weed_box", args);
+}
+
 export async function deleteNodes(args: Args) {
   return invoke("delete", args);
 }
