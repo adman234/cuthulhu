@@ -148,3 +148,22 @@ real network can confirm the swap end to end.
       border cuts where it was.
 - [ ] One ⌘Z (Ctrl+Z) after an align puts every moved piece back at once.
 - [ ] The eight icons read as what they do at the panel's size, in the dark theme (light is deferred).
+
+## Cameo 1 (`0b4d:1121`) — not yet verified
+
+Source-derived from inkscape-silhouette (`docs/protocol/silhouette-cameo1.md`). Each box needs
+the device and the date it was verified on. The upstream PR for Cameo 1 support waits on this section.
+
+### Hardware: Cameo 1
+- [ ] Linux: with `docs/linux/99-silhouette-cameo1.rules` installed, `cuthulhu list-devices` shows a
+      `cameo1` device for a normal user, and connecting does not fail with "busy" while `usblp` is loaded.
+- [ ] `cuthulhu cut --device cameo1 --dry-run square.svg` prints the stream that
+      `cameo1_encodes_square_to_documented_gpgl_stream` pins.
+- [ ] A 20 mm square cuts at 9 mm from the media's left edge and 1 mm from the top, and measures 20 mm.
+- [ ] Speed and force sent after `FN0`/`TB50,0` take effect (cut a test at speed 1 and at speed 10,
+      and at force 5 and force 30. The difference should be visible).
+- [ ] Status polling: `ESC ENQ` answers `0`/`1`/`2` between passes, and a 2-colour job completes.
+- [ ] End of job: the media feeds below the furthest cut, and a second job starts below the first
+      rather than on top of it.
+- [ ] Cancel mid-cut, and unplug mid-cut, end as they do on the Cameo 5 (see SP4).
+- [ ] Each builtin `cameo1-*` preset cuts its material cleanly with the standard ratchet blade.

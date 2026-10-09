@@ -12,6 +12,7 @@ proprietary software that ships with these machines.
 ## Target machines
 
 - **Silhouette Cameo 5 Alpha** (USB, GPGL) — protocol ported from `inkscape-silhouette`.
+- **Silhouette Cameo (Cameo 1)** (USB, GPGL, `0b4d:1121`) — see `docs/protocol/silhouette-cameo1.md`; awaiting hardware verification.
 - **GCC Puma IV** (HPGL over serial/USB) — from public GCC and HP-GL documentation.
 - Other non-Cricut HPGL/DMPL cutters to follow. Cricut is out of scope (closed platform).
 

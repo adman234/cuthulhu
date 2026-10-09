@@ -25,6 +25,14 @@ pub fn builtin_profiles() -> Vec<MachineProfile> {
             width_mm: 600.0,
             height_mm: 5000.0,
         },
+        // The reachable area: 304 mm media less the 9 mm the carriage cannot reach. Must
+        // match `driver_silhouette::SilhouetteDriver::cameo1()`'s profile.
+        MachineProfile {
+            id: "cameo1".into(),
+            name: "Silhouette Cameo".into(),
+            width_mm: 295.0,
+            height_mm: 3000.0,
+        },
     ]
 }
 
@@ -47,7 +55,7 @@ mod tests {
     #[test]
     fn builtin_ids_are_canonical() {
         let ids: Vec<String> = builtin_profiles().into_iter().map(|p| p.id).collect();
-        assert_eq!(ids, vec!["cameo5", "puma"]);
+        assert_eq!(ids, vec!["cameo5", "puma", "cameo1"]);
     }
 
     #[test]

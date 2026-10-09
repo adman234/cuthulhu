@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::Model;
 use driver_core::{Transport, TransportError};
 use nusb::transfer::{RequestBuffer, TransferError};
 use std::time::Duration;
 
-const VID: u16 = 0x3844;
-const PIDS: [u16; 2] = [0x0001, 0x0002]; // ponytail: Cameo 5 Alpha and Alpha Plus
+// Shared by every model so far. [src: inkscape-silhouette silhouette/Graphtec.py L753, L863 (GPL-2.0+)]
 const EP_OUT: u8 = 0x01;
 const EP_IN: u8 = 0x82;
 
 pub struct UsbTransport {
     iface: nusb::Interface,
+    model: Model,
     locator: String,
 }
 
@@ -82,11 +83,11 @@ fn locator_for(serial: Option<&str>, bus: u8, addr: u8) -> Locator {
     }
 }
 
-/// Locators for every enumerated Cameo device, in enumeration order.
-pub fn list_locators() -> Vec<String> {
+/// Locators for every enumerated device of `model`, in enumeration order.
+pub fn list_locators(model: Model) -> Vec<String> {
     let Ok(devices) = nusb::list_devices() else { return Vec::new() };
     devices
-        .filter(|d| d.vendor_id() == VID && PIDS.contains(&d.product_id()))
+        .filter(|d| model.matches(d.vendor_id(), d.product_id()))
         .map(|d| locator_for(d.serial_number(), d.bus_number(), d.device_address()).to_string())
         .collect()
 }
@@ -96,10 +97,10 @@ fn parse_locator(locator: &str) -> Option<Locator> {
 }
 
 impl UsbTransport {
-    /// Opens the first enumerated Cameo device. Kept for CLI back-compat; prefer `open_at`.
-    pub fn open() -> Result<UsbTransport, TransportError> {
-        let locator = list_locators().into_iter().next().ok_or(TransportError::NotFound)?;
-        Self::open_at(&locator)
+    /// Opens the first enumerated device of `model`. Kept for CLI back-compat; prefer `open_at`.
+    pub fn open(model: Model) -> Result<UsbTransport, TransportError> {
+        let locator = list_locators(model).into_iter().next().ok_or(TransportError::NotFound)?;
+        Self::open_at(model, &locator)
     }
 
     /// Opens the Cameo device the locator names (from `list_locators`) — by serial number where
@@ -107,26 +108,28 @@ impl UsbTransport {
     ///
     /// Resolving a serial number against a fresh enumeration is the point: the device may be at
     /// a different address than when the locator was taken, and it is still the same machine.
-    pub fn open_at(locator: &str) -> Result<UsbTransport, TransportError> {
+    pub fn open_at(model: Model, locator: &str) -> Result<UsbTransport, TransportError> {
         let wanted = parse_locator(locator).ok_or(TransportError::NotFound)?;
         let di = nusb::list_devices()
             .map_err(|e| TransportError::Io(e.to_string()))?
             .find(|d| {
-                d.vendor_id() == VID
-                    && PIDS.contains(&d.product_id())
+                model.matches(d.vendor_id(), d.product_id())
                     && locator_for(d.serial_number(), d.bus_number(), d.device_address()) == wanted
             })
             .ok_or(TransportError::NotFound)?;
         let dev = di.open().map_err(|e| TransportError::Io(e.to_string()))?;
+        // Detach first: the Cameo 1 enumerates as a USB printer, so on Linux `usblp` already
+        // holds interface 0 and a plain claim fails with "busy". Elsewhere this is a plain claim.
+        // [src: inkscape-silhouette silhouette/Graphtec.py L585-597 (GPL-2.0+)]
         let iface = dev
-            .claim_interface(0)
+            .detach_and_claim_interface(0)
             .map_err(|e| TransportError::Io(e.to_string()))?;
-        Ok(UsbTransport { iface, locator: locator.to_string() })
+        Ok(UsbTransport { iface, model, locator: locator.to_string() })
     }
 
     /// Whether this transport's device is still enumerated by the OS.
     fn still_enumerated(&self) -> bool {
-        list_locators().contains(&self.locator)
+        list_locators(self.model).contains(&self.locator)
     }
 }
 
@@ -176,11 +179,11 @@ mod tests {
         // Only meaningful with no Cameo attached (CI, and dev machines between hardware
         // runs). Skip rather than fail when one is plugged in — the assertion is about the
         // empty-enumeration path, not about the developer's desk.
-        if !list_locators().is_empty() {
+        if !list_locators(Model::Cameo5Alpha).is_empty() {
             eprintln!("skipped: a Cameo is attached");
             return;
         }
-        match UsbTransport::open() {
+        match UsbTransport::open(Model::Cameo5Alpha) {
             Err(TransportError::NotFound) => {}
             Err(e) => panic!("expected NotFound, got: {e:?}"),
             Ok(_) => panic!("device unexpectedly found"),
@@ -216,7 +219,7 @@ mod tests {
     }
     #[test]
     fn open_at_unknown_locator_reports_not_found() {
-        match UsbTransport::open_at("99:99") {
+        match UsbTransport::open_at(Model::Cameo1, "99:99") {
             Err(TransportError::NotFound) => {}
             Err(e) => panic!("expected NotFound, got: {e:?}"),
             Ok(_) => panic!("device unexpectedly found"),
@@ -224,7 +227,7 @@ mod tests {
     }
     #[test]
     fn open_at_malformed_locator_reports_not_found() {
-        match UsbTransport::open_at("not-a-locator") {
+        match UsbTransport::open_at(Model::Cameo1, "not-a-locator") {
             Err(TransportError::NotFound) => {}
             Err(e) => panic!("expected NotFound, got: {e:?}"),
             Ok(_) => panic!("device unexpectedly found"),

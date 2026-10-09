@@ -7,11 +7,12 @@
 //! holds only the trait (it must not depend on concrete drivers).
 use driver_core::{DeviceBackendFactory, DeviceInfo, Driver, Transport, TransportError, TransportKind};
 use driver_hpgl::HpglDriver;
-use driver_silhouette::SilhouetteDriver;
+use driver_silhouette::{Model, SilhouetteDriver};
 
 // The id each driver's own `MachineProfile` spells, bound once here so the
 // table below and the enumerators agree with it.
 const CAMEO5: &str = "cameo5";
+const CAMEO1: &str = "cameo1";
 const PUMA: &str = "puma";
 
 struct Machine {
@@ -26,6 +27,9 @@ struct Machine {
     /// identifies nothing, so it takes the operator's word. Naming a port for a
     /// USB machine would put its dialect on a wire nothing on it can read.
     serial: bool,
+    /// Which Silhouette a USB machine is, so opening a locator matches the same VID/PID that
+    /// enumerated it. `None` for a serial machine.
+    usb: Option<Model>,
 }
 
 /// Every machine this build can drive. One row is the whole of adding a
@@ -34,14 +38,22 @@ struct Machine {
 /// therefore cannot be half-added — drivable but never enumerated, or
 /// enumerated but missing from `cuthulhu list-devices` — which is what an id
 /// list and a `match` and a hand-written scan left possible between them.
-const MACHINES: [Machine; 2] = [
+const MACHINES: [Machine; 3] = [
     Machine {
         id: CAMEO5,
         driver: || Box::new(SilhouetteDriver::new()),
         enumerate: cameo5_devices,
         serial: false,
+        usb: Some(Model::Cameo5Alpha),
     },
-    Machine { id: PUMA, driver: || Box::new(HpglDriver::new()), enumerate: puma_devices, serial: true },
+    Machine {
+        id: CAMEO1,
+        driver: || Box::new(SilhouetteDriver::cameo1()),
+        enumerate: cameo1_devices,
+        serial: false,
+        usb: Some(Model::Cameo1),
+    },
+    Machine { id: PUMA, driver: || Box::new(HpglDriver::new()), enumerate: puma_devices, serial: true, usb: None },
 ];
 
 /// An instance id names one physical machine, and has to keep meaning that machine after a
@@ -70,11 +82,19 @@ fn serial_instance_id(port: &driver_hpgl::PortId) -> String {
 }
 
 fn cameo5_devices() -> Vec<DeviceInfo> {
-    driver_silhouette::list_locators()
+    usb_devices(Model::Cameo5Alpha, CAMEO5)
+}
+
+fn cameo1_devices() -> Vec<DeviceInfo> {
+    usb_devices(Model::Cameo1, CAMEO1)
+}
+
+fn usb_devices(model: Model, machine_id: &str) -> Vec<DeviceInfo> {
+    driver_silhouette::list_locators(model)
         .into_iter()
         .map(|locator| DeviceInfo {
             instance_id: usb_instance_id(&locator),
-            machine_id: CAMEO5.into(),
+            machine_id: machine_id.into(),
             transport: TransportKind::Usb { locator },
             candidate: false, // USB is discriminated by VID/PID — not a guess
             // Enumerated here, so it is on this computer. A Cut Host's cutters get their id
@@ -139,7 +159,13 @@ impl DeviceBackendFactory for HardwareBackendFactory {
 
     fn open_transport(&self, info: &DeviceInfo) -> Result<Box<dyn Transport>, TransportError> {
         match &info.transport {
-            TransportKind::Usb { locator } => Ok(Box::new(driver_silhouette::UsbTransport::open_at(locator)?)),
+            TransportKind::Usb { locator } => {
+                // The machine id, not the locator, says which VID/PID to look under: a locator is
+                // a serial number or a bus address, and neither says what model answered to it.
+                let model = MACHINES.iter().find(|m| m.id == info.machine_id).and_then(|m| m.usb)
+                    .ok_or(TransportError::NotFound)?;
+                Ok(Box::new(driver_silhouette::UsbTransport::open_at(model, locator)?))
+            }
             TransportKind::Serial { path, baud } => Ok(Box::new(driver_hpgl::SerialTransport::open(path, *baud)?)),
         }
     }
@@ -276,5 +302,37 @@ mod tests {
         ];
         let unique: std::collections::HashSet<&String> = ids.iter().collect();
         assert_eq!(unique.len(), ids.len(), "every id form must be distinguishable: {ids:?}");
+    }
+
+    /// A USB row must name the model it enumerates, and a serial row must not, or
+    /// `open_transport` would look for the device under the wrong VID/PID — or none.
+    #[test]
+    fn every_usb_machine_names_its_model_and_no_serial_one_does() {
+        for m in MACHINES.iter() {
+            assert_eq!(m.usb.is_some(), !m.serial, "{}", m.id);
+        }
+        let model = |id| MACHINES.iter().find(|m| m.id == id).and_then(|m| m.usb);
+        assert_eq!(model(CAMEO1), Some(Model::Cameo1));
+        assert_eq!(model(CAMEO5), Some(Model::Cameo5Alpha));
+    }
+
+    #[test]
+    fn the_cameo1_is_a_usb_machine_with_its_own_driver() {
+        let driver = HardwareBackendFactory.driver_for(CAMEO1).expect("cameo1 is registered");
+        assert_eq!(driver.profile().id, CAMEO1);
+        assert!(!takes_a_named_port(CAMEO1));
+        assert!(machine_ids().contains(&CAMEO1));
+    }
+
+    #[test]
+    fn a_usb_device_on_a_machine_nobody_registered_is_not_opened() {
+        let info = DeviceInfo {
+            instance_id: "usb:at:1:4".into(),
+            machine_id: "unknown".into(),
+            transport: TransportKind::Usb { locator: "1:4".into() },
+            candidate: false,
+            host: None,
+        };
+        assert!(matches!(HardwareBackendFactory.open_transport(&info), Err(TransportError::NotFound)));
     }
 }

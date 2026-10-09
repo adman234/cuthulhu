@@ -40,7 +40,7 @@ enum Command {
     Cut {
         /// SVG file to cut
         file: std::path::PathBuf,
-        /// Device id (cameo5, puma)
+        /// Device id (cameo5, cameo1, puma)
         #[arg(long)]
         device: String,
         /// Print the encoded bytes instead of sending them

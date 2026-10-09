@@ -187,6 +187,98 @@ pub fn builtin_presets() -> Vec<MaterialPreset> {
             },
             builtin: true,
         },
+        // Cameo 1 presets: the Silhouette media table's speed and force, which the Cameo 1's own
+        // firmware applies for the same media. No HTV row because that table has none; the pen
+        // row waits for a pen tool (it needs `FC0`, not the blade offset).
+        // [src: inkscape-silhouette silhouette/Graphtec.py L88-118 (GPL-2.0+)]
+        MaterialPreset {
+            id: "cameo1-vinyl-sticker".into(),
+            name: "Vinyl Sticker".into(),
+            machine_id: "cameo1".into(),
+            settings: PresetSettings {
+                speed: Some(5),
+                force: Some(10),
+                repeat_count: 1,
+            },
+            builtin: true,
+        },
+        MaterialPreset {
+            id: "cameo1-sticker-sheet".into(),
+            name: "Sticker Sheet".into(),
+            machine_id: "cameo1".into(),
+            settings: PresetSettings {
+                speed: Some(10),
+                force: Some(20),
+                repeat_count: 1,
+            },
+            builtin: true,
+        },
+        MaterialPreset {
+            id: "cameo1-print-paper-light".into(),
+            name: "Print Paper (Light)".into(),
+            machine_id: "cameo1".into(),
+            settings: PresetSettings {
+                speed: Some(10),
+                force: Some(5),
+                repeat_count: 1,
+            },
+            builtin: true,
+        },
+        MaterialPreset {
+            id: "cameo1-print-paper-medium".into(),
+            name: "Print Paper (Medium)".into(),
+            machine_id: "cameo1".into(),
+            settings: PresetSettings {
+                speed: Some(10),
+                force: Some(25),
+                repeat_count: 1,
+            },
+            builtin: true,
+        },
+        MaterialPreset {
+            id: "cameo1-cardstock".into(),
+            name: "Cardstock 40-60 lb".into(),
+            machine_id: "cameo1".into(),
+            settings: PresetSettings {
+                speed: Some(10),
+                force: Some(30),
+                repeat_count: 1,
+            },
+            builtin: true,
+        },
+        MaterialPreset {
+            id: "cameo1-thin-media".into(),
+            name: "Thin Media".into(),
+            machine_id: "cameo1".into(),
+            settings: PresetSettings {
+                speed: Some(10),
+                force: Some(2),
+                repeat_count: 1,
+            },
+            builtin: true,
+        },
+        MaterialPreset {
+            id: "cameo1-thick-media".into(),
+            name: "Thick Media".into(),
+            machine_id: "cameo1".into(),
+            settings: PresetSettings {
+                speed: Some(10),
+                force: Some(27),
+                repeat_count: 1,
+            },
+            builtin: true,
+        },
+        MaterialPreset {
+            id: "cameo1-magnetic-sheet".into(),
+            name: "Magnetic Sheet".into(),
+            machine_id: "cameo1".into(),
+            settings: PresetSettings {
+                speed: Some(3),
+                force: Some(30),
+                repeat_count: 1,
+            },
+            builtin: true,
+        },
         // Puma presets (panel-set: speed/force None)
         MaterialPreset {
             id: "puma-cardstock-medium".into(),
@@ -871,10 +963,10 @@ mod tests {
         assert!(cameo5_presets.len() >= 4, "cameo5 has < 4 presets");
         assert!(puma_presets.len() >= 4, "puma has < 4 presets");
 
-        // All should have machine_id in {cameo5, puma}
+        // All should name a machine this build knows
         for preset in &builtins {
             assert!(
-                preset.machine_id == "cameo5" || preset.machine_id == "puma",
+                ["cameo5", "cameo1", "puma"].contains(&preset.machine_id.as_str()),
                 "invalid machine_id: {}",
                 preset.machine_id
             );
@@ -923,6 +1015,20 @@ mod tests {
     fn default_presets_path_ends_with_cuthulhu_presets_json() {
         if let Some(path) = default_presets_path() {
             assert!(path.ends_with("cuthulhu/presets.json"));
+        }
+    }
+
+    /// The Cameo 1 tops out at speed 10. A builtin above it would be clamped by the driver,
+    /// so the preset would say one speed while the blade ran another.
+    #[test]
+    fn cameo1_builtins_stay_within_the_cameo1_speed_range() {
+        let cameo1: Vec<_> = builtin_presets().into_iter().filter(|p| p.machine_id == "cameo1").collect();
+        assert!(cameo1.len() >= 4, "cameo1 has < 4 presets");
+        for p in &cameo1 {
+            let speed = p.settings.speed.expect("a Cameo 1 preset sets speed");
+            assert!((1..=10).contains(&speed), "{} speed {speed}", p.id);
+            assert!(p.settings.force.is_some_and(|f| (1..=33).contains(&f)), "{}", p.id);
+            assert!(crate::preflight::preset_settings_out_of_range(&p.settings).is_none(), "{}", p.id);
         }
     }
 }

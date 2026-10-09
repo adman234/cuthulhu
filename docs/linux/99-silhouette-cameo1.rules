@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Let the logged-in user (and the plugdev group) open a Silhouette Cameo 1 without root.
+# Install:  sudo cp 99-silhouette-cameo1.rules /etc/udev/rules.d/
+#           sudo udevadm control --reload && sudo udevadm trigger
+# Then unplug and replug the cutter.
+# The kernel's usblp driver still binds it as a printer; Cuthulhu detaches it when it opens the
+# device, so no blacklist is needed.
+# [src: inkscape-silhouette silhouette-udev.rules (GPL-2.0+)]
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0b4d", ATTRS{idProduct}=="1121", MODE="0660", GROUP="plugdev", TAG+="uaccess"
