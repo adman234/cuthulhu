@@ -9,7 +9,7 @@ import { IDENTITY, compose, transformBounds } from "./render/affine";
 import { outermost, shapesUnder, toggleId } from "./interaction/marquee";
 import { AXIS, alignMoves, distributeBlock, distributeMoves, type AlignMode, type Axis, type Unit } from "./interaction/align";
 import type { Matrix } from "./interaction/transform";
-import { useCanvasInteraction, type CommitOutcome } from "./interaction/useCanvasInteraction";
+import { useCanvasInteraction, type CommitOutcome, type EditsLock } from "./interaction/useCanvasInteraction";
 import { viewMatrix, zoomPercent } from "./interaction/viewport";
 import { TopBar } from "./panels/TopBar";
 import { ToolRail } from "./panels/ToolRail";
@@ -165,10 +165,20 @@ export function App() {
   // have: as null, a transform's preview stayed up over that newer scene (Copilot on #301).
   const snapshotsAsked = useRef(0);
   const snapshotShown = useRef(0);
+  // Whether the last read of this document failed. After a load, edits stay locked until its
+  // snapshot renders; when that read fails nothing else will render one, so the lock says to Reload
+  // rather than that the document is still loading (silent-failure-hunter on #301).
+  const [readFailed, setReadFailed] = useState(false);
   const refresh = useCallback(async (): Promise<number | null> => {
     const gen = docGen.current;
     const asked = ++snapshotsAsked.current;
-    const json = (await ipc.snapshot()) as string;
+    let json: string;
+    try {
+      json = (await ipc.snapshot()) as string;
+    } catch (e) {
+      if (gen === docGen.current) setReadFailed(true);
+      throw e;
+    }
     if (gen !== docGen.current) return null;
     if (asked < snapshotShown.current) return revCounter.current;
     snapshotShown.current = asked;
@@ -176,6 +186,7 @@ export function App() {
     const rev = ++revCounter.current;
     setDoc(parsed);
     setDocRev(rev);
+    setReadFailed(false);
     return rev;
   }, []);
 
@@ -317,11 +328,40 @@ export function App() {
   // file first): a load waits for every edit started before it, or one could name the old root in
   // the new document (CodeRabbit on #301). `run` never rejects, so neither does the wait.
   const editsStarted = useRef(new Set<Promise<boolean>>());
-  const { editsLockedNow } = interaction;
+  const { editsLockNow } = interaction;
+  const lockReason = (lock: EditsLock) =>
+    lock === null ? null
+    : lock === "unread" && readFailed ? "the loaded document could not be read. Reload to try again"
+    : "waiting for the document to load";
+  // A refusal after the loaded document's read failed also reads it again: the lock lifts once a
+  // snapshot renders, so the next try can go through without a Reload.
+  const refuseEdit = useCallback(
+    (lock: "loading" | "unread") => {
+      if (lock === "loading" || !readFailed) {
+        setError("Not applied: the document is still loading");
+        return;
+      }
+      const refused = "Not applied: the loaded document could not be read. Reading it again";
+      setError(refused);
+      refresh().then(
+        (rev) => {
+          // Null: a newer load replaced the document meanwhile, and its own read speaks for it.
+          if (rev === null) return;
+          setError((shown) => (shown === refused ? "Not applied, but the loaded document is on screen now: try again" : shown));
+        },
+        (e) => {
+          const failed = `Not applied: the loaded document could not be read: ${ipc.ipcErrorMessage(e)}. Reload to try again`;
+          setError((shown) => (shown === refused ? failed : shown));
+        },
+      );
+    },
+    [readFailed, refresh, setError],
+  );
   const edit = useCallback(
     (fn: () => Promise<unknown>) => {
-      if (editsLockedNow()) {
-        setError("Not applied: the document is still loading");
+      const lock = editsLockNow();
+      if (lock !== null) {
+        refuseEdit(lock);
         return Promise.resolve(false);
       }
       const started = run(fn);
@@ -329,7 +369,7 @@ export function App() {
       void started.finally(() => editsStarted.current.delete(started));
       return started;
     },
-    [run, setError, editsLockedNow],
+    [run, refuseEdit, editsLockNow],
   );
 
   // Inside `replaceDocument`, which has locked edits by then, so nothing joins the set while it waits.
@@ -338,6 +378,7 @@ export function App() {
       await Promise.all(editsStarted.current);
       await ipc.loadProject({ path });
       docGen.current++;
+      setReadFailed(false);
     });
 
   const { repaint } = interaction;
@@ -603,7 +644,7 @@ export function App() {
           onChangeH={(v) => commitScale("h", v)}
           unitCount={unitCount}
           distributeBlocked={distributeBlocked}
-          editsLocked={interaction.editsLocked}
+          editsLocked={lockReason(interaction.editsLock)}
           onAlign={align}
           onDistribute={distribute}
           cutLineType={cutLineType}

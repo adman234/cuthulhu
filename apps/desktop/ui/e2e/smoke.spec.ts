@@ -4189,6 +4189,35 @@ test("Delete, Undo and the other document commands are refused while a document 
   await expect(page.getByTestId("layer-row")).toHaveCount(2);
 });
 
+test("an edit refused after a load whose read failed says so, reads it again, and unlocks", async ({ page }) => {
+  // After Reload loaded but its snapshot failed, every edit was refused as "still loading" until
+  // another Reload, which nothing said to do (silent-failure-hunter on #301).
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Save" }).click();
+  const failNextSnapshot = () =>
+    page.evaluate(() => (window as unknown as { __failNextSnapshot: () => void }).__failNextSnapshot());
+  await failNextSnapshot();
+  await page.getByRole("button", { name: "Reload" }).click(); // loads; its read fails
+  await expect(page.getByText("snapshot unavailable")).toBeVisible();
+
+  const centre = page.getByRole("button", { name: "Align horizontal centres" });
+  await page.getByTestId("layer-row").first().click();
+  await expect(centre).toBeDisabled();
+  await expect(centre).toHaveAttribute("title", /the loaded document could not be read\. Reload to try again/);
+
+  await failNextSnapshot(); // the re-read fails too
+  await page.keyboard.press("Delete");
+  await expect(page.getByText(/Not applied: the loaded document could not be read: snapshot unavailable\. Reload to try again/)).toBeVisible();
+  await expect(centre).toBeDisabled();
+
+  await page.keyboard.press("Delete"); // this re-read works
+  await expect(page.getByText(/Not applied, but the loaded document is on screen now/)).toBeVisible();
+  await expect(page.getByTestId("layer-row")).toHaveCount(2); // neither Delete went out
+  await page.getByTestId("layer-row").first().click();
+  await expect(centre).toBeEnabled();
+});
+
 test("a snapshot asked for before a later load never renders over it or lifts its lock", async ({ page }) => {
   // Copilot on #301: the lock lifted on any newer snapshot, so a first Reload's snapshot answering
   // after a second Reload had loaded showed the first document and unlocked edits on it, while the
@@ -4302,7 +4331,7 @@ test("after a load whose snapshot failed, edits on the old view are not sent", a
   // Locked, and saying why, rather than taking the click and dropping it (silent-failure-hunter).
   const centre = page.getByRole("button", { name: "Align horizontal centres" });
   await expect(centre).toBeDisabled();
-  await expect(centre).toHaveAttribute("title", /waiting for the document to load/);
+  await expect(centre).toHaveAttribute("title", /the loaded document could not be read/);
   await expect(page.getByLabel("X", { exact: true })).toBeDisabled();
   expect(await commitLog(page)).toEqual([]);
 });

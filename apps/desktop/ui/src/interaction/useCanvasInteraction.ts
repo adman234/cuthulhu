@@ -71,6 +71,9 @@ export type CommitOutcome = { kind: "refused" } | { kind: "applied"; snapshotRev
 /** Which property field a queued edit came from: edits to one field supersede each other. */
 export type PropertyField = "x" | "y" | "w" | "h";
 
+/** Why document edits are refused for now, or null; see `CanvasInteraction.editsLock`. */
+export type EditsLock = "loading" | "unread" | null;
+
 type Handlers = {
   onPointerEnter: () => void;
   onPointerDown: (e: PointerEvent<HTMLCanvasElement>) => void;
@@ -88,14 +91,15 @@ export type CanvasInteraction = {
   /** Draws the scene, selection and any live gesture. App calls it whenever the view, size, scene
    *  or selection changes, so those redraws cannot paint the committed scene over a gesture. */
   repaint: () => void;
-  /** True while Open or Reload loads, and after a successful one until the loaded document's
-   *  snapshot renders: an edit made meanwhile would be dropped, and after the load the canvas still
-   *  shows the old document. The panel disables its controls on it, so a click there does not vanish
-   *  without a word (silent-failure-hunter and Copilot on #301). */
-  editsLocked: boolean;
+  /** Set while Open or Reload loads ("loading"), and after a successful one until the loaded
+   *  document's snapshot renders ("unread"): an edit made meanwhile would be dropped, and after the
+   *  load the canvas still shows the old document. The panel disables its controls on it, so a click
+   *  there does not vanish without a word (silent-failure-hunter and Copilot on #301). The two are
+   *  told apart because "unread" outlasts a read that failed, and only a new read lifts it. */
+  editsLock: EditsLock;
   /** The same, read when called: a keypress or click handler runs between renders, and a load
    *  started since the last one has already locked edits. */
-  editsLockedNow: () => boolean;
+  editsLockNow: () => EditsLock;
   /** The geometry the canvas shows: an unread or in-flight commit's preview, else the committed
    *  scene. Anything that computes a transform from current positions must read this one. */
   effectiveScene: Scene;
@@ -175,7 +179,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
   const stale = () => loadedAtRev.current !== null && latest.current.sceneRev <= loadedAtRev.current;
   // Stable, since it reads only refs: App's key handler depends on it and would otherwise re-bind on
   // every render, which a pointer move causes.
-  const editsLockedNow = useCallback(() => replacing.current || stale(), []);
+  const editsLockNow = useCallback((): EditsLock => (replacing.current ? "loading" : stale() ? "unread" : null), []);
   // Property edits made while a commit is on the wire, in the order they were made.
   const queued = useRef(new Map<string, { make: (s: Scene, now: SendTime) => Move[]; at: number }>());
   const sendTime = (): SendTime => ({ expand: latest.current.expand, artboard: latest.current.artboard });
@@ -415,7 +419,7 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     // drops a snapshot asked for before it, so the first load's cannot lift `stale()` over it.
     if (replacing.current) throw new Error("another document is still loading");
     replacing.current = true;
-    // Rendered now, so the panel locks for the load (`editsLocked`) rather than when it ends.
+    // Rendered now, so the panel locks for the load (`editsLock`) rather than when it ends.
     previewChanged();
     // A drag still under the pointer is not a commit yet, so nothing below waits for it, and its
     // pointer-up would send the old ids and matrix into the loaded document (Copilot on #301).
@@ -627,8 +631,8 @@ export function useCanvasInteraction(args: CanvasInteractionArgs): CanvasInterac
     cursor: cursorScreen ? screenToWorld(view, cursorScreen) : null,
     requestFit,
     repaint,
-    editsLocked: replacing.current || stale(),
-    editsLockedNow,
+    editsLock: editsLockNow(),
+    editsLockNow,
     effectiveScene: gestureScene(pending.current, scene, sceneRev),
     transformWith,
     transformEach,

@@ -20,8 +20,8 @@ type Props = {
   onChangeW: (v: number) => void;
   onChangeH: (v: number) => void;
   unitCount: number;
-  /** See `CanvasInteraction.editsLocked`. */
-  editsLocked: boolean;
+  /** Why edits are refused for now, or null; see `CanvasInteraction.editsLock`. */
+  editsLocked: string | null;
   distributeBlocked: Record<Axis, DistributeBlock | null>;
   onAlign: (mode: AlignMode) => void;
   onDistribute: (axis: Axis) => void;
@@ -57,15 +57,15 @@ export function PropertiesPanel({ bounds, cutLineType, materialPreset, effective
       <div style={{ fontSize: 11, color: "var(--muted)", textTransform: "uppercase" }}>Properties</div>
       {bounds ? (
         <>
-          <NumberField label="X" value={bounds.x} disabled={editsLocked} onChange={onChangeX} />
-          <NumberField label="Y" value={bounds.y} disabled={editsLocked} onChange={onChangeY} />
-          <NumberField label="W" value={bounds.w} min={0} disabled={editsLocked} onChange={onChangeW} />
-          <NumberField label="H" value={bounds.h} min={0} disabled={editsLocked} onChange={onChangeH} />
+          <NumberField label="X" value={bounds.x} disabled={editsLocked !== null} onChange={onChangeX} />
+          <NumberField label="Y" value={bounds.y} disabled={editsLocked !== null} onChange={onChangeY} />
+          <NumberField label="W" value={bounds.w} min={0} disabled={editsLocked !== null} onChange={onChangeW} />
+          <NumberField label="H" value={bounds.h} min={0} disabled={editsLocked !== null} onChange={onChangeH} />
         </>
       ) : null}
       {/* Also outside it, since aligning is mostly for multi-node selections. Always shown, disabled
           when it cannot act, so the buttons do not jump the rows below them in and out. */}
-      <AlignRow unitCount={unitCount} locked={editsLocked ? "waiting for the document to load" : null} distributeBlocked={distributeBlocked} onAlign={onAlign} onDistribute={onDistribute} />
+      <AlignRow unitCount={unitCount} locked={editsLocked} distributeBlocked={distributeBlocked} onAlign={onAlign} onDistribute={onDistribute} />
       {/* Outside the `bounds` branch: `selectedBounds` is null for every multi-node selection
           and for a selected container (App.tsx), both of which do have a cuttability. */}
       {cutLineType !== null ? (

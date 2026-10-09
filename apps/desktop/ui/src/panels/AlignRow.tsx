@@ -5,7 +5,7 @@ import { AT, AXIS, type AlignMode, type Axis, type DistributeBlock } from "../in
 type Props = {
   /** Selected ids that move as a piece; see `outermost`. */
   unitCount: number;
-  /** Why every button is off for now, or null; see `CanvasInteraction.editsLocked`. */
+  /** Why every button is off for now, or null; see `CanvasInteraction.editsLock`. */
   locked: string | null;
   /** Per axis, from `distributeBlock`: why distribute cannot act there, or null. */
   distributeBlocked: Record<Axis, DistributeBlock | null>;
