@@ -8,8 +8,41 @@ pub mod manager;
 pub mod status;
 pub use status::{Actions, ByteProgress, CutStatus, Ended, PassPosition, Phase};
 
+/// `registration` is the frame the polylines are cut in: `None` is the machine's own origin, and
+/// `Some` is printed registration marks the machine must find first. It rides on every Job of a
+/// cut rather than on the session because a Job is what a Driver encodes — the offset applies to
+/// each Pass's coordinates — and `DeviceManager` refuses a cut whose Jobs disagree about it.
+/// Skipped when absent, so a Job that does not register serializes exactly as it did before the
+/// field existed: a Cut Host's dedupe digest and an older host's parser both see the same bytes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Job { pub polylines: Vec<Polyline>, pub settings: Settings }
+pub struct Job {
+    pub polylines: Vec<Polyline>,
+    pub settings: Settings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration: Option<Registration>,
+}
+
+impl Job {
+    /// A Job cut from the machine's own origin, which is every Job that is not print & cut.
+    pub fn new(polylines: Vec<Polyline>, settings: Settings) -> Job {
+        Job { polylines, settings, registration: None }
+    }
+}
+
+/// Where printed registration marks sit on the sheet, in millimetres from the Document's origin
+/// (the sheet's top-left corner): `origin` is the top-left square's top-left corner, and `width`
+/// and `length` are the distances from it to the corners of the top-right and bottom-left L's —
+/// the mark-to-mark distances the machine searches over.
+/// Once the machine has found them, the mark origin is the origin the Job's geometry is cut from.
+/// [src: inkscape-silhouette sendto_silhouette.py L852-855 (GPL-2.0+)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Registration {
+    pub origin_x_mm: f64,
+    pub origin_y_mm: f64,
+    pub width_mm: f64,
+    pub length_mm: f64,
+}
 
 /// What is in the tool holder for a Pass. A pen draws where a blade cuts, and the two need
 /// different corner handling: a blade's tip trails the holder's centre and is compensated for,
@@ -54,6 +87,11 @@ pub struct MachineCaps {
     pub supports_track_enhancing: bool,
     #[serde(default)]
     pub supports_pen: bool,
+    /// Whether the machine can find printed registration marks before cutting (print & cut).
+    /// Defaulted false so a Cut Host on an older build, which never heard of it, reads as a
+    /// machine that cannot — the refusal is the safe direction.
+    #[serde(default)]
+    pub supports_registration: bool,
 }
 
 fn default_speed_max() -> u32 { 30 }
@@ -70,6 +108,7 @@ impl Default for MachineCaps {
             speed_max: default_speed_max(),
             supports_track_enhancing: false,
             supports_pen: false,
+            supports_registration: false,
         }
     }
 }
@@ -79,10 +118,37 @@ pub enum DriverError { UnsupportedGeometry, Encode(String) }
 #[derive(Debug, PartialEq)]
 pub enum TransportError { NotFound, Disconnected, Timeout, WriteZero, Io(String) }
 
+/// One step of opening a cutting session.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SessionStep {
+    Send(Vec<u8>),
+    /// Wait for the machine to answer what the steps before this one sent, and fail the cut
+    /// unless the answer is `Expectation::reply`.
+    Expect(Expectation),
+}
+
+/// An answer a session cannot go on without — a machine reporting it has found the registration
+/// marks, say. `refusal` is the sentence an operator reads when the answer is something else or
+/// never comes, so it names what failed rather than how the bytes differed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Expectation {
+    pub reply: Vec<u8>,
+    pub timeout: Duration,
+    pub refusal: String,
+}
+
 pub trait Driver {
     fn profile(&self) -> &MachineProfile;
     fn caps(&self) -> MachineCaps;
     fn session_begin(&self) -> Vec<u8>;
+    /// The session's opening for a cut whose first Pass is `first`. Most sessions only send
+    /// `session_begin`; one that must ask the machine something before it may cut — whether it
+    /// has found the registration marks — splits its opening around an `Expect`. The default
+    /// exists so a Driver with nothing to ask need not know this method exists.
+    fn session_open(&self, first: &Job) -> Vec<SessionStep> {
+        let _ = first;
+        vec![SessionStep::Send(self.session_begin())]
+    }
     fn encode_pass(&self, pass: &Job) -> Result<Vec<u8>, DriverError>;
     fn pass_park(&self) -> Vec<u8>;
     /// Bytes that query device status for completion polling; the device replies
@@ -147,9 +213,27 @@ pub fn write_all(t: &mut dyn Transport, mut bytes: &[u8]) -> Result<(), Transpor
 /// caller that wants the whole Pass at once — `cuthulhu cut --dry-run` — concatenates
 /// them rather than restating when a prologue is owed.
 pub fn open_pass(d: &dyn Driver, job: &Job, index: usize) -> Result<Vec<u8>, DriverError> {
-    let mut bytes = if index == 0 { d.session_begin() } else { Vec::new() };
-    bytes.extend(d.encode_pass(job)?);
+    let mut bytes = Vec::new();
+    for step in open_pass_steps(d, job, index)? {
+        if let SessionStep::Send(b) = step { bytes.extend(b); }
+    }
     Ok(bytes)
+}
+
+/// `open_pass` with any answer the session waits for left in place, which is what
+/// `DeviceManager` runs. `open_pass` is these steps' bytes with the waits dropped, so a dry run
+/// shows every byte the machine is sent and nothing it is not.
+///
+/// The Pass's bytes join the opening's last `Send` rather than following it as a step of their
+/// own, so a session with nothing to ask is written in exactly the chunks it always was.
+pub fn open_pass_steps(d: &dyn Driver, job: &Job, index: usize) -> Result<Vec<SessionStep>, DriverError> {
+    let mut steps = if index == 0 { d.session_open(job) } else { Vec::new() };
+    let pass = d.encode_pass(job)?;
+    match steps.last_mut() {
+        Some(SessionStep::Send(bytes)) => bytes.extend(pass),
+        _ => steps.push(SessionStep::Send(pass)),
+    }
+    Ok(steps)
 }
 
 /// The bytes that close Pass `index` of `total`: park between Passes, end the
@@ -323,7 +407,7 @@ mod tests {
 
     #[test]
     fn only_the_first_pass_carries_the_session_prologue() {
-        let job = Job { polylines: Vec::new(), settings: Settings::default() };
+        let job = Job::new(Vec::new(), Settings::default());
         assert_eq!(open_pass(&FramingDriver, &job, 0).unwrap(), b"BEGINPASS0".to_vec());
         assert_eq!(open_pass(&FramingDriver, &job, 1).unwrap(), b"PASS0".to_vec());
     }
@@ -335,5 +419,50 @@ mod tests {
         // The boundary a caller gets wrong: a one-Pass job's only Pass is also its last,
         // so it must close rather than park.
         assert_eq!(close_pass(&FramingDriver, 0, 1), b"END".to_vec());
+    }
+
+    /// A Driver whose opening waits for an answer: the dry-run bytes are every byte sent, with
+    /// the wait dropped, and the Pass joins the opening's last write.
+    struct AskingDriver;
+    impl Driver for AskingDriver {
+        fn profile(&self) -> &MachineProfile { unreachable!() }
+        fn caps(&self) -> MachineCaps { unreachable!() }
+        fn session_begin(&self) -> Vec<u8> { b"BEGIN".to_vec() }
+        fn session_open(&self, _first: &Job) -> Vec<SessionStep> {
+            vec![
+                SessionStep::Send(b"ASK".to_vec()),
+                SessionStep::Expect(Expectation { reply: b"YES".to_vec(), timeout: Duration::from_secs(1), refusal: "no".into() }),
+                SessionStep::Send(b"AREA".to_vec()),
+            ]
+        }
+        fn encode_pass(&self, _pass: &Job) -> Result<Vec<u8>, DriverError> { Ok(b"PASS".to_vec()) }
+        fn pass_park(&self) -> Vec<u8> { Vec::new() }
+        fn session_end(&self) -> Vec<u8> { Vec::new() }
+        fn abort_bytes(&self) -> Option<Vec<u8>> { None }
+    }
+
+    #[test]
+    fn an_opening_that_waits_keeps_its_wait_out_of_the_bytes() {
+        let job = Job::new(Vec::new(), Settings::default());
+        assert_eq!(open_pass(&AskingDriver, &job, 0).unwrap(), b"ASKAREAPASS".to_vec());
+        let steps = open_pass_steps(&AskingDriver, &job, 0).unwrap();
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[2], SessionStep::Send(b"AREAPASS".to_vec()));
+        assert_eq!(open_pass_steps(&AskingDriver, &job, 1).unwrap(), vec![SessionStep::Send(b"PASS".to_vec())]);
+        // And the default opening is `session_begin`, in the same write as the Pass.
+        assert_eq!(open_pass_steps(&FramingDriver, &job, 0).unwrap(), vec![SessionStep::Send(b"BEGINPASS0".to_vec())]);
+    }
+
+    /// A Job that does not register serializes as it did before the field existed, so a Cut
+    /// Host's dedupe digest and an older host's parser see the same bytes.
+    #[test]
+    fn an_unregistered_job_serializes_without_the_field() {
+        let job = Job::new(Vec::new(), Settings::default());
+        let json = serde_json::to_string(&job).unwrap();
+        assert!(!json.contains("registration"), "{json}");
+        let back: Job = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, job);
+        let caps: MachineCaps = serde_json::from_str(r#"{"supportsSpeed":true,"supportsForce":true,"needsOperatorPassConfirm":false}"#).unwrap();
+        assert!(!caps.supports_registration, "a host that never heard of registration cannot do it");
     }
 }

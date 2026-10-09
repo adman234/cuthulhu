@@ -1343,6 +1343,9 @@ pub struct PlanCutResponse {
     pub skipped_not_cut: usize,
     pub doc_revision: String,
     pub travel: Vec<[f64; 4]>,
+    /// The marks this plan is cut against, so the dialog can say the cut is registered before
+    /// the machine goes looking for them.
+    pub registration: Option<driver_core::Registration>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1390,6 +1393,7 @@ pub fn plan_cut_response(doc: &document::Document, grouping: Grouping)
         skipped_not_cut: planned.skipped_not_cut,
         doc_revision: planned.doc_revision.to_string(),
         travel: travel.into_iter().map(|(a, b)| [a.x, a.y, b.x, b.y]).collect(),
+        registration: planned.registration,
     })
 }
 
@@ -1644,6 +1648,53 @@ mod tests {
         let mut after = before.clone();
         after.style = document::Style { stroke, fill };
         app.editor.doc.apply(document::Delta(vec![document::NodeOp::Update { id, before, after }]));
+    }
+
+    /// A Cameo-like test machine that can find registration marks, for the print & cut path.
+    struct RegisteringFactory;
+    impl DeviceBackendFactory for RegisteringFactory {
+        fn list_devices(&self) -> Vec<DeviceInfo> { vec![test_instance()] }
+        fn driver_for(&self, _machine_id: &str) -> Option<Box<dyn Driver + Send>> {
+            Some(Box::new(TestDriver {
+                profile: MachineProfile { id: "cameo5".into(), name: "Test Cameo".into(), width_mm: 500.0, height_mm: 500.0 },
+                caps: MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: true, supports_registration: true, ..Default::default() },
+            }))
+        }
+        fn open_transport(&self, _info: &DeviceInfo) -> Result<Box<dyn Transport>, TransportError> {
+            Ok(Box::new(driver_core::MockTransport::default()))
+        }
+    }
+
+    /// A document with Letter marks and one red rect inside them.
+    fn registered_doc() -> AppState {
+        let mut app = AppState::new();
+        app.add_registration_marks(document::RegistrationArea::for_paper(document::Paper::Letter)).unwrap();
+        add_stroked_rect(&mut app, RED, 50.0);
+        // Down inside the marks, whose top edge is 10 mm from the sheet's.
+        let id = *app.editor.doc.get(app.editor.doc.root).unwrap().children.last().unwrap();
+        app.commit_transform(vec![id], geometry::Affine::translate(0.0, 50.0)).unwrap();
+        app
+    }
+
+    /// The marks reach the Jobs through the one chokepoint, and the dialog's plan says so.
+    #[test]
+    fn a_registered_document_cuts_registered_passes() {
+        let app = registered_doc();
+        let (dev, _events) = DeviceManagerHandle::new(Arc::new(RegisteringFactory));
+        dev.connect(test_instance()).unwrap();
+        let plan = plan_for(&app);
+        assert_eq!(plan_cut_response(&app.editor.doc, Grouping::Color).unwrap().registration, plan.registration);
+        let (_, passes) = dev.prepare_cut(&app, request_from(plan)).unwrap();
+        let reg = passes[0].job.registration.expect("registered");
+        assert_eq!((reg.origin_x_mm, reg.origin_y_mm), (10.0, 10.0));
+    }
+
+    #[test]
+    fn a_registered_document_is_refused_on_a_machine_that_cannot_register() {
+        let app = registered_doc();
+        let dev = test_device_setup();
+        let err = dev.cut_from_request(&app, request_from(plan_for(&app))).unwrap_err();
+        assert_eq!(err.code, "registration_unsupported");
     }
 
     #[test]
@@ -2553,6 +2604,7 @@ mod tests {
                             geometry::Point { x: 0.0, y: 0.0 },
                         ]],
                         settings: driver_core::Settings::default(),
+                        registration: None,
                     },
                 }],
             )
@@ -2912,6 +2964,7 @@ mod tests {
                     geometry::Point { x: 0.0, y: 0.0 },
                 ]],
                 settings: driver_core::Settings::default(),
+                registration: None,
             },
         }]
     }

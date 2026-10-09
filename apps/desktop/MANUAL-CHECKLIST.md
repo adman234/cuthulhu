@@ -171,6 +171,25 @@ the device and the date it was verified on. The upstream PR for Cameo 1 support 
 - [ ] After a cancelled or failed Cameo 1 job, the media must be moved on by hand. No epilogue is sent,
       so no feed and no new origin. Confirm that nothing else is left in a bad state.
 
+### Print & cut (registration marks): Cameo 1
+Source-derived from inkscape-silhouette `Graphtec.py` L1535-1614 and `render_silhouette_regmarks.py`
+(`docs/protocol/silhouette-cameo1.md` § Registration marks). Nothing here has run on a machine.
+- [ ] "Export for printing…" on Letter and on A4 prints at 100 % with the 5 mm square 10 mm in from the
+      top-left corner and the L's 0.3 mm wide (measure them).
+- [ ] With the sheet loaded top-left at the origin, the cut sends `TB123,…` and the machine scans and
+      answers `    0`; the cut then runs and lines up with the print (within 0.5 mm at all four corners).
+- [ ] A sheet with no marks, or the square covered, fails with "the cutter could not find the
+      registration marks…" and cuts nothing.
+- [ ] The 40 s timeout is long enough for a full Letter / A4 scan on a Cameo 1.
+- [ ] The hardware margins (9 mm left, 1 mm top) are still added after registration, as inkscape-silhouette
+      adds them; if the cut is offset by exactly that, the margins must be dropped in registered mode.
+- [ ] The search window `TB123,…,origin-10,origin-10` finds marks set further in than the default 10 mm.
+- [ ] Cancel during the scan stops it; the machine is left idle, and Reconnect clears the cancelled state.
+- [ ] A shape running past the marks is refused in Preflight, and one inside is cut whole (the cutting
+      area after a scan, `Z<length>,<width>`, does not clip the far edge by the 9 mm margin).
+- [ ] After a registered job, an unregistered job on fresh media still starts from the media origin
+      (the regmark mode does not persist).
+
 ## Simple (LightBurn-style) shell — fork only, not yet verified in the real app
 
 Covered headless by vitest (`src/simple/*.test.ts`) and the e2e fake. These boxes are for the real

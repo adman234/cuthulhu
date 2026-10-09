@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use driver_core::{MachineProfile, MachineCaps, Settings};
+use driver_core::{MachineProfile, MachineCaps, Registration, Settings};
 use document::NodeId;
 use geometry::Point;
 use serde::Serialize;
@@ -23,6 +23,12 @@ pub enum PreflightError {
     SettingsOutOfRange(Cow<'static, str>),
     MachineMismatch { document: String, device: String },
     OutputTooLarge(usize),
+    /// Print & cut asked of a machine whose caps say it cannot find registration marks.
+    RegistrationUnsupported { machine: String },
+    /// A registered cut's geometry strays outside the marks, where the cutting area ends.
+    OutsideRegistration { node: NodeId },
+    /// Marks spread wider or longer than the machine can reach.
+    RegistrationTooLarge { bounds: (f64, f64) },
 }
 
 /// What each rule refused, in the words an operator reads. It lives next to the rules
@@ -53,6 +59,12 @@ impl std::fmt::Display for PreflightError {
             PreflightError::OutputTooLarge(bytes) =>
                 write!(f, "the encoded cut is about {} MB, over the {} MB limit",
                        bytes.div_ceil(1024 * 1024), MAX_ENCODED_BYTES / (1024 * 1024)),
+            PreflightError::RegistrationUnsupported { machine } =>
+                write!(f, "the {machine} cannot find registration marks; turn registration off to cut without them"),
+            PreflightError::OutsideRegistration { node } =>
+                write!(f, "shape #{} lies outside the registration marks, where a registered cut ends", node.0),
+            PreflightError::RegistrationTooLarge { bounds } =>
+                write!(f, "the registration marks are spread wider than the {} x {} mm cutting area", bounds.0, bounds.1),
         }
     }
 }
@@ -71,6 +83,9 @@ impl PreflightError {
             PreflightError::SettingsOutOfRange(_) => "settings_out_of_range",
             PreflightError::MachineMismatch { .. } => "machine_mismatch",
             PreflightError::OutputTooLarge(_) => "output_too_large",
+            PreflightError::RegistrationUnsupported { .. } => "registration_unsupported",
+            PreflightError::OutsideRegistration { .. } => "outside_registration",
+            PreflightError::RegistrationTooLarge { .. } => "registration_too_large",
         }
     }
 }
@@ -297,6 +312,42 @@ pub fn preflight(
         return Err(PreflightError::OutputTooLarge(estimated_size));
     }
 
+    Ok(())
+}
+
+/// The rules a registered cut adds, run after `preflight` so a cut that would be refused anyway
+/// is told the more basic reason first. Separate from `preflight` because only a registered cut
+/// has them, and every caller of that function would otherwise pass `None` to say so.
+///
+/// After the search the machine's cutting area is the marks' rectangle
+/// [src: inkscape-silhouette silhouette/Graphtec.py L1545-1547 (GPL-2.0+)], so a shape outside
+/// it would be clipped by the machine rather than cut where it was drawn; it is refused here
+/// instead, naming the shape. The escape hatch for the bed's bounds does not reach this rule:
+/// cutting past the marks is not a thing the machine will do on request.
+pub fn preflight_registration(
+    passes: &[ConfiguredPass],
+    registration: Option<&Registration>,
+    profile: &MachineProfile,
+    caps: &MachineCaps,
+) -> Result<(), PreflightError> {
+    let Some(reg) = registration else { return Ok(()) };
+    if !caps.supports_registration {
+        return Err(PreflightError::RegistrationUnsupported { machine: profile.name.clone() });
+    }
+    if reg.width_mm > profile.width_mm || reg.length_mm > profile.height_mm {
+        return Err(PreflightError::RegistrationTooLarge { bounds: (profile.width_mm, profile.height_mm) });
+    }
+    let (x0, y0) = (reg.origin_x_mm, reg.origin_y_mm);
+    let (x1, y1) = (x0 + reg.width_mm, y0 + reg.length_mm);
+    for pass in passes.iter().filter(|p| p.enabled) {
+        for shape in &pass.pass.shapes {
+            let outside = shape.polylines.iter().flatten()
+                .any(|p| p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1);
+            if outside {
+                return Err(PreflightError::OutsideRegistration { node: shape.node_id });
+            }
+        }
+    }
     Ok(())
 }
 

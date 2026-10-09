@@ -96,6 +96,13 @@ A cut requested against a Document that has since changed. Refused rather than c
 operator approved geometry that no longer exists.
 _Avoid_: revision mismatch, dirty document
 
+**Registration marks**:
+Marks printed with a design so a machine can find the printed sheet before cutting it (print &
+cut): a square and two L's at known corners, as `NoCut` Nodes of the Document. Their area is read
+off the marks themselves, and a registered cut's Jobs are cut from the marks' origin rather than
+the machine's.
+_Avoid_: regmarks (outside protocol notes), crop marks, alignment marks, fiducials
+
 ### Settings and materials
 
 **Settings**:

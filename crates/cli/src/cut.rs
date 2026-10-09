@@ -262,7 +262,7 @@ mod tests {
                 .iter()
                 .map(|key| cutplan::PlannedPass {
                     key: key.clone(),
-                    job: Job { polylines: vec![], settings: Settings::default() },
+                    job: Job { polylines: vec![], settings: Settings::default(), registration: None },
                 })
                 .collect(),
         }

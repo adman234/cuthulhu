@@ -54,6 +54,7 @@ pub fn square_pass() -> CutPass {
                 Point { x: 10.0, y: 10.0 }, Point { x: 0.0, y: 0.0 },
             ]],
             settings: Settings::default(),
+            registration: None,
         },
     }
 }

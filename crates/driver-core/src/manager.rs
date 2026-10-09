@@ -9,7 +9,7 @@
 //! for a worker parked at `recv()` — see `DeviceManager::cancel`.
 
 use crate::status::{status_of, CutStatus, Ended};
-use crate::{close_pass, open_pass, write_all, DeviceBackendFactory, DeviceInfo, Driver, Job, Transport, TransportError};
+use crate::{close_pass, open_pass, open_pass_steps, write_all, DeviceBackendFactory, DeviceInfo, Driver, Expectation, Job, SessionStep, Transport, TransportError};
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -380,15 +380,20 @@ enum TransmitOutcome {
 
 const WRITE_CHUNK: usize = 4096;
 
-/// Write `bytes` in `WRITE_CHUNK`-sized pieces, updating `Transmitting` state
-/// and emitting a `Progress` event after each chunk actually lands. Emits a
-/// single `StateChanged` event up front (not one per chunk) so listeners — the
-/// GUI, in particular — see the device enter `Phase::Sending` and can offer a
-/// cancel control for the whole pass. Checks `cancel_flag`
-/// before each chunk so a cancel mid-transmit stops promptly.
-fn transmit_bytes(
+/// Write the steps' bytes in `WRITE_CHUNK`-sized pieces, updating `Transmitting` state and
+/// emitting a `Progress` event after each chunk actually lands, and wait out each `Expect` where
+/// it falls. Emits a single `StateChanged` event up front (not one per chunk) so listeners — the
+/// GUI, in particular — see the device enter `Phase::Sending` and can offer a cancel control for
+/// the whole pass. Checks `cancel_flag` before each chunk and throughout each wait, so a cancel
+/// mid-transmit or mid-search stops promptly.
+///
+/// ponytail: a registration search reports as `Sending`, with the byte count standing still
+/// while the machine looks for its marks (up to the Expectation's timeout). A phase of its own
+/// would reach `CutStatus`, the Cut Host wire and both shells; add one if operators read the
+/// pause as a hang.
+fn transmit_steps(
     transport: &mut dyn Transport,
-    bytes: &[u8],
+    steps: &[SessionStep],
     job_id: u64,
     pass_index: usize,
     total_passes: usize,
@@ -396,25 +401,98 @@ fn transmit_bytes(
     rep: &Reporter,
     cancel_flag: &AtomicBool,
 ) -> Result<TransmitOutcome, DeviceError> {
-    let total_bytes = bytes.len();
+    let total_bytes: usize = steps.iter().map(|s| match s { SessionStep::Send(b) => b.len(), SessionStep::Expect(_) => 0 }).sum();
     let mut submitted_bytes = 0usize;
     let sending = DeviceState::Transmitting { job_id, pass_index, submitted_bytes, total_bytes };
     emit_for(job_id, state, sending, total_passes, rep);
-    for chunk in bytes.chunks(WRITE_CHUNK) {
-        if cancel_flag.load(Ordering::SeqCst) {
-            return Ok(TransmitOutcome::Cancelled { submitted_bytes });
+    for step in steps {
+        match step {
+            SessionStep::Send(bytes) => {
+                for chunk in bytes.chunks(WRITE_CHUNK) {
+                    if cancel_flag.load(Ordering::SeqCst) {
+                        return Ok(TransmitOutcome::Cancelled { submitted_bytes });
+                    }
+                    write_all(transport, chunk).map_err(DeviceError::from)?;
+                    submitted_bytes += chunk.len();
+                    *state = DeviceState::Transmitting { job_id, pass_index, submitted_bytes, total_bytes };
+                    rep.emit(
+                        state,
+                        total_passes,
+                        job_id,
+                        DeviceEventKind::Progress { pass_index, submitted_bytes, total_bytes },
+                    );
+                }
+            }
+            SessionStep::Expect(expectation) => {
+                if !await_reply(transport, expectation, cancel_flag)? {
+                    return Ok(TransmitOutcome::Cancelled { submitted_bytes });
+                }
+            }
         }
-        write_all(transport, chunk).map_err(DeviceError::from)?;
-        submitted_bytes += chunk.len();
-        *state = DeviceState::Transmitting { job_id, pass_index, submitted_bytes, total_bytes };
-        rep.emit(
-            state,
-            total_passes,
-            job_id,
-            DeviceEventKind::Progress { pass_index, submitted_bytes, total_bytes },
-        );
     }
     Ok(TransmitOutcome::Completed)
+}
+
+/// Throw away whatever the machine said before this session asked it anything. An answer is
+/// matched by its bytes alone, so a stale one — the "found" of a search that was cancelled before
+/// it replied — would otherwise be taken as this search's, and the job cut against marks the
+/// machine never looked for. Bounded, so a machine that never stops talking cannot hold the cut.
+fn drain_input(transport: &mut dyn Transport) -> Result<(), DeviceError> {
+    let mut buf = [0u8; 64];
+    for _ in 0..32 {
+        match transport.read(&mut buf, Duration::from_millis(50)) {
+            Ok(0) | Err(TransportError::Timeout) => return Ok(()),
+            Ok(_) => {}
+            Err(e) => return Err(DeviceError::from(e)),
+        }
+    }
+    Ok(())
+}
+
+/// Read until the machine's answer is complete — its first ETX, the GPGL terminator — and hold it
+/// against `expectation`. `Ok(false)` is a cancel observed while waiting.
+///
+/// Read in short slices rather than one read of the whole timeout, because a read cannot be
+/// interrupted: a registration search takes tens of seconds, and a cancel has to land inside it.
+/// A reply that never completes fails at the deadline with the Expectation's own sentence rather
+/// than `DeviceError::Timeout`: "took too long" would not tell an operator that it was the marks
+/// the machine could not find.
+fn await_reply(
+    transport: &mut dyn Transport,
+    expectation: &Expectation,
+    cancel_flag: &AtomicBool,
+) -> Result<bool, DeviceError> {
+    const ETX: u8 = 0x03;
+    let slice = Duration::from_millis(250);
+    let deadline = Instant::now() + expectation.timeout;
+    let mut reply: Vec<u8> = Vec::new();
+    loop {
+        if cancel_flag.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(DeviceError::Io(format!(
+                "{}: the cutter gave no answer within {} s",
+                expectation.refusal,
+                expectation.timeout.as_secs()
+            )));
+        }
+        let mut buf = [0u8; 64];
+        match transport.read(&mut buf, slice.min(deadline - now)) {
+            Ok(n) => reply.extend_from_slice(&buf[..n]),
+            Err(TransportError::Timeout) => {}
+            Err(e) => return Err(DeviceError::from(e)),
+        }
+        if let Some(end) = reply.iter().position(|&b| b == ETX) {
+            let answer = &reply[..=end];
+            if answer == expectation.reply.as_slice() {
+                return Ok(true);
+            }
+            let shown = String::from_utf8_lossy(&answer[..end]).trim().to_string();
+            return Err(DeviceError::Io(format!("{}: the cutter answered `{shown}`", expectation.refusal)));
+        }
+    }
 }
 
 /// Completion policy per brief/protocol doc: machines that can report status
@@ -538,20 +616,24 @@ fn run_from_pass(
     cancel_flag: &AtomicBool,
 ) -> Result<PassRunOutcome, DeviceError> {
     let total_passes = passes.len();
-    let bytes = open_pass(driver, &passes[pass_index].job, pass_index)
+    let steps = open_pass_steps(driver, &passes[pass_index].job, pass_index)
         // The one `Debug` rendering left in this file, and it is over a `DriverError`, which
         // neither production `Driver` constructs — both real `encode_pass` implementations end in
         // an unconditional `Ok`, so only a test fake reaches this. Giving that type a producer or
         // deleting it is #69's either/or; the wrapper keeps `Io`'s payload a sentence meanwhile.
         .map_err(|e| DeviceError::Io(format!("the cut could not be encoded for this cutter ({e:?})")))?;
-    match transmit_bytes(transport, &bytes, job_id, pass_index, total_passes, state, rep, cancel_flag)? {
+    let sent_bytes: usize = steps.iter().map(|s| match s { SessionStep::Send(b) => b.len(), SessionStep::Expect(_) => 0 }).sum();
+    if steps.iter().any(|s| matches!(s, SessionStep::Expect(_))) {
+        drain_input(transport)?;
+    }
+    match transmit_steps(transport, &steps, job_id, pass_index, total_passes, state, rep, cancel_flag)? {
         TransmitOutcome::Cancelled { submitted_bytes } => {
             return Ok(PassRunOutcome::Cancelled { pass_index, submitted_bytes });
         }
         TransmitOutcome::Completed => {}
     }
     match resolve_pass_completion(driver, transport, cancel_flag)? {
-        PassCompletion::Cancelled => Ok(PassRunOutcome::Cancelled { pass_index, submitted_bytes: bytes.len() }),
+        PassCompletion::Cancelled => Ok(PassRunOutcome::Cancelled { pass_index, submitted_bytes: sent_bytes }),
         PassCompletion::NeedsConfirm => {
             let awaiting = DeviceState::AwaitingCompletion { job_id, pass_index };
             emit_for(job_id, state, awaiting, total_passes, rep);
@@ -728,6 +810,20 @@ fn worker_loop(
                 }
                 if passes.is_empty() {
                     let _ = reply.send(Err(DeviceError::Io("this cut has no passes to send".into())));
+                    continue;
+                }
+                // Refused here as well as in Preflight, because a Cut Host runs this worker for a
+                // dispatch planned on another computer: a machine that cannot register would cut a
+                // print & cut job from its own origin, offset from the printed art by the margins.
+                // Jobs that disagree are a caller bug — the session registers once, from the first
+                // Pass, so a later Pass in another frame would be cut against the wrong marks.
+                let registration = passes[0].job.registration;
+                if registration.is_some() && !driver.as_deref().is_some_and(|d| d.caps().supports_registration) {
+                    let _ = reply.send(Err(DeviceError::Io("this cutter cannot find registration marks, so it cannot cut a print & cut job".into())));
+                    continue;
+                }
+                if passes.iter().any(|p| p.job.registration != registration) {
+                    let _ = reply.send(Err(DeviceError::Io("the passes of this cut disagree about the registration marks they are cut against".into())));
                     continue;
                 }
                 if matches!(state, DeviceState::Cancelled { .. }) {
@@ -1077,7 +1173,7 @@ mod tests {
         }
     }
 
-    fn empty_job() -> Job { Job { polylines: Vec::new(), settings: Settings::default() } }
+    fn empty_job() -> Job { Job::new(Vec::new(), Settings::default()) }
     fn one_pass_job() -> Vec<CutPass> { vec![CutPass { job: empty_job() }] }
     fn two_pass_job() -> Vec<CutPass> { vec![CutPass { job: empty_job() }, CutPass { job: empty_job() }] }
 
@@ -1917,5 +2013,191 @@ mod tests {
         // Cancelled is the resting state post-shutdown (no further Cut arrives to
         // lazily flip it back to Idle), and it reports how the job ended.
         assert!(evs.iter().any(|e| own(e) && e.status.ended == Some(Ended::Cancelled)));
+    }
+
+    // --- registration: a session that must be answered before it may cut ----------------
+
+    const FOUND: &[u8] = b"    0\x03";
+
+    /// A Driver whose opening waits for the marks, as the Cameo 1's does: search, expect
+    /// "found", then the rest of the opening. The bytes are placeholders so a test can say which
+    /// landed and in what order.
+    struct RegisteringDriver { caps: MachineCaps, timeout: Duration }
+    impl Driver for RegisteringDriver {
+        fn profile(&self) -> &MachineProfile { unreachable!("the worker does not read the profile") }
+        fn caps(&self) -> MachineCaps { self.caps }
+        fn session_begin(&self) -> Vec<u8> { b"BEGIN".to_vec() }
+        fn session_open(&self, first: &Job) -> Vec<SessionStep> {
+            if first.registration.is_none() { return vec![SessionStep::Send(self.session_begin())]; }
+            vec![
+                SessionStep::Send(b"SEARCH".to_vec()),
+                SessionStep::Expect(Expectation { reply: FOUND.to_vec(), timeout: self.timeout, refusal: "the marks were not found".into() }),
+                SessionStep::Send(b"AREA".to_vec()),
+            ]
+        }
+        fn encode_pass(&self, _pass: &Job) -> Result<Vec<u8>, DriverError> { Ok(b"PASS".to_vec()) }
+        fn pass_park(&self) -> Vec<u8> { Vec::new() }
+        fn session_end(&self) -> Vec<u8> { b"END".to_vec() }
+        fn abort_bytes(&self) -> Option<Vec<u8>> { None }
+    }
+
+    fn registering_caps() -> MachineCaps {
+        MachineCaps { supports_speed: true, supports_force: true, needs_operator_pass_confirm: false, supports_registration: true, ..Default::default() }
+    }
+
+    /// Reads are either scripted (`MockTransport`) or slow — each read waits a little and times
+    /// out, the way a machine still searching looks from here.
+    enum Reads { Scripted(Vec<Result<Vec<u8>, TransportError>>), Slow }
+    struct RegistrationTransport { inner: MockTransport, slow: bool, written: Arc<Mutex<Vec<u8>>> }
+    impl Transport for RegistrationTransport {
+        fn write(&mut self, b: &[u8]) -> Result<usize, TransportError> {
+            self.written.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, TransportError> {
+            if self.slow {
+                thread::sleep(timeout.min(Duration::from_millis(20)));
+                return Err(TransportError::Timeout);
+            }
+            self.inner.read(buf, timeout)
+        }
+    }
+    struct RegistrationFactory { caps: MachineCaps, timeout: Duration, reads: Mutex<Option<Reads>>, written: Arc<Mutex<Vec<u8>>> }
+    impl DeviceBackendFactory for RegistrationFactory {
+        fn list_devices(&self) -> Vec<DeviceInfo> { vec![cameo_info()] }
+        fn driver_for(&self, _machine_id: &str) -> Option<Box<dyn Driver + Send>> {
+            Some(Box::new(RegisteringDriver { caps: self.caps, timeout: self.timeout }))
+        }
+        fn open_transport(&self, _info: &DeviceInfo) -> Result<Box<dyn Transport>, TransportError> {
+            let (inner, slow) = match self.reads.lock().unwrap().take().expect("opened once") {
+                Reads::Scripted(r) => (MockTransport { reads: r.into_iter().collect(), ..Default::default() }, false),
+                Reads::Slow => (MockTransport::default(), true),
+            };
+            Ok(Box::new(RegistrationTransport { inner, slow, written: self.written.clone() }))
+        }
+    }
+    fn registration_rig(caps: MachineCaps, timeout: Duration, reads: Reads) -> (DeviceManager, mpsc::Receiver<DeviceEvent>, Arc<Mutex<Vec<u8>>>) {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let factory = RegistrationFactory { caps, timeout, reads: Mutex::new(Some(reads)), written: written.clone() };
+        let (mgr, events) = DeviceManager::spawn(Arc::new(factory));
+        mgr.connect(cameo_info()).unwrap();
+        (mgr, events, written)
+    }
+    fn registered_pass() -> CutPass {
+        let registration = Some(crate::Registration { origin_x_mm: 10.0, origin_y_mm: 10.0, width_mm: 180.0, length_mm: 250.0 });
+        CutPass { job: Job { polylines: Vec::new(), settings: Settings::default(), registration } }
+    }
+
+    /// Found: the opening goes out in its two halves either side of the answer, and the cut
+    /// runs to completion. The answer arrives split across reads, as a USB packet boundary can
+    /// leave it — the worker reads to the terminator, not one read's worth.
+    #[test]
+    fn found_marks_let_the_cut_run_on() {
+        // The leading timeout is the drain finding nothing stale.
+        let reads = Reads::Scripted(vec![Err(TransportError::Timeout), Ok(b"  ".to_vec()), Ok(b"  0\x03".to_vec()), Ok(b"0\x03".to_vec())]);
+        let (mgr, _events, written) = registration_rig(registering_caps(), Duration::from_secs(2), reads);
+        mgr.cut(vec![registered_pass()]).unwrap();
+        let status = wait_for_ended(&mgr, Ended::Completed);
+        assert_eq!(status.error, None);
+        let written = written.lock().unwrap().clone();
+        // The status poll after the pass (ESC ENQ by default) sits between PASS and END.
+        assert_eq!(written, [b"SEARCHAREAPASS".as_slice(), &[0x05], b"END"].concat());
+        mgr.shutdown();
+    }
+
+    /// Not found: the machine answers something else. The cut fails with the Driver's sentence
+    /// and what the machine said, and nothing after the search is sent — no cutting area, no
+    /// geometry, no end-of-job feed.
+    #[test]
+    fn marks_not_found_fail_the_cut_before_any_geometry() {
+        let reads = Reads::Scripted(vec![Err(TransportError::Timeout), Ok(b"    1\x03".to_vec())]);
+        let (mgr, _events, written) = registration_rig(registering_caps(), Duration::from_secs(2), reads);
+        let err = mgr.cut(vec![registered_pass()]).unwrap_err();
+        assert_eq!(err, DeviceError::Io("the marks were not found: the cutter answered `1`".into()));
+        assert_eq!(mgr.status().phase, Phase::Failed);
+        assert_eq!(*written.lock().unwrap(), b"SEARCH".to_vec());
+        mgr.shutdown();
+    }
+
+    /// No answer at all within the Expectation's timeout reads as not found, in words that say
+    /// so, rather than as a generic transport timeout.
+    #[test]
+    fn no_answer_within_the_timeout_fails_the_cut() {
+        let (mgr, _events, written) = registration_rig(registering_caps(), Duration::from_millis(200), Reads::Slow);
+        let started = Instant::now();
+        let err = mgr.cut(vec![registered_pass()]).unwrap_err();
+        assert!(started.elapsed() >= Duration::from_millis(200), "gave up before the timeout");
+        assert_eq!(err, DeviceError::Io("the marks were not found: the cutter gave no answer within 0 s".into()));
+        assert_eq!(*written.lock().unwrap(), b"SEARCH".to_vec());
+        mgr.shutdown();
+    }
+
+    /// A cancel lands while the machine is still searching, well before the timeout, and the
+    /// rest of the opening is never sent.
+    #[test]
+    fn cancel_during_the_search_stops_it() {
+        let (mgr, _events, written) = registration_rig(registering_caps(), Duration::from_secs(30), Reads::Slow);
+        let mgr = Arc::new(mgr);
+        let started = Instant::now();
+        // `cut` replies only once the job settles, so it waits on a thread of its own while this
+        // one cancels — `cancel` takes `&self` for exactly this.
+        let cutting = thread::spawn({
+            let mgr = mgr.clone();
+            move || mgr.cut(vec![registered_pass()])
+        });
+        // The search going out is what says the worker is now waiting for the answer.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while written.lock().unwrap().as_slice() != b"SEARCH" {
+            assert!(Instant::now() < deadline, "the search never went out");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(mgr.status().phase, Phase::Sending, "a search reports as sending");
+        mgr.cancel();
+        let result = cutting.join().unwrap();
+        assert!(result.is_ok(), "a cancel is not a failure: {result:?}");
+        assert!(started.elapsed() < Duration::from_secs(10), "the cancel waited out the search");
+        let status = mgr.status();
+        assert_eq!(status.ended, Some(Ended::Cancelled));
+        assert!(!status.actions.cut, "nothing confirmed the machine stopped, so no new cut is offered");
+        assert_eq!(*written.lock().unwrap(), [b"SEARCH".as_slice(), &[0x05, 0x05, 0x05]].concat(),
+            "nothing after the search, only the cancel's own status polls");
+        Arc::try_unwrap(mgr).ok().expect("the cutting thread has finished").shutdown();
+    }
+
+    /// A machine that cannot register refuses a registered cut outright — the Cut Host path,
+    /// where Preflight ran on another computer against another machine's caps.
+    #[test]
+    fn a_machine_without_registration_refuses_a_registered_cut() {
+        let caps = MachineCaps { supports_registration: false, ..registering_caps() };
+        let (mgr, _events, written) = registration_rig(caps, Duration::from_secs(2), Reads::Scripted(vec![]));
+        let err = mgr.cut(vec![registered_pass()]).unwrap_err();
+        assert_eq!(err, DeviceError::Io("this cutter cannot find registration marks, so it cannot cut a print & cut job".into()));
+        assert!(written.lock().unwrap().is_empty());
+        assert_eq!(mgr.status().phase, Phase::Idle, "a refused request leaves the machine as it was");
+        mgr.shutdown();
+    }
+
+    /// The session registers once, from the first Pass; a later Pass in another frame would be
+    /// cut against marks it was not planned for.
+    #[test]
+    fn passes_that_disagree_about_registration_are_refused() {
+        let (mgr, _events, written) = registration_rig(registering_caps(), Duration::from_secs(2), Reads::Scripted(vec![]));
+        let err = mgr.cut(vec![registered_pass(), CutPass { job: empty_job() }]).unwrap_err();
+        assert_eq!(err, DeviceError::Io("the passes of this cut disagree about the registration marks they are cut against".into()));
+        assert!(written.lock().unwrap().is_empty());
+        mgr.shutdown();
+    }
+
+    /// A "found" left over from an earlier, cancelled search is drained before this search is
+    /// sent, so it cannot answer for marks the machine has not looked for. Here the machine then
+    /// says nothing, and the job fails rather than cutting.
+    #[test]
+    fn a_stale_found_from_before_the_search_is_not_taken_as_its_answer() {
+        let reads = Reads::Scripted(vec![Ok(FOUND.to_vec()), Err(TransportError::Timeout)]);
+        let (mgr, _events, written) = registration_rig(registering_caps(), Duration::from_millis(100), reads);
+        let err = mgr.cut(vec![registered_pass()]).unwrap_err();
+        assert!(matches!(&err, DeviceError::Io(m) if m.contains("no answer")), "{err:?}");
+        assert_eq!(*written.lock().unwrap(), b"SEARCH".to_vec());
+        mgr.shutdown();
     }
 }

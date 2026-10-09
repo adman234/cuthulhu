@@ -23,6 +23,7 @@ import { CutDialog } from "./cut/CutDialog";
 import { TraceDialog } from "./trace/TraceDialog";
 import { TextDialog } from "./text/TextDialog";
 import { selectedText, type TextSource } from "./text/viewmodel";
+import { PrintCutDialog } from "./printcut/PrintCutDialog";
 import { SimpleDock } from "./simple/SimpleDock";
 import { ColorPalette } from "./simple/ColorPalette";
 import { readLayout, writeLayout, type Layout } from "./simple/layout";
@@ -188,6 +189,7 @@ export function App() {
   // Which text the dialog is for: a new one, or the Text node it is rewriting.
   const [textOpen, setTextOpen] = useState<null | "new" | TextSource>(null);
   const [shapeTool, setShapeTool] = useState<"offset" | "weed" | "copies" | "nest" | null>(null);
+  const [printCutOpen, setPrintCutOpen] = useState(false);
   const [tracePath, setTracePath] = useState<string | null>(null);
   const [status, setStatus] = useState<ipc.CutStatus>(ipc.DISCONNECTED_STATUS);
   /** The machine's material presets, for the properties panel's control. Loaded here rather
@@ -744,6 +746,7 @@ export function App() {
           onImportFile={onImportFile}
           onCut={() => setCutOpen(true)}
           onTrace={onTrace}
+          onPrintCut={() => setPrintCutOpen(true)}
           layout={layout}
           onToggleLayout={toggleLayout}
         />
@@ -819,6 +822,9 @@ export function App() {
           onError={setError}
           onClose={() => setCutOpen(false)}
         />
+      ) : null}
+      {printCutOpen ? (
+        <PrintCutDialog onChanged={refresh} onClose={() => setPrintCutOpen(false)} />
       ) : null}
       {tracePath !== null ? (
         <TraceDialog path={tracePath} onInsert={onTraceInsert} onClose={() => setTracePath(null)} />

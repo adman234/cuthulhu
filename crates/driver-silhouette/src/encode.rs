@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use crate::Model;
-use driver_core::{Driver, DriverError, Job, MachineCaps, MachineProfile, Tool};
+use driver_core::{Driver, DriverError, Expectation, Job, MachineCaps, MachineProfile, Registration, SessionStep, Tool};
 use std::cell::Cell;
+use std::time::Duration;
 
 /// Hardware margins of the Cameo 1, in mm: the carriage cannot reach the first 9 mm from the
 /// left, and the top millimetre is kept back so a reverse feed cannot run thin media off the
@@ -17,6 +18,27 @@ const CAMEO1_SPEED_MAX: u32 = 10;
 /// The 0.9 mm blade's offset, in device units — the circle the head turns on a corner so the
 /// trailing blade tip meets it. [src: inkscape-silhouette silhouette/Graphtec.py L1244-1259 (GPL-2.0+)]
 const CAMEO1_BLADE_OFFSET_SU: i64 = 18;
+
+/// The registration-mark setup inkscape-silhouette sends before a search: orientation, "use
+/// registration marks", mark type 2 (the Cameo/Portrait square-and-two-L layout), each L's arm
+/// length (400 SU = 20 mm) and its stroke (10 SU), then `TB55,1`, whose meaning nobody has
+/// documented. Sent verbatim rather than derived from the template, because these describe what
+/// the machine's sensor looks for and the source sends the same values whatever was printed.
+/// [src: inkscape-silhouette silhouette/Graphtec.py L1549-1555 (GPL-2.0+)]
+/// [src: inkscape-silhouette Commands.md L178-190 (GPL-2.0+)]
+const REGMARK_SETUP: [&str; 6] = ["TB50,0", "TB99", "TB52,2", "TB51,400", "TB53,10", "TB55,1"];
+
+/// How far before the marks the automatic search starts, in mm, so a sheet fed a little off still
+/// has its top-left square inside the window. [src: inkscape-silhouette silhouette/Graphtec.py L1558-1563 (GPL-2.0+)]
+const REGMARK_SEARCH_MARGIN_MM: f64 = 10.0;
+
+/// "Found": the reply to a successful search. Anything else, or nothing, means the marks were not
+/// found. [src: inkscape-silhouette silhouette/Graphtec.py L1574-1576 (GPL-2.0+)]
+const REGMARK_FOUND: &[u8] = b"    0\x03";
+
+/// How long the search may take. inkscape-silhouette reads with a 40 000 ms timeout (its comment
+/// says 20 s; the argument says 40). [src: inkscape-silhouette silhouette/Graphtec.py L1574 (GPL-2.0+)]
+const REGMARK_TIMEOUT: Duration = Duration::from_secs(40);
 
 pub struct SilhouetteDriver {
     profile: MachineProfile,
@@ -59,6 +81,33 @@ impl Default for SilhouetteDriver {
     fn default() -> Self { Self::new() }
 }
 
+impl SilhouetteDriver {
+    /// The opening every session shares: init, and on the Cameo 1 the pre-Cameo-3 setup —
+    /// portrait, no corner lift. Job-wide, so it is sent once rather than per Pass; speed, force,
+    /// blade offset and track enhancing follow per Pass, the order of the Silhouette Studio
+    /// captures recorded in inkscape-silhouette. Resets the feed, since a session starts here.
+    /// [src: inkscape-silhouette silhouette/Graphtec.py L1276-1301 (GPL-2.0+)]
+    /// [src: inkscape-silhouette Commands.md L410-443 (GPL-2.0+)]
+    fn session_setup(&self) -> Vec<u8> {
+        self.feed_su.set(0);
+        let mut out = vec![0x1b, 0x04]; // ESC EOT init
+        if self.model == Model::Cameo1 {
+            for cmd in ["FN0", "TB50,0", "FE0,0"] { push(cmd, &mut out); }
+        }
+        out
+    }
+}
+
+/// The Cameo 1's cutting area and plot mode, `bottom` and `right` in device units.
+/// [src: inkscape-silhouette silhouette/Graphtec.py L1604-1610 (GPL-2.0+)]
+fn cameo1_cutting_area(bottom: i64, right: i64) -> Vec<u8> {
+    let mut out = Vec::new();
+    for cmd in ["\\0,0", &format!("Z{bottom},{right}"), "L0", "FE0,0", "FF0,0,0"] {
+        push(cmd, &mut out);
+    }
+    out
+}
+
 fn su(mm: f64) -> i64 { (mm * 20.0).round() as i64 }   // 20 units/mm
 fn push(s: &str, out: &mut Vec<u8>) { out.extend_from_slice(s.as_bytes()); out.push(0x03); }
 
@@ -71,32 +120,61 @@ impl Driver for SilhouetteDriver {
             // ponytail: track enhancing and pen are offered on the Cameo 1 only, whose commands
             // (`FY0`, `FC0`) are sourced; the Cameo 5 dialect's equivalents carry a tool-holder
             // suffix nobody has captured yet.
+            // ponytail: registration is the Cameo 1's alone. The Cameo 5 Alpha searches four
+            // L-marks with `TB124` rather than `TB123` [src: inkscape-silhouette
+            // silhouette/Graphtec.py L258-261, L1359-1362, L1560-1561 (GPL-2.0+)], and nothing in
+            // this repo has checked that against its tool-suffixed dialect; offer it once a
+            // capture or a hardware run has.
             Model::Cameo1 => MachineCaps {
                 speed_max: CAMEO1_SPEED_MAX,
                 supports_track_enhancing: true,
                 supports_pen: true,
+                supports_registration: true,
                 ..base
             },
         }
     }
     fn session_begin(&self) -> Vec<u8> {
-        self.feed_su.set(0);
-        let mut out = vec![0x1b, 0x04]; // ESC EOT init
+        let mut out = self.session_setup();
         if self.model == Model::Cameo1 {
-            // The pre-Cameo-3 setup: portrait, no corner lift, then the cutting area and plot
-            // mode. Job-wide, so it is sent once rather than per Pass; speed, force, blade offset
-            // and track enhancing follow per Pass, the order of the Silhouette Studio captures
-            // recorded in inkscape-silhouette.
-            // [src: inkscape-silhouette silhouette/Graphtec.py L1276-1301, L1604-1610 (GPL-2.0+)]
-            // [src: inkscape-silhouette Commands.md L410-443 (GPL-2.0+)]
             let bottom = su(self.profile.height_mm + CAMEO1_MARGIN_TOP_MM);
             let right = su(self.profile.width_mm + CAMEO1_MARGIN_LEFT_MM);
-            for cmd in ["FN0", "TB50,0", "FE0,0", "\\0,0", &format!("Z{bottom},{right}"),
-                        "L0", "FE0,0", "FF0,0,0"] {
-                push(cmd, &mut out);
-            }
+            out.extend(cameo1_cutting_area(bottom, right));
         }
         out
+    }
+    /// With registration, the Cameo 1's opening is split around the search: setup, the mark
+    /// description and `TB123`, then a wait for "found", and only then the cutting area — which
+    /// is the marks' own rectangle, since after a search the machine's origin is the top-left
+    /// mark. [src: inkscape-silhouette silhouette/Graphtec.py L1535-1576, L1604-1610 (GPL-2.0+)]
+    ///
+    /// ponytail: automatic search (`TB123`) only. The manual variant (`TB23,h,w`, L1564-1566)
+    /// needs the operator to jog the head over the first mark, which neither shell can do.
+    fn session_open(&self, first: &Job) -> Vec<SessionStep> {
+        let (Model::Cameo1, Some(reg)) = (self.model, first.registration) else {
+            return vec![SessionStep::Send(self.session_begin())];
+        };
+        let mut search = self.session_setup();
+        for cmd in REGMARK_SETUP { push(cmd, &mut search); }
+        // `TB123,<length>,<width>,<top>,<left>`: the mark-to-mark distances, then where to start
+        // looking. [src: inkscape-silhouette silhouette/Graphtec.py L1355-1357, L1563 (GPL-2.0+)]
+        push(&format!("TB123,{},{},{},{}",
+            su(reg.length_mm), su(reg.width_mm),
+            su((reg.origin_y_mm - REGMARK_SEARCH_MARGIN_MM).max(0.0)),
+            su((reg.origin_x_mm - REGMARK_SEARCH_MARGIN_MM).max(0.0))), &mut search);
+        vec![
+            SessionStep::Send(search),
+            SessionStep::Expect(Expectation {
+                reply: REGMARK_FOUND.to_vec(),
+                timeout: REGMARK_TIMEOUT,
+                refusal: "the cutter could not find the registration marks — check they are printed \
+                          dark and sharp, the sheet is loaded square, and the top-left square is \
+                          uncovered".into(),
+            }),
+            // The cutting area shrinks to the marks', as the source's `height = reglength`,
+            // `width = regwidth` do. [src: inkscape-silhouette silhouette/Graphtec.py L1545-1547 (GPL-2.0+)]
+            SessionStep::Send(cameo1_cutting_area(su(reg.length_mm), su(reg.width_mm))),
+        ]
     }
     fn encode_pass(&self, pass: &Job) -> Result<Vec<u8>, DriverError> {
         let mut out: Vec<u8> = Vec::new();
@@ -126,6 +204,15 @@ impl Driver for SilhouetteDriver {
                 (su(CAMEO1_MARGIN_LEFT_MM), su(CAMEO1_MARGIN_TOP_MM))
             }
         };
+        // After a search the machine's origin is the top-left mark, so geometry is cut from the
+        // marks' origin rather than the sheet's; the hardware margins still apply on top, as the
+        // source adds them after subtracting the mark origin.
+        // [src: inkscape-silhouette silhouette/Graphtec.py L1535-1543, L1612-1614, L1433-1438 (GPL-2.0+)]
+        let (ox, oy) = match pass.registration {
+            Some(Registration { origin_x_mm, origin_y_mm, .. }) if self.model == Model::Cameo1 => (origin_x_mm, origin_y_mm),
+            Some(_) => return Err(DriverError::Encode("this Silhouette cannot cut against registration marks".into())),
+            None => (0.0, 0.0),
+        };
         let mut feed = self.feed_su.get();
         for _ in 0..pass.settings.repeat_count.max(1) {
             for poly in &pass.polylines {
@@ -133,9 +220,9 @@ impl Driver for SilhouetteDriver {
                 // that still pushed the end-of-job feed. [src: Graphtec.py L1443 (GPL-2.0+)]
                 if poly.len() < 2 { continue; }
                 let f = poly[0];                            // note (y,x) order
-                push(&format!("M{},{}", su(f.y) + dy, su(f.x) + dx), &mut out);
-                for p in &poly[1..] { push(&format!("D{},{}", su(p.y) + dy, su(p.x) + dx), &mut out); }
-                feed = poly.iter().map(|p| su(p.y) + dy).fold(feed, i64::max);
+                push(&format!("M{},{}", su(f.y - oy) + dy, su(f.x - ox) + dx), &mut out);
+                for p in &poly[1..] { push(&format!("D{},{}", su(p.y - oy) + dy, su(p.x - ox) + dx), &mut out); }
+                feed = poly.iter().map(|p| su(p.y - oy) + dy).fold(feed, i64::max);
             }
         }
         self.feed_su.set(feed);
@@ -187,7 +274,7 @@ mod tests {
     #[test]
     fn encodes_square_to_documented_gpgl_stream() {
         let d = SilhouetteDriver::new();
-        let job = Job { polylines: vec![square()], settings: Settings::default() };
+        let job = Job { polylines: vec![square()], settings: Settings::default(), registration: None };
         let mut bytes = d.session_begin();
         bytes.extend(d.encode_pass(&job).unwrap());
         bytes.extend(d.session_end());
@@ -203,7 +290,7 @@ mod tests {
     fn speed_and_force_emitted_only_when_set() {
         let d = SilhouetteDriver::new();
         let job = Job { polylines: vec![square()],
-            settings: Settings { speed: Some(10), force: Some(20), repeat_count: 1, ..Default::default() } };
+            settings: Settings { speed: Some(10), force: Some(20), repeat_count: 1, ..Default::default() }, registration: None };
         let s = String::from_utf8_lossy(&d.encode_pass(&job).unwrap()).to_string();
         assert!(s.contains("!10,1\u{3}") && s.contains("FX20,1\u{3}"));
     }
@@ -212,7 +299,7 @@ mod tests {
     fn session_framing_has_one_prologue_and_one_epilogue_across_two_passes() {
         let d = SilhouetteDriver::new();
         let job = |force| Job { polylines: vec![vec![Point{x:0.0,y:0.0}, Point{x:10.0,y:0.0}]],
-                                settings: Settings { speed: Some(5), force: Some(force), repeat_count: 1, ..Default::default() } };
+                                settings: Settings { speed: Some(5), force: Some(force), repeat_count: 1, ..Default::default() }, registration: None };
         let mut bytes = d.session_begin();
         bytes.extend(d.encode_pass(&job(10)).unwrap());
         bytes.extend(d.pass_park());
@@ -229,7 +316,7 @@ mod tests {
     fn single_pass_session_is_byte_identical_to_sp2_encoding() {
         let d = SilhouetteDriver::new();
         let job = Job { polylines: vec![vec![Point{x:1.0,y:2.0}, Point{x:3.0,y:4.0}]],
-                        settings: Settings { speed: Some(8), force: Some(12), repeat_count: 2, ..Default::default() } };
+                        settings: Settings { speed: Some(8), force: Some(12), repeat_count: 2, ..Default::default() }, registration: None };
         let mut session = d.session_begin();
         session.extend(d.encode_pass(&job).unwrap());
         session.extend(d.session_end());
@@ -265,7 +352,7 @@ mod tests {
     fn cameo1_encodes_square_to_documented_gpgl_stream() {
         let d = SilhouetteDriver::cameo1();
         let job = Job { polylines: vec![square()],
-            settings: Settings { speed: Some(5), force: Some(10), repeat_count: 1, ..Default::default() } };
+            settings: Settings { speed: Some(5), force: Some(10), repeat_count: 1, ..Default::default() }, registration: None };
         let mut bytes = d.session_begin();
         bytes.extend(d.encode_pass(&job).unwrap());
         bytes.extend(d.session_end());
@@ -283,7 +370,7 @@ mod tests {
     fn cameo1_has_one_tool_so_no_j_and_no_tool_suffix() {
         let d = SilhouetteDriver::cameo1();
         let job = Job { polylines: vec![square()],
-            settings: Settings { speed: Some(3), force: Some(20), repeat_count: 1, ..Default::default() } };
+            settings: Settings { speed: Some(3), force: Some(20), repeat_count: 1, ..Default::default() }, registration: None };
         let s = String::from_utf8_lossy(&d.encode_pass(&job).unwrap()).to_string();
         assert!(!s.contains('J'), "{s:?}");
         assert!(s.contains("!3\u{3}") && s.contains("FX20\u{3}"), "{s:?}");
@@ -295,7 +382,7 @@ mod tests {
     fn cameo1_speed_is_clamped_to_its_ceiling() {
         let d = SilhouetteDriver::cameo1();
         let job = Job { polylines: vec![square()],
-            settings: Settings { speed: Some(30), force: None, repeat_count: 1, ..Default::default() } };
+            settings: Settings { speed: Some(30), force: None, repeat_count: 1, ..Default::default() }, registration: None };
         let s = String::from_utf8_lossy(&d.encode_pass(&job).unwrap()).to_string();
         assert!(s.starts_with("!10\u{3}"), "{s:?}");
         assert!(!s.contains("FX"), "an unset force is left to the machine: {s:?}");
@@ -306,7 +393,7 @@ mod tests {
     #[test]
     fn cameo1_feeds_past_the_furthest_pass_not_the_last() {
         let d = SilhouetteDriver::cameo1();
-        let line = |y: f64| Job { polylines: vec![vec![Point{x:0.0,y}, Point{x:10.0,y}]], settings: Settings::default() };
+        let line = |y: f64| Job { polylines: vec![vec![Point{x:0.0,y}, Point{x:10.0,y}]], settings: Settings::default(), registration: None };
         let mut bytes = d.session_begin();
         bytes.extend(d.encode_pass(&line(100.0)).unwrap());
         bytes.extend(d.encode_pass(&line(10.0)).unwrap());
@@ -322,7 +409,7 @@ mod tests {
     #[test]
     fn cameo1_session_setup_is_sent_once_across_two_passes() {
         let d = SilhouetteDriver::cameo1();
-        let job = Job { polylines: vec![square()], settings: Settings::default() };
+        let job = Job { polylines: vec![square()], settings: Settings::default(), registration: None };
         let mut bytes = d.session_begin();
         bytes.extend(d.encode_pass(&job).unwrap());
         bytes.extend(d.pass_park());
@@ -348,7 +435,7 @@ mod tests {
     #[test]
     fn cameo5_stream_is_unchanged_by_the_cameo1_dialect() {
         let d = SilhouetteDriver::new();
-        let job = Job { polylines: vec![square()], settings: Settings::default() };
+        let job = Job { polylines: vec![square()], settings: Settings::default(), registration: None };
         let mut bytes = d.session_begin();
         bytes.extend(d.encode_pass(&job).unwrap());
         bytes.extend(d.session_end());
@@ -370,6 +457,7 @@ mod tests {
         let job = Job {
             polylines: vec![vec![Point{x:0.0,y:5.0}], vec![], vec![Point{x:0.0,y:0.0}, Point{x:10.0,y:0.0}]],
             settings: Settings { speed: None, force: None, repeat_count: 2, ..Default::default() },
+            registration: None,
         };
         let _ = d.session_begin();
         let s = String::from_utf8_lossy(&d.encode_pass(&job).unwrap()).to_string();
@@ -389,10 +477,10 @@ mod tests {
     fn cameo1_pen_drops_the_blade_offset_and_track_enhancing_is_per_pass() {
         let d = SilhouetteDriver::cameo1();
         let pen = Job { polylines: vec![square()],
-            settings: Settings { tool: Tool::Pen, track_enhancing: true, ..Settings::default() } };
+            settings: Settings { tool: Tool::Pen, track_enhancing: true, ..Settings::default() }, registration: None };
         let s = String::from_utf8_lossy(&d.encode_pass(&pen).unwrap()).to_string();
         assert!(s.starts_with("FC0\u{3}FY0\u{3}"), "{s:?}");
-        let blade = Job { polylines: vec![square()], settings: Settings::default() };
+        let blade = Job { polylines: vec![square()], settings: Settings::default(), registration: None };
         let s = String::from_utf8_lossy(&d.encode_pass(&blade).unwrap()).to_string();
         assert!(s.starts_with("FC18\u{3}FY1\u{3}"), "{s:?}");
     }
@@ -403,5 +491,82 @@ mod tests {
         assert_eq!((c1.speed_max, c1.supports_track_enhancing, c1.supports_pen), (10, true, true));
         let c5 = SilhouetteDriver::new().caps();
         assert_eq!((c5.speed_max, c5.supports_track_enhancing, c5.supports_pen), (30, false, false));
+    }
+
+    fn letter_marks() -> Registration {
+        // The template's Letter defaults: 10 mm in from each edge, mark to mark 195.9 x 259.4 mm.
+        Registration { origin_x_mm: 10.0, origin_y_mm: 10.0, width_mm: 195.9, length_mm: 259.4 }
+    }
+
+    fn steps_bytes(steps: &[SessionStep]) -> Vec<String> {
+        steps.iter().map(|s| match s {
+            SessionStep::Send(b) => String::from_utf8_lossy(b).to_string(),
+            SessionStep::Expect(e) => format!("<expect {:?} within {}s>", String::from_utf8_lossy(&e.reply), e.timeout.as_secs()),
+        }).collect()
+    }
+
+    /// The whole registered opening, pinned against inkscape-silhouette's: setup, the mark
+    /// description, an automatic search starting 10 mm before the marks, a wait for `    0`, then
+    /// a cutting area the size of the marks' rectangle.
+    #[test]
+    fn cameo1_registration_opening_is_the_documented_search() {
+        let d = SilhouetteDriver::cameo1();
+        let job = Job { polylines: vec![square()], settings: Settings::default(), registration: Some(letter_marks()) };
+        let steps = d.session_open(&job);
+        let mut search = vec![0x1b, 0x04];
+        // 259.4 mm = 5188 SU, 195.9 mm = 3918 SU; the search starts at 0 mm (10 - 10) both ways.
+        search.extend(gpgl(&["FN0", "TB50,0", "FE0,0",
+            "TB50,0", "TB99", "TB52,2", "TB51,400", "TB53,10", "TB55,1", "TB123,5188,3918,0,0"]));
+        let area = gpgl(&["\\0,0", "Z5188,3918", "L0", "FE0,0", "FF0,0,0"]);
+        assert_eq!(steps_bytes(&steps), vec![
+            String::from_utf8_lossy(&search).to_string(),
+            "<expect \"    0\\u{3}\" within 40s>".to_string(),
+            String::from_utf8_lossy(&area).to_string(),
+        ]);
+    }
+
+    #[test]
+    fn the_search_window_starts_ten_mm_before_marks_set_further_in() {
+        let d = SilhouetteDriver::cameo1();
+        let reg = Registration { origin_x_mm: 25.0, origin_y_mm: 30.0, width_mm: 100.0, length_mm: 150.0 };
+        let job = Job { polylines: vec![square()], settings: Settings::default(), registration: Some(reg) };
+        let SessionStep::Send(search) = &d.session_open(&job)[0] else { panic!("search is sent first") };
+        assert!(String::from_utf8_lossy(search).ends_with("TB123,3000,2000,400,300\u{3}"), "{:?}", String::from_utf8_lossy(search));
+    }
+
+    /// After the search the mark is the origin: a point at the mark's corner is cut at the
+    /// hardware margins (9 mm, 1 mm), and the end-of-job feed is measured in the same frame.
+    #[test]
+    fn cameo1_cuts_registered_geometry_from_the_mark_origin() {
+        let d = SilhouetteDriver::cameo1();
+        let at = |x: f64, y: f64| Point { x, y };
+        let job = Job {
+            polylines: vec![vec![at(10.0, 10.0), at(30.0, 10.0), at(30.0, 40.0)]],
+            settings: Settings::default(),
+            registration: Some(letter_marks()),
+        };
+        let _ = d.session_open(&job);
+        let s = String::from_utf8_lossy(&d.encode_pass(&job).unwrap()).to_string();
+        assert!(s.ends_with(&String::from_utf8_lossy(&gpgl(&["M20,180", "D20,580", "D620,580"])).to_string()), "{s:?}");
+        assert_eq!(d.session_end(), gpgl(&["M620,0", "SO0"]));
+    }
+
+    #[test]
+    fn an_unregistered_cameo1_opening_is_unchanged() {
+        let d = SilhouetteDriver::cameo1();
+        let job = Job { polylines: vec![square()], settings: Settings::default(), registration: None };
+        assert_eq!(d.session_open(&job), vec![SessionStep::Send(d.session_begin())]);
+    }
+
+    /// The Cameo 5's search is unsourced for its dialect, so it neither offers registration nor
+    /// encodes a registered Job as if it were not one.
+    #[test]
+    fn the_cameo5_refuses_a_registered_job() {
+        let d = SilhouetteDriver::new();
+        assert!(!d.caps().supports_registration);
+        assert!(SilhouetteDriver::cameo1().caps().supports_registration);
+        let job = Job { polylines: vec![square()], settings: Settings::default(), registration: Some(letter_marks()) };
+        assert!(matches!(d.encode_pass(&job), Err(DriverError::Encode(_))));
+        assert_eq!(d.session_open(&job), vec![SessionStep::Send(d.session_begin())]);
     }
 }

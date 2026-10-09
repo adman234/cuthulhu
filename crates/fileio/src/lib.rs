@@ -7,6 +7,8 @@ pub use import::import_svg;
 pub mod project;
 mod manifest;
 pub use project::{save_project, load_project};
+pub mod print;
+pub use print::{doc_to_print_svg, export_print_svg, PrintError};
 
 /// Minimal scene-tree → SVG serializer for the interchange `design.svg`.
 /// `manifest.json`'s versioned envelope (see `manifest`) is the source of truth on load;
@@ -46,7 +48,7 @@ fn walk_svg(doc: &Document, id: NodeId, parent_xf: &Affine, out: &mut String) {
 /// is how bare paths rendered as filled black blobs externally. Alpha rides in a separate
 /// `-opacity` attribute because `#RRGGBBAA` hex is SVG 2 and usvg's own import folds
 /// paint-opacity back into the RGBA hint, closing the round-trip.
-fn paint_attrs(name: &str, paint: Option<u32>) -> String {
+pub(crate) fn paint_attrs(name: &str, paint: Option<u32>) -> String {
     match paint {
         None => format!(" {name}=\"none\""),
         Some(rgba) => {
