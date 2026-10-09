@@ -3,4 +3,5 @@ pub mod state;
 pub mod ipc;
 pub mod device;
 pub mod hosts;
+pub mod settings;
 pub mod usage;

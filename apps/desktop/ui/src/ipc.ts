@@ -423,6 +423,26 @@ export async function pickCsvSavePath(): Promise<string | null> {
   return dialogSave({ defaultPath: "cuthulhu-usage.csv", filters: [{ name: "CSV", extensions: ["csv"] }] });
 }
 
+// --- where presets live (mirrors desktop::settings::PresetsLocation) ---
+
+export type PresetsLocation = { path: string; custom: boolean; defaultPath: string };
+
+export async function getPresetsLocation(): Promise<PresetsLocation> {
+  return invoke("get_presets_location", {});
+}
+
+/** A file, or a folder meaning `presets.json` inside it; `null` goes back to this computer's own
+ *  file. Refused with `presets_unreachable` when the folder is not there (an unmounted share). */
+export async function setPresetsLocation(path: string | null): Promise<PresetsLocation> {
+  return invoke("set_presets_location", { path });
+}
+
+/** A folder rather than a file, so a share that holds no presets yet can still be chosen. */
+export async function pickPresetsFolder(): Promise<string | null> {
+  const r = await dialogOpen({ directory: true, multiple: false, title: "Folder for the shared presets.json" });
+  return typeof r === "string" ? r : null;
+}
+
 const CUT_FILTER = [{ name: "cuthulhu project", extensions: ["cut"] }];
 
 export async function pickSavePath(): Promise<string | null> {

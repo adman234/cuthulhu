@@ -90,6 +90,20 @@ and settings, cut length and how it ended. Type a name in **Operator** in the cu
 remembered on that computer. **Usage log…** in the top bar lists recent jobs with totals per
 operator and per material, and **Export CSV…** saves the whole log for a spreadsheet.
 
+## 5. One set of material presets for every computer
+
+By default each computer keeps its own presets in `~/.config/cuthulhu/presets.json`. To share
+them, put the presets on a network share that every computer mounts at the same path (for
+example `/mnt/makerspace/cuthulhu/`), then on each computer open the cut dialog, connect a cutter,
+and under **Material presets** press **Change…** next to **Presets file** and choose that folder.
+The choice is saved in `~/.config/cuthulhu/settings.json`; **Use default** switches back.
+
+If the share is not mounted, the presets section and any cut that uses a preset say the presets
+file cannot be reached — mount the share, or press **Use default**. Cuthulhu never creates the
+folder itself, so an unmounted share is not silently replaced by a local copy. Two people saving
+a preset in the same second can still overwrite each other's change; edit presets from one
+computer at a time.
+
 ## Not supported yet
 
 Track enhancing, pen (sketch) mode, print & cut with registration marks, and media size presets

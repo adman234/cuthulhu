@@ -86,6 +86,8 @@ fn main() {
             ipc::settings_ranges,
             ipc::save_preset,
             ipc::delete_preset,
+            ipc::get_presets_location,
+            ipc::set_presets_location,
             ipc::usage_log,
             ipc::export_usage_csv,
             ipc::list_hosts,

@@ -468,6 +468,14 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
     cut_length_mm: number; outcome: "completed" | "cancelled" | "failed" | "unknown"; error: string | null;
   };
   const usage: UsageEntry[] = [];
+  // Where presets live, as `desktop::settings` reports it. `shareMounted` is the one fact about the
+  // network a test needs to change: an unmounted share is refused by name, never defaulted.
+  const DEFAULT_PRESETS = "/home/member/.config/cuthulhu/presets.json";
+  let presetsPath: string | null = null;
+  let shareMounted = true;
+  const presetsLocation = () => ({ path: presetsPath ?? DEFAULT_PRESETS, custom: presetsPath !== null, defaultPath: DEFAULT_PRESETS });
+  const unreachable = () => ipcError("presets_unreachable",
+    `the presets file ${presetsPath} cannot be reached (No such file or directory (os error 2)) — if it is on a network share, check the share is connected, or switch back to this computer's own presets`);
   let failNextResume = false;
   let failNextCut = false;
   let failNextPlan = false;
@@ -1026,6 +1034,7 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
         throw ipcError("presets_unreadable",
           "the presets file could not be read (Permission denied (os error 13))");
       }
+      if (presetsPath !== null && !shareMounted) throw unreachable();
       const list = effectivePresets(a.machineId as string);
       if (!holdingPresets) return list;
       // Executor form, like the parked plan and travel replies above: the UI's `lib` is older than
@@ -1039,6 +1048,23 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
       force: { min: 1, max: 33 },
       repeatCount: { min: 1, max: 10 },
     }),
+    // Mirrors `desktop::settings`: a folder means `presets.json` inside it, and a location whose
+    // folder is not there is refused before anything is saved.
+    get_presets_location: () => presetsLocation(),
+    set_presets_location: (a) => {
+      const path = a.path as string | null;
+      if (path === null) {
+        presetsPath = null;
+      } else {
+        if (!shareMounted) throw ipcError("presets_unreachable", `the presets file ${path} cannot be reached`);
+        presetsPath = path.endsWith(".json") ? path : `${path}/presets.json`;
+      }
+      return presetsLocation();
+    },
+    __test_unmount_share: () => {
+      shareMounted = false;
+      return null;
+    },
     usage_log: (a) => usage.slice().reverse().slice(0, a.limit as number),
     export_usage_csv: () => usage.length,
     // Every refusal `desktop::device::save_preset` makes, because the editor is what must never
@@ -1067,6 +1093,7 @@ function installMockTauri(opts?: { seedTwoColorRects?: boolean; failImagePreview
           throw ipcError("invalid_preset", `${field} must be ${range[field][0]}..=${range[field][1]}`);
         }
       }
+      if (presetsPath !== null && !shareMounted) throw unreachable();
       // Last, because the file is the last thing production touches: every refusal above is
       // decided without writing, so none of them may lose the race to a disk fault
       // (`what_a_preset_is_refuses_it_before_the_file_is_touched`). Production's own words and
@@ -2336,6 +2363,32 @@ test("the operator's name is remembered and sent with the cut, and the usage log
   await expect(dialog.getByRole("table", { name: "Totals by operator" })).toContainText("Ada");
   await dialog.getByLabel("Export CSV").click();
   await expect(dialog.getByRole("status")).toHaveText("Exported 1 job to /mock/cuthulhu-project.cut");
+});
+
+test("presets can be pointed at a shared folder, and an unmounted share says so with a way back", async ({ page }) => {
+  await page.addInitScript(installMockTauri, { seedTwoColorRects: true });
+  await page.goto("/");
+  await openDialogOnCameo(page);
+  await expect(page.getByTestId("presets-location")).toHaveText(
+    "/home/member/.config/cuthulhu/presets.json (this computer only)",
+  );
+  await expect(page.getByLabel("Use default presets file")).toHaveCount(0);
+
+  await page.getByLabel("Change presets file").click();
+  await expect(page.getByTestId("presets-location")).toContainText("/mnt/makerspace/cuthulhu/presets.json");
+  // The list is read again from the new file.
+  await expect(page.getByLabel("Preset to manage")).toBeVisible();
+
+  // The share goes away: the editor names the reason, and the location row stays to fix it.
+  await callFake(page, "__test_unmount_share");
+  await page.getByLabel("Close").click();
+  await page.getByRole("button", { name: "Cut" }).click();
+  await expect(page.getByText("Material presets are unavailable: the presets file /mnt/makerspace/cuthulhu/presets.json cannot be reached", { exact: false })).toBeVisible();
+  await page.getByLabel("Use default presets file").click();
+  await expect(page.getByTestId("presets-location")).toHaveText(
+    "/home/member/.config/cuthulhu/presets.json (this computer only)",
+  );
+  await expect(page.getByLabel("Preset to manage")).toBeVisible();
 });
 
 // Greptile's P1 on the fifth push: a replan that *fails* leaves the previous plan in force —

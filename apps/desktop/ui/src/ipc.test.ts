@@ -36,10 +36,10 @@ const declared: Record<string, string[]> = inventory;
 
 const observed = new Set<string>();
 
-// Five exports are not commands: three open the dialog plugin's own picker, and two only read a
+// Six exports are not commands: four open the dialog plugin's own picker, and two only read a
 // rejected value. Each must invoke nothing at all, which is as much a fact about the seam as the
 // others.
-const NOT_COMMANDS = ["pickSavePath", "pickOpenPath", "pickCsvSavePath", "ipcErrorCode", "ipcErrorMessage"];
+const NOT_COMMANDS = ["pickSavePath", "pickOpenPath", "pickCsvSavePath", "pickPresetsFolder", "ipcErrorCode", "ipcErrorMessage"];
 
 // A wrapper is named after the command it calls, so the pairing is derived rather than kept by hand
 // in what would be a fourth copy of the surface. Two wrappers cannot follow the rule: `delete` is a

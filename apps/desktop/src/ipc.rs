@@ -267,9 +267,9 @@ pub fn delete_preset(machine_id: String, id: String) -> Result<(), IpcError> {
     crate::device::delete_preset(&presets_path()?, &machine_id, &id)
 }
 
+/// The configured presets file — the default, or a shared one chosen with `set_presets_location`.
 fn presets_path() -> Result<PathBuf, IpcError> {
-    cutplan::presets::default_presets_path()
-        .ok_or_else(|| IpcError::new("no_config_dir", "cannot resolve presets file location"))
+    crate::settings::presets_path()
 }
 
 /// The newest `limit` cut jobs from the usage log, newest first.
@@ -282,6 +282,19 @@ pub fn usage_log(dev: tauri::State<DeviceManagerHandle>, limit: usize) -> Result
 #[tauri::command]
 pub fn export_usage_csv(dev: tauri::State<DeviceManagerHandle>, path: PathBuf) -> Result<usize, IpcError> {
     dev.export_usage_csv(&path)
+}
+
+/// Where presets are read and written, and whether that was chosen.
+#[tauri::command]
+pub fn get_presets_location() -> Result<crate::settings::PresetsLocation, IpcError> {
+    crate::settings::location()
+}
+
+/// Point every preset command and every cut at `path` (a file, or a folder meaning `presets.json`
+/// in it), or back at this computer's own file with `null`.
+#[tauri::command]
+pub fn set_presets_location(path: Option<PathBuf>) -> Result<crate::settings::PresetsLocation, IpcError> {
+    crate::settings::set_location(path)
 }
 
 // async: reads each paired host's connection in the same order `list_devices` dials them, so

@@ -4,10 +4,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use cut_host::client::HostClient;
-use cutplan::presets::{
-    default_presets_path, load_presets, resolve_settings, save_user_presets, MaterialPreset,
-    SettingsOverride,
-};
+use cutplan::presets::{load_presets, resolve_settings, save_user_presets, MaterialPreset, SettingsOverride};
 use cutplan::{plan_cut, plan_passes_with, DocumentPass, CutError, Grouping, PassKey, PassSelection, PlanOptions};
 use driver_core::manager::{CutPass, DeviceEvent, DeviceManager};
 use driver_core::{CutStatus, DeviceBackendFactory, DeviceInfo, HostId, MachineCaps};
@@ -1058,9 +1055,9 @@ impl DeviceManagerHandle {
         // operator's own string, so `my-vinyl` can exist for both a Puma and a Cameo.
         let enabled = || request.passes.iter().filter(|p| p.enabled);
         let presets: Vec<MaterialPreset> = if enabled().any(|p| p.preset_id.is_some()) {
-            let path = default_presets_path()
-                .ok_or_else(|| IpcError::new("no_config_dir", "cannot resolve presets file location"))?;
-            load_presets(&path)?
+            // The configured location, shared or not: a cut must read the presets the editor
+            // wrote, and an unreachable share refuses the cut rather than cutting with defaults.
+            load_presets(&crate::settings::presets_path()?)?
                 .into_iter()
                 .filter(|p| p.machine_id == connected.machine_id)
                 .collect()
@@ -1628,6 +1625,13 @@ pub fn save_preset(path: &Path, preset: MaterialPreset) -> Result<(), IpcError> 
         }
     }
 
+    // Re-read at the moment of writing, not from anything held, because the file may be shared by
+    // every computer in the room: what another one saved a minute ago is kept.
+    //
+    // ponytail: two computers saving within the same instant still race — both read, both rename,
+    // the second rename wins and the first edit is gone. The rename keeps the file whole, never
+    // half-written, so the cost is one lost edit, not a damaged file. A lock file beside it is
+    // the upgrade if a makerspace ever edits presets from several computers at once.
     let mut user = user_entries(path)?;
     user.retain(|p| (&p.machine_id, &p.id) != (&preset.machine_id, &preset.id));
     user.push(MaterialPreset { builtin: false, ..preset });

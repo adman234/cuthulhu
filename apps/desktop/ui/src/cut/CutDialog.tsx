@@ -7,6 +7,7 @@ import type { Scene } from "../render/hittest";
 import { CutPreview } from "./CutPreview";
 import { loadOperator, operatorForRequest, saveOperator } from "../operator";
 import { PresetEditor } from "./PresetEditor";
+import { PresetsLocationRow } from "./PresetsLocationRow";
 import {
   copyDraft,
   draftFault,
@@ -920,6 +921,18 @@ export function CutDialog({
             what is already stored is what a new entry's name and id have to avoid. Withheld
             outright when the ranges could not be read — an editor that cannot say what a legal
             force is would offer saves the cut path then refuses. */}
+        {/* Above the editor and outside its conditions: a share that cannot be reached is what
+            takes the editor away, and this row is the way back. A new location is a new list, so
+            the aim is renewed — the same reset a change of cutter makes — and read again. */}
+        {connected === null ? null : (
+          <PresetsLocationRow
+            guard={guardUnsaved}
+            disabled={presetBusy || aiming}
+            onChanged={() => {
+              void readPresets(aimPresetsAt(connected.machine_id), connected.machine_id);
+            }}
+          />
+        )}
         {connected === null ? null : rangesError !== null || presetListError !== null ? (
           <div style={{ fontSize: 12, color: "var(--cut)" }}>
             Material presets are unavailable: {rangesError ?? presetListError}
